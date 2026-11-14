@@ -262,9 +262,14 @@ Supervision based on process exit alone misses the most common real
 failure: a runtime **wedged** in native code (a C extension spinning, a
 deadlock) never crashes, so it never restarts.
 
-- The host sends `ping {seq}` every `PING_INTERVAL` (default 5s).
-  The runtime answers with a `pong {seq}` notification within
-  `PING_TIMEOUT` (default 10s).
+- The host sends `ping {seq}` every `PING_INTERVAL` (default 5s) through a
+  dedicated single-slot path the writer drains ahead of data, so a
+  saturated data lane cannot starve liveness and queued pings cannot
+  crowd out real control frames. Only a ping actually written to the
+  wire counts toward the miss accounting: one still waiting in the slot
+  behind a stalled writer is backpressure, not a miss. The runtime
+  answers with a `pong {seq}` notification within `PING_TIMEOUT`
+  (default 10s).
 - **Pongs are emitted by the reader thread, not the event loop.** A
   pong therefore proves the frame pipeline (and process) is alive —
   *not* that asyncio is making progress. Blocking code inside an
@@ -367,13 +372,24 @@ Call data and lifecycle events use different mechanisms:
   generation resolves `not_found` — it can never control a new task. The
   owner is always the Tauri-reported window label, never a JS-supplied
   argument. Destroying a window cancels all of its tasks.
-- **Control frames have their own lane.** `cancel`, `stream.credit`, and
+- **Control frames have their own lane.** `cancel`, `stream.credit` and
   `shutdown` are queued on a small dedicated channel the writer drains
   before data frames — a stream flood can fill the data lane but cannot
   starve or silently drop control; a failed queue send surfaces as an
-  explicit failure. Control can also *outrun* its call, so the runtime
+  explicit failure. `ping` is different again: a single latest-wins slot
+  drained ahead of everything, so repeated pings can never occupy the
+  finite control capacity that cancel/credit/shutdown need. Control can also *outrun* its call, so the runtime
   records cancels/credit for not-yet-registered task ids and applies
   them at registration.
+- **Runtime-side inbound bound.** The runtime counts data frames read
+  but not yet dispatched (`PYLAIR_IN_MAX`, default 4096); a data frame
+  over that bound is rejected with
+  `LIMIT_EXCEEDED{limit:"inbound_queue"}` if it carries a request id,
+  or dropped with a log line if not - the reader never waits, so a
+  control frame later in the pipe is never stuck behind queued data.
+  Inbound control (`cancel`, `stream.credit`, `shutdown`) always
+  enqueues and sorts ahead of queued data, so a flood cannot starve
+  the cancel that is meant to stop it.
 - `shutdown()` resolves to what cleanup achieved — `terminated` (grace
   window exit), `forced_kill` (tree confirmed dead after a hard kill),
   `incomplete` (kill sent, exit unconfirmed), or `unknown`.
@@ -426,6 +442,12 @@ platform:
   call is retried is the app's choice — the supervisor never replays
   calls (no idempotency guarantees in Python user code).
 - Graceful `shutdown` → `grace_ms` deadline → SIGTERM → 5s → SIGKILL.
+  The host sends `grace_ms` = its own kill grace minus ~1s (floored at
+  500 ms), so the runtime's drain always finishes before escalation.
+  The runtime treats `grace_ms` as ONE deadline shared across every
+  shutdown phase - stop accepting, task cancel, isolated-worker kill
+  waits, writer flush, close - never a fresh timeout per phase. A host
+  that sends no params gets the runtime's 5000 ms default.
 - Calls issued while the runtime is *restarting* (crash backoff) or
   *failed* fail fast with `RUNTIME_UNAVAILABLE`; calls issued while it is
   merely *starting* queue until the handshake completes.
@@ -458,7 +480,7 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 `LIMIT_EXCEEDED` errors carry `data: {"limit": "<name>", "max": <n>}`
 naming which cap fired — e.g. `"max_concurrent_tasks"`,
 `"stream_buffer_bytes"`, `"max_stream_credit"`, `"max_frame"`,
-`"max_depth"`. Clients
+`"max_depth"`, `"inbound_queue"`. Clients
 surface it as `LimitExceededError` with `.limit`/`.max`. Limits are
 enforced per runtime (not per window) on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the
