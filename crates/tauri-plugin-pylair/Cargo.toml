@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.10"
+version = "0.1.0-rc.11"
 description = "Tauri plugin: Python runtime supervisor, IPC bridge, and permissions for Pylair apps"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/PylairHQ/Pylair"
