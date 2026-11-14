@@ -25,9 +25,20 @@ jobs:
       # Input reaches the shell via env only — never ${{ }} inside run:.
       TAG: ${{ inputs.tag }}
     steps:
+      # The tag input also feeds `gh` below — same env-only rule, and
+      # constrain it to git-ref-safe characters before any use.
+      - name: Validate the tag input
+        shell: bash
+        run: |
+          if [[ "$TAG" == *$'\n'* || "$TAG" == *$'\r'* ]] || \
+             [[ ! "$TAG" =~ ^[A-Za-z0-9][-A-Za-z0-9._/]*$ ]]; then
+            echo "invalid tag input: '$TAG'"
+            exit 1
+          fi
+
       # Generate against the TAG's tree, not the dispatch-time main —
       # the SBOM must describe what the release shipped.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
 
@@ -37,12 +48,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      # Same pin as every other workflow — SBOM generation compiles
+      # crate metadata and should see the same rustc.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .nvmrc
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
 
       - name: Install Rust SBOM tool
         run: cargo install cargo-cyclonedx --locked --version 0.5.10

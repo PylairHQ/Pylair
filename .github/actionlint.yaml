@@ -1,0 +1,5 @@
+# actionlint's built-in label list predates GitHub's macos-15-intel
+# hosted runner — declare it so the acceptance-registry leg lints clean.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

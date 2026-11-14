@@ -271,6 +271,53 @@ async function fetchPython(
   return py;
 }
 
+/** uv export args: the lock's production set only. --no-emit-project
+ * drops the scaffold's own project entry — its source is staged by
+ * stageSource(), not installed as a package. */
+export function uvExportArgs(exported: string): string[] {
+  return [
+    "export",
+    "--frozen",
+    "--format",
+    "requirements-txt",
+    "--no-dev",
+    "--no-emit-project",
+    "-o",
+    exported,
+  ];
+}
+
+/** True when a requirements file carries any `--hash` entries.
+ * `\s` before `--hash` excludes a trailing comment mention. */
+export function requirementsHaveHashes(reqsText: string): boolean {
+  return /\s--hash=/.test(reqsText);
+}
+
+/** `uv pip install` args. `--require-hashes` is passed ONLY for the
+ * requirements.txt fallback: an exported lock legitimately mixes hashed
+ * registry deps with hash-less `file://` path deps, which the flag
+ * would reject — and individual `--hash` entries are verified without
+ * it anyway. */
+export function uvPipInstallArgs(
+  python: string,
+  target: string,
+  reqsFile: string,
+  requireHashes: boolean,
+): string[] {
+  const args = [
+    "pip",
+    "install",
+    "--python",
+    python,
+    "--target",
+    target,
+    "-r",
+    reqsFile,
+  ];
+  if (requireHashes) args.push("--require-hashes");
+  return args;
+}
+
 function stageEnv(resources: string, python: string, appDir: string, reqs: string, cacheDir: string) {
   const target = join(resources, "site-packages");
   rmSync(target, { recursive: true, force: true });
@@ -279,14 +326,13 @@ function stageEnv(resources: string, python: string, appDir: string, reqs: strin
   // fallback for projects that don't lock.
   const lock = join(appDir, "uv.lock");
   let reqsFile = reqs;
-  let exported: string | undefined;
+  let requireHashes = false;
   if (existsSync(lock)) {
-    exported = join(cacheDir, "requirements.exported.txt");
-    execFileSync(
-      "uv",
-      ["export", "--frozen", "--format", "requirements-txt", "-o", exported],
-      { cwd: appDir, stdio: "inherit" },
-    );
+    const exported = join(cacheDir, "requirements.exported.txt");
+    execFileSync("uv", uvExportArgs(exported), {
+      cwd: appDir,
+      stdio: "inherit",
+    });
     reqsFile = exported;
   } else if (!existsSync(reqs)) {
     console.log(`no uv.lock and no ${reqs} — bundling stdlib only`);
@@ -296,10 +342,11 @@ function stageEnv(resources: string, python: string, appDir: string, reqs: strin
       "warning: no uv.lock — building from requirements.txt; " +
         "the bundled env may drift from `pylair dev`'s env",
     );
+    requireHashes = requirementsHaveHashes(readFileSync(reqs, "utf-8"));
   }
   execFileSync(
     "uv",
-    ["pip", "install", "--python", python, "--target", target, "-r", reqsFile],
+    uvPipInstallArgs(python, target, reqsFile, requireHashes),
     { cwd: appDir, stdio: "inherit" },
   );
 }
