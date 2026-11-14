@@ -280,7 +280,9 @@ the bridge can starve other windows of the same runtime.
   the runtime drains and exits, killing its isolated workers first.
 - **Windows:** the runtime sits in a Job Object with
   `KILL_ON_JOB_CLOSE`; the kernel kills the whole tree when the last
-  handle closes. Fallback: `taskkill /T`.
+  handle closes. Fallback: `taskkill /T`. The runtime is assigned to the
+  job just after it is spawned, so a narrow gap exists; see
+  [design/windows-job-object-race.md](design/windows-job-object-race.md).
 - **Linux:** process-group kill plus `PR_SET_PDEATHSIG` on both the
   runtime and each worker — the kernel kills them even if the host dies
   before any cleanup runs.
