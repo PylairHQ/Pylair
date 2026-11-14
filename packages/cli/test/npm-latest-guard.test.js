@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { mayMoveLatest } from "../../scripts/npm-latest-guard.mjs";
+import { mayMoveLatest } from "../../../scripts/npm-latest-guard.mjs";
 
 describe("npm-latest-guard", () => {
   // While no stable exists on the registry, `latest` follows the newest

@@ -287,15 +287,22 @@ export function uvExportArgs(exported: string): string[] {
   ];
 }
 
-/** `uv pip install` args — `--require-hashes` only when the file
- * actually carries --hash entries. A plain requirements.txt has none
- * and would fail outright under the flag; an exported lock always has
- * them, so the flag enforces exactly what the lock guarantees. */
+/** True when a requirements file carries any `--hash` entries.
+ * `\s` before `--hash` excludes a trailing comment mention. */
+export function requirementsHaveHashes(reqsText: string): boolean {
+  return /\s--hash=/.test(reqsText);
+}
+
+/** `uv pip install` args. `--require-hashes` is passed ONLY for the
+ * requirements.txt fallback: an exported lock legitimately mixes hashed
+ * registry deps with hash-less `file://` path deps, which the flag
+ * would reject — and individual `--hash` entries are verified without
+ * it anyway. */
 export function uvPipInstallArgs(
   python: string,
   target: string,
   reqsFile: string,
-  reqsText: string,
+  requireHashes: boolean,
 ): string[] {
   const args = [
     "pip",
@@ -307,7 +314,7 @@ export function uvPipInstallArgs(
     "-r",
     reqsFile,
   ];
-  if (/\s--hash=/.test(reqsText)) args.push("--require-hashes");
+  if (requireHashes) args.push("--require-hashes");
   return args;
 }
 
@@ -319,6 +326,7 @@ function stageEnv(resources: string, python: string, appDir: string, reqs: strin
   // fallback for projects that don't lock.
   const lock = join(appDir, "uv.lock");
   let reqsFile = reqs;
+  let requireHashes = false;
   if (existsSync(lock)) {
     const exported = join(cacheDir, "requirements.exported.txt");
     execFileSync("uv", uvExportArgs(exported), {
@@ -334,10 +342,11 @@ function stageEnv(resources: string, python: string, appDir: string, reqs: strin
       "warning: no uv.lock — building from requirements.txt; " +
         "the bundled env may drift from `pylair dev`'s env",
     );
+    requireHashes = requirementsHaveHashes(readFileSync(reqs, "utf-8"));
   }
   execFileSync(
     "uv",
-    uvPipInstallArgs(python, target, reqsFile, readFileSync(reqsFile, "utf-8")),
+    uvPipInstallArgs(python, target, reqsFile, requireHashes),
     { cwd: appDir, stdio: "inherit" },
   );
 }

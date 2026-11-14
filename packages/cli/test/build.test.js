@@ -9,7 +9,7 @@ import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
 import { matchGlob } from "../dist/glob.js";
-import { stageNotices, download, ensureTarball, uvExportArgs, uvPipInstallArgs, PYC_INVALIDATION_MODE } from "../dist/build.js";
+import { stageNotices, download, ensureTarball, uvExportArgs, uvPipInstallArgs, requirementsHaveHashes, PYC_INVALIDATION_MODE } from "../dist/build.js";
 import { DEFAULT_PRUNE, prune } from "../dist/prune.js";
 import { loadConfig } from "../dist/config.js";
 
@@ -612,9 +612,15 @@ describe("uv export / pip-install flags", () => {
   test("--require-hashes only when the file carries --hash entries", () => {
     const hashed = "flask==3.0.0 \\n    --hash=sha256:abcdef\n";
     const plain = "flask==3.0.0\nrequests>=2\n";
-    const a = uvPipInstallArgs("python3", "/t", "/r/r.txt", hashed);
-    assert.ok(a.includes("--require-hashes"));
-    const b = uvPipInstallArgs("python3", "/t", "/r/r.txt", plain);
-    assert.ok(!b.includes("--require-hashes"));
+    assert.ok(requirementsHaveHashes(hashed));
+    assert.ok(!requirementsHaveHashes(plain));
+    // A file's hash mention inside a comment does not count.
+    assert.ok(!requirementsHaveHashes("flask==3.0.0  # pinned, see --hash\n"));
+    // The exported-lock path mixes hashed deps with hash-less file://
+    // path deps — require-hashes=false keeps them installable.
+    const exported = uvPipInstallArgs("python3", "/t", "/r/r.exported.txt", false);
+    assert.ok(!exported.includes("--require-hashes"));
+    const fallback = uvPipInstallArgs("python3", "/t", "/r/r.txt", true);
+    assert.ok(fallback.includes("--require-hashes"));
   });
 });
