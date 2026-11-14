@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import itertools
 import os
 import queue
 import sys
@@ -46,10 +47,26 @@ OUT_MAX_FRAMES = int(
     )
 )
 OUT_MAX_BYTES = int(os.environ.get("PYLAIR_OUT_MAX_BYTES", str(64 * 1024 * 1024)))
-# Inbound bound: the reader stops pulling frames when the loop falls this
-# far behind — backpressure travels through the OS pipe to the host's own
-# bounded writer lane, so nothing here grows without bound either.
+# Inbound bound (RC.8A): the reader NEVER waits. The bound counts data
+# frames read but not yet dispatched - `_in_read` minus `_in_done` -
+# because a `call_soon_threadsafe` put still parked on the wedged loop is
+# invisible to `Queue.qsize()`. Each counter has exactly one writer:
+# `_in_read` is incremented only on the reader thread, `_in_done` only on
+# the loop at dispatch, so a single `+=` per side needs no lock and can
+# never lose an update the way one shared `+=`/`-=` counter could. The
+# reader may see a slightly stale `_in_done`, which only makes the bound
+# a touch conservative, never permissive. A data frame over the bound is
+# rejected (or dropped) on the spot, so a loop that falls behind cannot
+# grow memory and a control frame later in the pipe is never stuck behind
+# a sleeping reader. Dispatch order is a priority queue: 0 = control,
+# 1 = data, 2 = _EOF. Control sorts ahead of queued data so a flood never
+# delays a cancel/shutdown behind the backlog, and _EOF sorts after every
+# received frame so stdin close can never preempt work that is already
+# here.
 IN_MAX = int(os.environ.get("PYLAIR_IN_MAX", "4096"))
+# Requests and notifications that must reach dispatch even under a data
+# flood. `ping` never reaches the queue — it is answered in the reader.
+_CONTROL_METHODS = frozenset({"cancel", "stream.credit", "shutdown"})
 
 
 def _log(msg: str) -> None:
@@ -109,8 +126,17 @@ class Server:
     def __init__(self, channel: FrameChannel) -> None:
         self._channel = channel
         self._out = _BoundedOut(OUT_MAX_FRAMES, OUT_MAX_BYTES)
-        self._in: asyncio.Queue = asyncio.Queue()
+        # Priority queue of (prio, seq, msg): control (0) always ahead of
+        # data (1); seq keeps FIFO inside a class since dicts don't
+        # compare. The data bound lives in the reader, not here.
+        self._in: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self._in_seq = itertools.count()
         self._in_max = IN_MAX
+        # Data frames read but not yet dispatched. `_in_read` is written
+        # only by the reader thread, `_in_done` only by the loop - each
+        # counter has a single writer, so no lock is needed.
+        self._in_read = 0
+        self._in_done = 0
         self._tasks = TaskRegistry(self._send)
         self._stopping = False
         self._out_full = False
@@ -185,7 +211,9 @@ class Server:
                 )
             loop = self._loop
             if loop is not None:
-                loop.call_soon_threadsafe(self._in.put_nowait, _EOF)
+                loop.call_soon_threadsafe(
+                    self._in.put_nowait, (2, next(self._in_seq), _EOF)
+                )
 
     # ---- io threads --------------------------------------------------------
 
@@ -209,7 +237,9 @@ class Server:
             while True:
                 body = self._channel.read_frame()
                 if body is None:
-                    loop.call_soon_threadsafe(self._in.put_nowait, _EOF)
+                    loop.call_soon_threadsafe(
+                        self._in.put_nowait, (2, next(self._in_seq), _EOF)
+                    )
                     return
                 try:
                     msg = _json.loads(body)
@@ -235,17 +265,44 @@ class Server:
                         )
                     )
                     continue
-                # Inbound bound (RC.8A): if the loop is behind, stop pulling
-                # frames — the OS pipe backs up to the host's own bounded
-                # writer, so the queue can't grow without limit.
-                while self._in.qsize() >= self._in_max:
-                    time.sleep(0.001)
-                loop.call_soon_threadsafe(self._in.put_nowait, msg)
+                # Inbound bound: control enqueues ahead of queued data;
+                # data beyond IN_MAX is rejected or dropped — the reader
+                # never waits, so control later in the pipe is never
+                # stuck behind data (see the IN_MAX comment).
+                method = msg.get("method") if isinstance(msg, dict) else None
+                if method in _CONTROL_METHODS:
+                    prio = 0
+                elif self._in_read - self._in_done < self._in_max:
+                    self._in_read += 1
+                    prio = 1
+                else:
+                    rid = msg.get("id") if isinstance(msg, dict) else None
+                    if isinstance(rid, (int, str)):
+                        self._send(
+                            proto.error_response(
+                                rid,
+                                proto.LIMIT_EXCEEDED,
+                                "inbound queue full — loop is behind",
+                                {"limit": "inbound_queue", "max": self._in_max},
+                            )
+                        )
+                    else:
+                        _log(
+                            f"inbound queue full ({self._in_max}) — dropping data frame"
+                        )
+                    continue
+                loop.call_soon_threadsafe(
+                    self._in.put_nowait, (prio, next(self._in_seq), msg)
+                )
         except FrameTooLarge as e:
             _log(f"protocol violation: {e} — treating host as gone")
-            loop.call_soon_threadsafe(self._in.put_nowait, _EOF)
+            loop.call_soon_threadsafe(
+                self._in.put_nowait, (2, next(self._in_seq), _EOF)
+            )
         except OSError:
-            loop.call_soon_threadsafe(self._in.put_nowait, _EOF)
+            loop.call_soon_threadsafe(
+                self._in.put_nowait, (2, next(self._in_seq), _EOF)
+            )
 
     # ---- dispatch ----------------------------------------------------------
 
@@ -331,6 +388,29 @@ class Server:
                 # the writer flush/close all draw from it.
                 self._deadline = time.monotonic() + grace
                 self._tasks.deadline = self._deadline
+                # Shutdown may have jumped ahead of frames already
+                # received: those calls never registered, so cancel_all
+                # cannot reach them - answer each one here or its
+                # terminal is silently lost.
+                while not self._in.empty():
+                    p, _, pending = self._in.get_nowait()
+                    if p == 1:
+                        self._in_done += 1
+                    if pending is _EOF or not isinstance(pending, dict):
+                        continue
+                    pid = pending.get("id")
+                    if pid is None:
+                        continue
+                    if pending.get("method") == "cancel":
+                        self._send(proto.response(pid, {"cancelled": True}))
+                    else:
+                        self._send(
+                            proto.error_response(
+                                pid,
+                                proto.TASK_CANCELLED,
+                                "runtime shutting down",
+                            )
+                        )
                 await self._drain()
             elif method == "stream.credit":  # tolerate request-shaped credit
                 self._send(
@@ -469,7 +549,9 @@ class Server:
         beat = asyncio.create_task(self._loop_heartbeat())
 
         while not self._stopping:
-            msg = await self._in.get()
+            prio, _, msg = await self._in.get()
+            if prio == 1:
+                self._in_done += 1
             if msg is _EOF:
                 _log("stdin EOF — host gone, draining")
                 break

@@ -381,6 +381,15 @@ Call data and lifecycle events use different mechanisms:
   finite control capacity that cancel/credit/shutdown need. Control can also *outrun* its call, so the runtime
   records cancels/credit for not-yet-registered task ids and applies
   them at registration.
+- **Runtime-side inbound bound.** The runtime counts data frames read
+  but not yet dispatched (`PYLAIR_IN_MAX`, default 4096); a data frame
+  over that bound is rejected with
+  `LIMIT_EXCEEDED{limit:"inbound_queue"}` if it carries a request id,
+  or dropped with a log line if not — the reader never waits, so a
+  control frame later in the pipe is never stuck behind queued data.
+  Inbound control (`cancel`, `stream.credit`, `shutdown`) always
+  enqueues and sorts ahead of queued data, so a flood cannot starve
+  the cancel that is meant to stop it.
 - `shutdown()` resolves to what cleanup achieved — `terminated` (grace
   window exit), `forced_kill` (tree confirmed dead after a hard kill),
   `incomplete` (kill sent, exit unconfirmed), or `unknown`.
@@ -471,7 +480,7 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 `LIMIT_EXCEEDED` errors carry `data: {"limit": "<name>", "max": <n>}`
 naming which cap fired — e.g. `"max_concurrent_tasks"`,
 `"stream_buffer_bytes"`, `"max_stream_credit"`, `"max_frame"`,
-`"max_depth"`. Clients
+`"max_depth"`, `"inbound_queue"`. Clients
 surface it as `LimitExceededError` with `.limit`/`.max`. Limits are
 enforced per runtime (not per window) on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the

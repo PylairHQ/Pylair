@@ -20,7 +20,7 @@ import pytest
 
 from conftest import _LEN, HERE
 from pylair import _protocol as proto
-from pylair._server import _STOP, Server, _BoundedOut
+from pylair._server import _EOF, _STOP, Server, _BoundedOut
 from pylair._transport import MAX_FRAME
 
 
@@ -89,7 +89,8 @@ def test_send_full_marks_out_full_and_injects_eof(capsys):
         return await asyncio.wait_for(s._in.get(), 5)
 
     fut = asyncio.run_coroutine_threadsafe(get(), loop)
-    assert fut.result(timeout=5).__class__.__name__ == "object"  # _EOF sentinel
+    # Queue items are (prio, seq, msg) tuples — the sentinel rides at 2.
+    assert fut.result(timeout=5)[2].__class__.__name__ == "object"  # _EOF sentinel
     loop.call_soon_threadsafe(loop.stop)
     err = capsys.readouterr().err
     assert "outbound queue full" in err
@@ -188,6 +189,57 @@ def test_stalled_host_exits_with_distinct_reason():
             proc.kill()
 
 
+# ---- inbound bound: control never waits behind data ---------------------------
+
+
+def test_inbound_flood_rejects_over_bound_but_never_stalls_control():
+    """IN_MAX is a real bound: data frames past it get the standard
+    LIMIT_EXCEEDED shape, while control frames sort ahead of the queued
+    backlog — a cancel and a shutdown written behind the flood are still
+    handled promptly."""
+    from conftest import Runtime
+
+    env = {"PYLAIR_IN_MAX": "4"}
+    with Runtime(env=env) as rt:
+        rt.recv()  # hello
+        # Wedge the event loop so the inbound queue really fills.
+        rt.send(
+            proto.request(
+                1, "call", {"fn": "loop_block", "task": 1, "input": {"seconds": 1.5}}
+            )
+        )
+        # Flood data frames while the loop is blocked.
+        for i in range(2, 40):
+            rt.send(
+                proto.request(
+                    i, "call", {"fn": "add", "task": i, "input": {"a": 1, "b": 1}}
+                )
+            )
+        # Control frames arrive behind the flood in the same pipe.
+        rt.send(proto.request(100, "cancel", {"task": 1}))
+        rt.send(proto.request(101, "shutdown", {"grace_ms": 4000}))
+
+        saw_limit = got_cancel = got_shutdown = False
+        deadline = time.time() + 15
+        while time.time() < deadline and not got_shutdown:
+            msg = rt.recv(timeout=max(0.1, deadline - time.time()))
+            if msg.get("id") == 100:
+                got_cancel = True
+            elif msg.get("id") == 101:
+                got_shutdown = True
+            err = msg.get("error") or {}
+            if (
+                err.get("code") == proto.LIMIT_EXCEEDED
+                and (err.get("data") or {}).get("limit") == "inbound_queue"
+            ):
+                saw_limit = True
+        assert saw_limit, "flooded data never hit the inbound bound"
+        assert got_cancel, "cancel ack never arrived behind the flood"
+        assert got_shutdown, "shutdown ack never arrived behind the flood"
+        rt.proc.wait(timeout=10)
+        assert rt.proc.returncode == 0
+
+
 # ---- depth cap (_send) --------------------------------------------------------
 
 
@@ -225,3 +277,62 @@ def test_deep_notification_is_dropped_not_queued(capsys):
     assert s._out.stats()[0] == 0
     loop.call_soon_threadsafe(loop.stop)
     assert "depth" in capsys.readouterr().err
+
+
+def test_inbound_counters_converge_under_threaded_flood():
+    """_in_read and _in_done each have a single writer: a reader-thread
+    flood with dispatch interleaved must converge exactly. A shared
+    +=/-= counter can lose an update across threads and leave the bound
+    permanently tripped on an idle runtime."""
+    import json as _j
+
+    N = 20_000
+    frames = [
+        _j.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": i,
+                "method": "call",
+                "params": {"fn": "noop", "task": i},
+            }
+        ).encode()
+        for i in range(1, N + 1)
+    ]
+
+    class _FloodChannel(_FakeChannel):
+        def __init__(self, bodies):
+            super().__init__()
+            self._it = iter(bodies)
+
+        def read_frame(self):
+            return next(self._it, None)
+
+    class _SinkOut:
+        # Reject responses pour in here; the bound under test is inbound.
+        def put_nowait(self, _b):
+            pass
+
+    s = Server(_FloodChannel(frames))
+    s._in_max = 64  # small, so the bound really does trip mid-flood
+    s._out = _SinkOut()  # type: ignore[assignment]
+
+    async def drain():
+        loop = asyncio.get_running_loop()
+        t = threading.Thread(target=s._reader, args=(loop,), daemon=True)
+        t.start()
+        popped = 0
+        while True:
+            prio, _, msg = await s._in.get()
+            if prio == 1:
+                s._in_done += 1
+                popped += 1
+                if popped % 50 == 0:
+                    await asyncio.sleep(0)  # let the reader run ahead
+            if msg is _EOF:
+                break
+        t.join(timeout=5)
+
+    asyncio.run(drain())
+    assert s._in_read == s._in_done
+    # The predicate the reader evaluates: a fresh data frame is accepted.
+    assert s._in_read - s._in_done < s._in_max
