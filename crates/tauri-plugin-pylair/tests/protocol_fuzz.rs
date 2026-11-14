@@ -208,7 +208,7 @@ async fn hostile_valid_frames_never_panic_or_corrupt_state() {
     // Real calls through the noise — each must resolve (the fake's
     // answer, a forged early answer, or a typed error). None may hang.
     for i in 0..10 {
-        let _ = timeout(T, h.call("hang", json!({}), None))
+        let _ = timeout(T, h.call("hang", json!({}), None, Some(false)))
             .await
             .unwrap_or_else(|_| panic!("call {i} hung under hostile traffic"));
         tokio::task::yield_now().await;
@@ -216,7 +216,7 @@ async fn hostile_valid_frames_never_panic_or_corrupt_state() {
 
     // After the noise: the handle is still usable and honest calls still
     // resolve — the forged frames changed nothing.
-    let _ = timeout(T, h.call("hang", json!({}), None))
+    let _ = timeout(T, h.call("hang", json!({}), None, Some(false)))
         .await
         .expect("post-fuzz call hung");
 
@@ -236,14 +236,14 @@ async fn malformed_frame_from_child_is_typed_violation() {
     wait_ready(&h).await;
 
     // First call succeeds — the fake answers it — and poisons the stream.
-    let first = timeout(T, h.call("hang", json!({}), None))
+    let first = timeout(T, h.call("hang", json!({}), None, Some(false)))
         .await
         .expect("first call hung");
     assert!(first.is_ok(), "cooperative phase failed: {first:?}");
 
     // The violation kills the session; the next call must fail with a
     // typed code — never hang, never panic the supervisor.
-    let e = timeout(T, h.call("hang", json!({}), None))
+    let e = timeout(T, h.call("hang", json!({}), None, Some(false)))
         .await
         .expect("call after violation hung")
         .expect_err("call after violation must be a typed error");
@@ -268,7 +268,7 @@ async fn oversized_declared_length_is_rejected_fast() {
 
     // The hello parses, then the poisoned length prefix kills the
     // session — calls resolve typed and fast, nobody blocks on 4 GiB.
-    let e = timeout(T, h.call("hang", json!({}), None))
+    let e = timeout(T, h.call("hang", json!({}), None, Some(false)))
         .await
         .expect("call against oversized-len runtime hung")
         .expect_err("must be a typed failure");

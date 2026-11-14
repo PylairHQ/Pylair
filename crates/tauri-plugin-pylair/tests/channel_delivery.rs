@@ -132,7 +132,7 @@ async fn channel_carries_the_unchanged_payload_shape() {
 
     let (task, items) = timeout(
         T,
-        h.call_stream("counter", json!({"n": 3}), Some("win-a".into())),
+        h.call_stream("counter", json!({"n": 3}), Some("win-a".into()), Some(true)),
     )
     .await
     .expect("call_stream timed out")
@@ -165,7 +165,12 @@ async fn dead_channel_cancels_task_and_releases_stream_slot() {
 
     let (task, items) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream timed out")
@@ -210,7 +215,12 @@ async fn dead_channel_cancels_task_and_releases_stream_slot() {
     // ...and the stream slot is free again (the limit is 1).
     let (_t2, _items2) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("stream slot never released")
@@ -234,14 +244,24 @@ async fn dead_channel_reaps_only_that_task_not_same_owner_siblings() {
     // live one that counts deliveries.
     let (task_a, items_a) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream A timed out")
     .unwrap();
     let (task_b, items_b) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream B timed out")
@@ -325,7 +345,12 @@ async fn page_load_watermark_reaps_only_pre_navigation_tasks() {
     // Old document's task.
     let (task_old, _items_old) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream old timed out")
@@ -338,7 +363,12 @@ async fn page_load_watermark_reaps_only_pre_navigation_tasks() {
     // The new document races a call in BEFORE the reap command lands.
     let (task_new, _items_new) = timeout(
         T,
-        h.call_stream("infinite_counted", json!({}), Some("win-a".into())),
+        h.call_stream(
+            "infinite_counted",
+            json!({}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream new timed out")

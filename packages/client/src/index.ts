@@ -207,17 +207,81 @@ function b64decode(b64: string): Uint8Array {
   return u8;
 }
 
-function toWire(v: unknown): unknown {
+/**
+ * Types whose own enumerable properties do NOT capture their data —
+ * serializing them produces `{}` (or garbage) and silently loses the
+ * value. Named so the TypeError can tell the user exactly what they
+ * passed, and where.
+ */
+const NOT_WIRE_DATA: ReadonlyArray<[abstract new (...a: never[]) => unknown, string]> = [
+  [Date, "a Date"],
+  [RegExp, "a RegExp"],
+  [Map, "a Map"],
+  [Set, "a Set"],
+  [WeakMap, "a WeakMap"],
+  [WeakSet, "a WeakSet"],
+  [Promise, "a Promise"],
+  [Error, "an Error"],
+  [ArrayBuffer, "an ArrayBuffer"],
+  [DataView, "a DataView"],
+  [Int8Array, "an Int8Array"],
+  [Uint8ClampedArray, "a Uint8ClampedArray"],
+  [Int16Array, "an Int16Array"],
+  [Uint16Array, "a Uint16Array"],
+  [Int32Array, "an Int32Array"],
+  [Uint32Array, "a Uint32Array"],
+  [Float32Array, "a Float32Array"],
+  [Float64Array, "a Float64Array"],
+  [BigInt64Array, "a BigInt64Array"],
+  [BigUint64Array, "a BigUint64Array"],
+];
+
+/**
+ * Value → wire JSON. Anything that would silently lose data is a
+ * TypeError naming the path (e.g. `input.when is a Date`), thrown
+ * synchronously so nothing reaches the bridge. Supported: null,
+ * undefined, booleans, numbers, strings, arrays, plain objects
+ * (including null-prototype), `Uint8Array` (→ `$b64`), and class
+ * instances carrying plain data — own enumerable props ARE the intent,
+ * same as `{...x}` spread. Rejected: Date/Map/Set/RegExp/Promise/Error/
+ * ArrayBuffer and views other than Uint8Array (own props don't hold the
+ * data), functions/symbols/bigint (JSON can't represent them — JSON
+ * would drop or throw later, we throw now with a path), non-plain
+ * objects with zero own enumerable props (would serialize as {}), and
+ * circular structures. `undefined`/`NaN`/`Infinity` keep JSON
+ * semantics (omitted / null).
+ */
+function toWire(v: unknown, path = "input", seen = new Set<object>()): unknown {
+  if (v === null || v === undefined) return v;
+  const t = typeof v;
+  if (t === "function" || t === "symbol" || t === "bigint")
+    throw new TypeError(`${path} is a ${t} — cannot cross the bridge`);
   if (v instanceof Uint8Array) return { [B64_TAG]: b64encode(v) };
-  if (Array.isArray(v)) return v.map(toWire);
-  if (v !== null && typeof v === "object")
+  if (t !== "object") return v;
+  for (const [ctor, what] of NOT_WIRE_DATA)
+    if (v instanceof ctor)
+      throw new TypeError(`${path} is ${what} — pass a plain value or spread it yourself`);
+  const obj = v as Record<string, unknown>;
+  if (seen.has(obj))
+    throw new TypeError(`circular reference at ${path}`);
+  seen.add(obj);
+  try {
+    if (Array.isArray(obj))
+      return obj.map((x, i) => toWire(x, `${path}[${i}]`, seen));
+    const entries = Object.entries(obj);
+    const proto = Object.getPrototypeOf(obj);
+    if (proto !== Object.prototype && proto !== null && entries.length === 0) {
+      const name = obj.constructor?.name ?? "anonymous-class";
+      throw new TypeError(
+        `${path} is a ${name} instance with no own enumerable properties — it would serialize as {}`,
+      );
+    }
     return Object.fromEntries(
-      Object.entries(v as Record<string, unknown>).map(([k, x]) => [
-        k,
-        toWire(x),
-      ]),
+      entries.map(([k, x]) => [k, toWire(x, `${path}.${k}`, seen)]),
     );
-  return v;
+  } finally {
+    seen.delete(obj);
+  }
 }
 
 function fromWire(v: unknown): unknown {
@@ -312,13 +376,24 @@ function trackLive(task: number): void {
   liveTasks.add(task);
 }
 
-function wireAbort(signal: AbortSignal | undefined, task: number): void {
-  if (!signal) return;
+/**
+ * Wire an AbortSignal to a task's cancel; returns a disarm that removes
+ * the listener. The listener MUST be removed when the call settles —
+ * `{once:true}` only cleans up after firing, so a long-lived signal
+ * reused across calls would otherwise accumulate a listener (and the
+ * closure) per call forever.
+ */
+function wireAbort(signal: AbortSignal | undefined, task: number): () => void {
+  if (!signal) return () => {};
   const cancel = () => {
     void ipc().then((b) => b.invoke(CMD.cancel, { task }));
   };
-  if (signal.aborted) return cancel();
+  if (signal.aborted) {
+    cancel();
+    return () => {};
+  }
   signal.addEventListener("abort", cancel, { once: true });
+  return () => signal.removeEventListener("abort", cancel);
 }
 
 // ---- public API -------------------------------------------------------------
@@ -375,16 +450,41 @@ export async function call<T = unknown>(
   // before invokeChannel runs: the callback can fire during the invoke.
   let settled = false;
   let disarm = () => {};
+  let unwire = () => {};
   let task = -1;
+  // A chunk arriving before the ack means the task id isn't known yet —
+  // the reject still runs now; the cancel is deferred to the ack.
+  let cancelOnAck = false;
+  const failStreamMismatch = () => {
+    if (settled) return;
+    settled = true;
+    liveTasks.delete(task);
+    disarm();
+    unwire();
+    cancelOnAck = task < 0;
+    if (!cancelOnAck) void b.invoke(CMD.cancel, { task }).catch(() => {});
+    reject(
+      new TypeError(`${fn} is a stream function — call it with stream(), not call()`),
+    );
+  };
   const ack = await b
     .invokeChannel<unknown>(
       CMD.callStream,
-      { fnName: fn, input: toWire(input) as Record<string, unknown> },
+      // stream:false — the host counts a task slot only (no stream
+      // slot, no credit) and the runtime validates intent. An OLD
+      // plugin ignores the extra arg and treats it as a stream,
+      // matching its pre-flag accounting.
+      { fnName: fn, input: toWire(input) as Record<string, unknown>, stream: false },
       (ev) => {
-        if (!ev.done) return; // plain calls shouldn't chunk; ignore defensively
+        // A chunk means fn is a generator — call() cannot deliver its
+        // values; name stream() and reap the task instead of silently
+        // dropping every item.
+        if (!ev.done) return failStreamMismatch();
+        if (settled) return;
         settled = true;
         liveTasks.delete(task);
         disarm();
+        unwire();
         if (ev.error) reject(mkError(ev.error.code, ev.error.message, ev.error.data));
         else resolve(fromWire(ev.result) as T);
       },
@@ -393,10 +493,14 @@ export async function call<T = unknown>(
       throw asPythonError(e);
     });
   task = streamAckTask(ack);
-  wireAbort(opts.signal, task);
+  if (cancelOnAck) void b.invoke(CMD.cancel, { task }).catch(() => {});
   if (!settled) {
+    unwire = wireAbort(opts.signal, task);
     trackLive(task);
-    disarm = armDeadline(opts, task, reject);
+    disarm = armDeadline(opts, task, (e) => {
+      unwire();
+      reject(e);
+    });
   }
   return result;
 }
@@ -420,7 +524,7 @@ export async function* stream<T = unknown>(
   const ack = await b
     .invokeChannel<unknown>(
       CMD.callStream,
-      { fnName: fn, input: toWire(input) as Record<string, unknown> },
+      { fnName: fn, input: toWire(input) as Record<string, unknown>, stream: true },
       (ev) => {
         queue.push(ev);
         wake?.();
@@ -430,9 +534,10 @@ export async function* stream<T = unknown>(
       throw asPythonError(e);
     });
   const task = streamAckTask(ack);
-  wireAbort(opts.signal, task);
+  const unwire = wireAbort(opts.signal, task);
   trackLive(task);
   const disarm = armDeadline(opts, task, (e) => {
+    unwire();
     expired = e;
     finished = true; // the deadline already sent the cancel
     wake?.();
@@ -464,6 +569,7 @@ export async function* stream<T = unknown>(
     }
   } finally {
     disarm();
+    unwire();
     liveTasks.delete(task);
     // Consumer walked away (break / return() / throw) before the producer
     // finished: stop it instead of leaving it running and granting credit.

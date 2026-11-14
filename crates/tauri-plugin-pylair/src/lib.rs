@@ -264,7 +264,10 @@ async fn self_test_call(spec: SpawnSpec, origin: &str) -> i32 {
     })
     .await;
     match ready {
-        Ok(true) => match h.call("hello", json!({"name": "self-test"}), None).await {
+        Ok(true) => match h
+            .call("hello", json!({"name": "self-test"}), None, Some(false))
+            .await
+        {
             Ok(v) => {
                 println!("self-test({origin}) ok: {v}");
                 h.shutdown().await;
@@ -690,8 +693,13 @@ async fn python_call<R: Runtime>(
     input: Value,
 ) -> Result<Value, ErrorObj> {
     subscribed(&window, &reg);
-    rt.0.call(&fn_name, input, Some(window.label().to_string()))
-        .await
+    rt.0.call(
+        &fn_name,
+        input,
+        Some(window.label().to_string()),
+        Some(false),
+    )
+    .await
 }
 
 /// The `python_call_stream` answer. `protocol` is the client↔plugin
@@ -703,15 +711,21 @@ async fn python_call<R: Runtime>(
 const BRIDGE_PROTOCOL: u32 = 2;
 
 #[derive(serde::Serialize)]
-struct StreamAck {
-    task: u64,
-    protocol: u32,
+pub struct StreamAck {
+    pub task: u64,
+    pub protocol: u32,
 }
 
-/// Start a streaming call. Returns `{task, protocol}`; chunks and the
-/// terminal arrive on the per-call `on_event` channel — delivery is
-/// bound to the invoking webview, no shared event bus (event-scoping
+/// Start a call with per-call channel delivery. Returns `{task,
+/// protocol}`; chunks and the terminal arrive on `on_event` — delivery
+/// is bound to the invoking webview, no shared event bus (event-scoping
 /// fix).
+///
+/// `stream` is the client's declared intent: `false` for `call()`
+/// (task-slot accounting only — no stream slot, no initial credit), or
+/// `true` for `stream()`. Absent (older clients) the task is accounted
+/// as a stream exactly as before but NO `stream` field reaches the
+/// runtime, so no mismatch validation applies.
 #[tauri::command]
 async fn python_call_stream<R: Runtime>(
     window: tauri::WebviewWindow<R>,
@@ -720,11 +734,27 @@ async fn python_call_stream<R: Runtime>(
     on_event: tauri::ipc::Channel<Value>,
     fn_name: String,
     input: Value,
+    stream: Option<bool>,
 ) -> Result<StreamAck, ErrorObj> {
-    subscribed(&window, &reg);
+    python_call_stream_impl(&window, &reg, &rt, on_event, fn_name, input, stream).await
+}
+
+/// `python_call_stream`'s body, callable in tests — driving it is the
+/// real command path minus Tauri's invoke-arg deserialization.
+#[doc(hidden)]
+pub async fn python_call_stream_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reg: &Registry,
+    rt: &PyRuntime,
+    on_event: tauri::ipc::Channel<Value>,
+    fn_name: String,
+    input: Value,
+    stream: Option<bool>,
+) -> Result<StreamAck, ErrorObj> {
+    subscribed(window, reg);
     let label = window.label().to_string();
     let (task, items) =
-        rt.0.call_stream(&fn_name, input, Some(label.clone()))
+        rt.0.call_stream(&fn_name, input, Some(label.clone()), stream)
             .await?;
     forward_stream(on_event, items, rt.0.clone(), task, label);
     Ok(StreamAck {

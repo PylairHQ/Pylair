@@ -110,13 +110,13 @@ async fn window_destroyed_cancels_only_owned_tasks_from_main_thread() {
     // Two calls, each owned by a different "window" — neither is ever
     // answered by the fake, so both stay pending until cancelled.
     let task_main = h
-        .call_task("hang", json!({}), Some("main".into()))
+        .call_task("hang", json!({}), Some("main".into()), Some(false))
         .unwrap()
         .task
         .await
         .unwrap();
     let task_other = h
-        .call_task("hang", json!({}), Some("other".into()))
+        .call_task("hang", json!({}), Some("other".into()), Some(false))
         .unwrap()
         .task
         .await

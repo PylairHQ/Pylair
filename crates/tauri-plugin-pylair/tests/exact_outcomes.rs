@@ -144,14 +144,14 @@ async fn cancel_with_data_lane_saturated_is_wedged_error() {
     let h = spawn_h(spec(FAKE_WEDGED), cfg(), ev);
     wait_ready(&h).await;
 
-    let ct = h.call_task("hang", json!({}), None).unwrap();
+    let ct = h.call_task("hang", json!({}), None, Some(false)).unwrap();
     let task = timeout(T, ct.task).await.unwrap().unwrap();
 
     // Saturate the data lane: the wedged runtime reads nothing, so the
     // 64-deep lane + the pipe buffer fill behind it.
     let big = json!({"pad": "x".repeat(64 * 1024)});
     for _ in 0..64 {
-        if h.call_task("hang", big.clone(), None).is_err() {
+        if h.call_task("hang", big.clone(), None, Some(false)).is_err() {
             break;
         }
     }
@@ -200,7 +200,7 @@ async fn cancel_after_pipe_dies_is_delivery_failed() {
 
     // The fake reads exactly one frame — this call's frame — then closes
     // its stdin, leaving the call pending in `tasks`.
-    let ct = h.call_task("hang", json!({}), None).unwrap();
+    let ct = h.call_task("hang", json!({}), None, Some(false)).unwrap();
     let task = timeout(T, ct.task).await.unwrap().unwrap();
 
     let mut saw_wedged = false;
@@ -259,7 +259,7 @@ async fn cancel_that_outruns_registration_still_terminates_stream() {
     wait_ready(&h).await;
 
     let (task, mut rx) = h
-        .call_stream("infinite_counted", json!({}), Some("w".into()))
+        .call_stream("infinite_counted", json!({}), Some("w".into()), Some(true))
         .await
         .expect("call_stream rejected");
     let out = timeout(T, h.cancel(task, Some("w".into())))
@@ -309,7 +309,7 @@ async fn cancel_while_python_loop_blocked_is_wedged_error() {
     // block_loop runs time.sleep INSIDE the async def — the event loop
     // stops dispatching but the reader thread keeps answering pings.
     let ct = h
-        .call_task("block_loop", json!({"seconds": 30}), None)
+        .call_task("block_loop", json!({"seconds": 30}), None, Some(false))
         .unwrap();
     let task = timeout(T, ct.task).await.unwrap().unwrap();
     sleep(Duration::from_millis(300)).await; // let the block actually start
@@ -339,7 +339,7 @@ async fn shutdown_mid_stream_reports_terminated_and_cancelled() {
     wait_ready(&h).await;
 
     let (_task, mut rx) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .expect("call_stream rejected");
 

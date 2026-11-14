@@ -190,7 +190,10 @@ async fn hello_echo_pong_shutdown() {
     let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
     let h = spawn_h(spec(FAKE_READY), fast_config(), ev);
     wait_state(&h, State::Ready).await;
-    let out = h.call("echo", json!({"x": 1}), None).await.unwrap();
+    let out = h
+        .call("echo", json!({"x": 1}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!({"x": 1}));
     h.shutdown().await;
     wait_state(&h, State::Stopped).await;
@@ -244,7 +247,10 @@ async fn kill_during_call_fails_caller_with_crashed() {
     let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
     let h = spawn_h(spec(FAKE_DIE_ON_CALL), fast_config(), ev);
     wait_state(&h, State::Ready).await;
-    let err = h.call("boom", json!({}), None).await.unwrap_err();
+    let err = h
+        .call("boom", json!({}), None, Some(false))
+        .await
+        .unwrap_err();
     assert_eq!(err.code, proto::RUNTIME_CRASHED);
 }
 
@@ -271,7 +277,10 @@ async fn crash_loop_breaker_trips() {
     sleep(Duration::from_millis(300)).await;
     assert_eq!(h.state(), State::Failed);
     // calls fail fast with RUNTIME_UNAVAILABLE
-    let err = h.call("x", Value::Null, None).await.unwrap_err();
+    let err = h
+        .call("x", Value::Null, None, Some(false))
+        .await
+        .unwrap_err();
     assert_eq!(err.code, proto::RUNTIME_UNAVAILABLE);
 }
 
@@ -306,18 +315,24 @@ async fn e2e_real_runtime_full_flow() {
     eprintln!("e2e: exposes ok {names:?}");
 
     // plain call
-    let out = timeout(T, h.call("add", json!({"a": 20, "b": 22}), None))
-        .await
-        .expect("call timed out")
-        .unwrap();
+    let out = timeout(
+        T,
+        h.call("add", json!({"a": 20, "b": 22}), None, Some(false)),
+    )
+    .await
+    .expect("call timed out")
+    .unwrap();
     assert_eq!(out, json!(42));
     eprintln!("e2e: call ok");
 
     // streaming call: chunks then terminal
-    let (_task, mut items) = timeout(T, h.call_stream("counter", json!({"n": 3}), None))
-        .await
-        .expect("call_stream timed out")
-        .unwrap();
+    let (_task, mut items) = timeout(
+        T,
+        h.call_stream("counter", json!({"n": 3}), None, Some(true)),
+    )
+    .await
+    .expect("call_stream timed out")
+    .unwrap();
     let mut seen = Vec::new();
     while let Ok(Some(item)) = timeout(T, items.recv()).await {
         match item {
@@ -335,7 +350,9 @@ async fn e2e_real_runtime_full_flow() {
 
     // cancel a never-ending async task — eager dispatch via call_task so the
     // task id is known before we cancel it.
-    let ct = h.call_task("sleep_forever", json!({}), None).unwrap();
+    let ct = h
+        .call_task("sleep_forever", json!({}), None, Some(false))
+        .unwrap();
     let task = timeout(T, ct.task)
         .await
         .expect("task id timed out")
@@ -489,7 +506,7 @@ async fn restart_trigger_respawns_cleanly() {
     // The respawned generation must serve calls again.
     wait_state(&h, State::Ready).await;
     let out = h
-        .call("echo", json!({"after": "restart"}), None)
+        .call("echo", json!({"after": "restart"}), None, Some(false))
         .await
         .unwrap();
     assert_eq!(out, json!({"after": "restart"}));
@@ -500,7 +517,7 @@ async fn restart_trigger_respawns_cleanly() {
 // ---- stream consumer failure (audit P1-5) ----
 
 async fn produced(h: &Handle) -> i64 {
-    timeout(T, h.call("produced_count", json!({}), None))
+    timeout(T, h.call("produced_count", json!({}), None, Some(false)))
         .await
         .expect("produced_count timed out")
         .unwrap()
@@ -520,13 +537,16 @@ async fn stalled_consumer_gets_terminal_error_and_producer_stops() {
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let (_task, mut items) = timeout(T, h.call_stream("infinite_counted", json!({}), None))
-        .await
-        .expect("call_stream timed out")
-        .unwrap();
+    let (_task, mut items) = timeout(
+        T,
+        h.call_stream("infinite_counted", json!({}), None, Some(true)),
+    )
+    .await
+    .expect("call_stream timed out")
+    .unwrap();
     // Do not drain. The supervisor must keep serving other calls meanwhile.
     sleep(Duration::from_millis(500)).await;
-    let out = timeout(T, h.call("add", json!({"a": 1, "b": 2}), None))
+    let out = timeout(T, h.call("add", json!({"a": 1, "b": 2}), None, Some(false)))
         .await
         .expect("supervisor wedged behind a stalled stream");
     assert_eq!(out.unwrap(), json!(3));
@@ -559,10 +579,13 @@ async fn vanished_consumer_cancels_the_producer() {
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let (_task, items) = timeout(T, h.call_stream("infinite_counted", json!({}), None))
-        .await
-        .expect("call_stream timed out")
-        .unwrap();
+    let (_task, items) = timeout(
+        T,
+        h.call_stream("infinite_counted", json!({}), None, Some(true)),
+    )
+    .await
+    .expect("call_stream timed out")
+    .unwrap();
     sleep(Duration::from_millis(200)).await;
     drop(items);
     sleep(Duration::from_millis(500)).await;
@@ -729,7 +752,9 @@ async fn blocked_event_loop_is_killed_and_the_call_fails_wedged() {
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let ct = h.call_task("wedge_the_loop", json!({}), None).unwrap();
+    let ct = h
+        .call_task("wedge_the_loop", json!({}), None, Some(false))
+        .unwrap();
     let err = timeout(T, ct.result)
         .await
         .expect("call hung behind a blocked loop with healthy pongs")
@@ -748,7 +773,9 @@ async fn cancel_ack_is_bounded() {
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let ct = h.call_task("wedge_the_loop", json!({}), None).unwrap();
+    let ct = h
+        .call_task("wedge_the_loop", json!({}), None, Some(false))
+        .unwrap();
     let task = timeout(T, ct.task).await.unwrap().unwrap();
     sleep(Duration::from_millis(300)).await; // let the loop block
     let t0 = std::time::Instant::now();
@@ -779,10 +806,13 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
 
     // Block the loop ~1.5s: several ping intervals carry stale pongs. The
     // call resolves once the loop frees — no kill, no restart.
-    let out = timeout(T, h.call("block_loop", json!({"seconds": 1.5}), None))
-        .await
-        .expect("call never returned — the runtime may have been killed")
-        .unwrap();
+    let out = timeout(
+        T,
+        h.call("block_loop", json!({"seconds": 1.5}), None, Some(false)),
+    )
+    .await
+    .expect("call never returned — the runtime may have been killed")
+    .unwrap();
     assert_eq!(out, json!("unblocked"));
 
     wait_state(&h, State::Ready).await;
@@ -805,7 +835,10 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
     assert!(saw_stall_diag, "no loop-stall diagnostic was emitted");
     assert!(!saw_restart, "runtime restarted on a blocked loop");
     // Same generation still serves calls.
-    let out = h.call("add", json!({"a": 1, "b": 2}), None).await.unwrap();
+    let out = h
+        .call("add", json!({"a": 1, "b": 2}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!(3));
 }
 
@@ -820,7 +853,7 @@ async fn user_prints_neither_corrupt_nor_spoof_readiness() {
     noisy.args[2] = "testapp_noisy".into();
     let h = spawn_h(noisy, fast_config(), ev);
     wait_state(&h, State::Ready).await; // framed hello, prints be damned
-    let out = timeout(T, h.call("add", json!({"a": 2, "b": 3}), None))
+    let out = timeout(T, h.call("add", json!({"a": 2, "b": 3}), None, Some(false)))
         .await
         .unwrap()
         .unwrap();

@@ -176,7 +176,8 @@ async fn hostile_cwd_does_not_shadow_runtime_or_worker() {
     // `python -m pylair._worker` would exec the shadow package without
     // the safepath env it inherits.
     let call = timeout(T, async {
-        h.call("isolated_add", json!({"a": 1, "b": 2}), None).await
+        h.call("isolated_add", json!({"a": 1, "b": 2}), None, Some(false))
+            .await
     })
     .await;
     match call {

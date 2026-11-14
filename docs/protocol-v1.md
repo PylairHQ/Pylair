@@ -88,7 +88,7 @@ All messages carry `"jsonrpc": "2.0"`.
 
 | method | params | response result |
 |---|---|---|
-| `call` | `{fn, input, task}` | fn's return value (JSON); for generator fns, see §3.1 |
+| `call` | `{fn, input, task, stream?}` | fn's return value (JSON); for generator fns, see §3.1 |
 | `cancel` | `{task}` | `{cancelled: true/false, status?, reason?}` — see §3.2 |
 | `shutdown` | `{grace_ms}` | `{}` then process exits 0 |
 | `ping` | `{seq}` | must produce a `pong {seq}` notification — see §5 |
@@ -103,8 +103,25 @@ All messages carry `"jsonrpc": "2.0"`.
   imports; the worker resolves it through the registry, not by
   attribute lookup on the app module.
 - `task`: opaque id assigned by the host; scopes streaming + cancel.
+- `stream` (optional bool): the host's declaration of client intent —
+  `false` from a plain `call()`, `true` from `stream()`. When present,
+  the runtime validates it against the function's kind: `stream: false`
+  on a generator or `stream: true` on a non-generator fails
+  `INVALID_PARAMS` with a message naming the right API, instead of
+  streaming into a `call()` that drops every chunk or a `stream()` that
+  silently ends. Older hosts omit it → no validation.
 - `input`: the single JSON argument object, matching the generated TS
-  client call shape `python.<fn>({...})`.
+  client call shape `python.<fn>({...})`. **What the client accepts**
+  (`toWire`): `null`, `undefined`, booleans, numbers, strings, arrays,
+  plain objects (null-prototype included), `Uint8Array` (→ `$b64`), and
+  class instances carrying plain data — own enumerable props are the
+  intent, same as `{...x}` spread. Anything whose data doesn't live in
+  own enumerable props is a TypeError naming the path: `Date`, `Map`,
+  `Set`, `RegExp`, `Promise`, `Error`, `ArrayBuffer`, typed arrays other
+  than `Uint8Array`, functions, symbols, `bigint`, non-plain objects
+  with zero own enumerable props (would serialize as `{}`), and
+  circular references. `undefined`/`NaN`/`Infinity` keep JSON
+  semantics — omitted in objects, `null` in arrays.
 
 ### Responses (runtime → host)
 
@@ -149,8 +166,11 @@ on a generator while it holds credit for that task.
 - The consumer grants credit with `stream.credit {task, n}`. Credit is
   in *chunks*; each `stream.chunk` sent decrements outstanding credit
   by one.
-- On stream open the host grants an initial credit of
-  `INITIAL_STREAM_CREDIT` (default 64). Like every `stream.credit` it
+- On stream open (a `call` request carrying `stream: true`, or a
+  pre-flag request with no `stream` field) the host grants an initial
+  credit of `INITIAL_STREAM_CREDIT` (default 64). A `stream: false`
+  call gets no initial grant — it produces no chunks. Like every
+  `stream.credit` it
   travels the control lane — before the call frame — so a saturated
   data lane cannot starve or reorder it, and the runtime applies it
   through pending credit if it arrives before registration. The TS
@@ -285,6 +305,20 @@ Call data and lifecycle events use different mechanisms:
 - **Call data is channel-bound — not an event.** `python_call_stream`
   requires an `onEvent` `tauri::ipc::Channel` argument and sends every
   stream item `{task, seq?, value?, done, result?|error?}` through it.
+  Both client entry points ride this command: `call()` passes
+  `stream: false`, `stream()` passes `stream: true` — the declared
+  intent flows to the `call` request's `stream` field above, and the
+  host accounts from it: `stream: false` takes a `max_concurrent_tasks`
+  slot only (no `max_concurrent_streams` slot, no initial
+  `stream.credit` grant, no stream-buffer accounting); `stream: true`
+  is a stream as before. A plain call's terminal still arrives on the
+  channel with the early task-id ack, so cancel, abort and
+  `timeoutMs` deadlines behave identically. When `stream` is **absent**
+  (a pre-flag client) the host accounts conservatively — stream slot +
+  initial credit — but omits the field from the request, so the runtime
+  applies no mismatch validation. `python_call` is the separate
+  direct-`Value` command (no early task id, no channel): it always
+  declares `stream: false`.
   The invoke itself answers `{task, protocol: 2}` — `protocol` is the
   client↔plugin bridge version (unrelated to the wire version above):
   an older plugin returns a bare task id and ignored `onEvent`, so a

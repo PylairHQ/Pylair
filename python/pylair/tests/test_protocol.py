@@ -20,8 +20,17 @@ from pylair import _protocol as proto
 _LEN = struct.Struct(">I")
 
 
-def call(rid: int, fn: str, task: int, input: dict | None = None) -> dict:
-    return proto.request(rid, "call", {"fn": fn, "task": task, "input": input or {}})
+def call(
+    rid: int,
+    fn: str,
+    task: int,
+    input: dict | None = None,
+    stream: bool | None = None,
+) -> dict:
+    params = {"fn": fn, "task": task, "input": input or {}}
+    if stream is not None:
+        params["stream"] = stream
+    return proto.request(rid, "call", params)
 
 
 def grant(task: int, n: int = proto.INITIAL_STREAM_CREDIT) -> dict:
@@ -662,3 +671,51 @@ def test_none_default_admits_null(runtime):
     assert (
         runtime.recv_until(lambda m: m.get("id") == 4, timeout=30)["result"] == "None"
     )
+
+
+# ---- call/stream intent flag (rc.15 PR I) --------------------------------
+
+
+def test_stream_flag_false_on_generator_is_actionable_error(runtime):
+    """A plain call() that reaches a generator must name stream(), not
+    produce a stream nobody reads."""
+    runtime.recv()
+    runtime.send(call(1, "counter", task=1, input={"n": 3}, stream=False))
+    resp = runtime.recv()
+    assert resp["error"]["code"] == proto.INVALID_PARAMS, resp
+    assert "stream()" in resp["error"]["message"], resp
+    assert "counter" in resp["error"]["message"], resp
+
+
+def test_stream_flag_true_on_plain_fn_is_actionable_error(runtime):
+    """stream() against a non-generator must name call(), not silently
+    yield nothing."""
+    runtime.recv()
+    runtime.send(call(1, "add", task=1, input={"a": 1, "b": 2}, stream=True))
+    resp = runtime.recv()
+    assert resp["error"]["code"] == proto.INVALID_PARAMS, resp
+    assert "call()" in resp["error"]["message"], resp
+    assert "add" in resp["error"]["message"], resp
+
+
+def test_stream_flag_matching_kinds_still_work(runtime):
+    """stream=true on a generator streams; stream=false on a sync fn
+    returns the result — the flag validates intent, it doesn't gate."""
+    runtime.recv()
+    runtime.send(call(1, "counter", task=1, input={"n": 2}, stream=True))
+    runtime.send(grant(1))
+    terminal = runtime.recv_until(lambda m: m.get("id") == 1, timeout=10)
+    assert terminal["result"] == {"done": True}, terminal
+    runtime.send(call(2, "add", task=2, input={"a": 2, "b": 3}, stream=False))
+    assert runtime.recv()["result"] == 5
+
+
+def test_absent_stream_flag_keeps_legacy_behaviour(runtime):
+    """An older host sends no `stream` — no validation either way."""
+    runtime.recv()
+    runtime.send(call(1, "add", task=1, input={"a": 1, "b": 1}))
+    assert runtime.recv()["result"] == 2
+    runtime.send(call(2, "counter", task=2, input={"n": 1}))
+    runtime.send(grant(2))
+    terminal = runtime.recv_until(lambda m: m.get("id") == 2, timeout=10)
+    assert terminal["result"] == {"done": True}, terminal

@@ -361,6 +361,25 @@ class Server:
                 )
             )
             return
+        # The host declares client intent via `stream` (§3): plain call()
+        # sends False, stream() sends True. A mismatch means the caller
+        # used the wrong API — say so instead of streaming into the void
+        # (call() drops chunks) or silently ending (stream() on a plain
+        # fn). Absent on older hosts → no validation.
+        want_stream = params.get("stream")
+        if want_stream is not None and bool(want_stream) != (ex.kind == "generator"):
+            if ex.kind == "generator":
+                msg = (
+                    f"{fn_name!r} is a stream function — call it with "
+                    "stream(), not call()"
+                )
+            else:
+                msg = (
+                    f"{fn_name!r} is not a stream function — call it "
+                    "with call(), not stream()"
+                )
+            self._send(proto.error_response(rid, proto.INVALID_PARAMS, msg))
+            return
         try:
             input = _json.coerce_kwargs(ex.fn, input)
         except _json.InvalidParams as e:

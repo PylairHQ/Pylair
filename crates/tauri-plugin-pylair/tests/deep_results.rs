@@ -98,8 +98,8 @@ async fn deep_result_fails_one_call_and_runtime_survives() {
     wait_ready(&h).await;
 
     let (deep, add) = tokio::join!(
-        h.call("deep", json!({"n": 200}), None),
-        h.call("add", json!({"a": 2, "b": 3}), None),
+        h.call("deep", json!({"n": 200}), None, Some(false)),
+        h.call("add", json!({"a": 2, "b": 3}), None, Some(false)),
     );
     match deep {
         Err(e) => assert_eq!(e.code, proto::LIMIT_EXCEEDED, "wrong code: {e:?}"),
@@ -108,7 +108,7 @@ async fn deep_result_fails_one_call_and_runtime_survives() {
     assert_eq!(add.expect("concurrent call failed"), Value::from(5));
 
     // The runtime survived the malformed-response attempt.
-    let again = timeout(T, h.call("add", json!({"a": 1, "b": 1}), None))
+    let again = timeout(T, h.call("add", json!({"a": 1, "b": 1}), None, Some(false)))
         .await
         .expect("runtime died — call never returned")
         .expect("post-depth call failed");
@@ -124,7 +124,12 @@ async fn deep_stream_chunk_fails_the_stream_only() {
     wait_ready(&h).await;
 
     let (_task, mut rx) = h
-        .call_stream("deep_stream", json!({"n": 200}), Some("w".into()))
+        .call_stream(
+            "deep_stream",
+            json!({"n": 200}),
+            Some("w".into()),
+            Some(true),
+        )
         .await
         .expect("call_stream rejected");
     let end = timeout(T, async {
@@ -141,7 +146,7 @@ async fn deep_stream_chunk_fails_the_stream_only() {
     let e = end.expect_err("deep chunk must end the stream in error");
     assert_eq!(e.code, proto::LIMIT_EXCEEDED, "wrong code: {e:?}");
 
-    let ok = timeout(T, h.call("add", json!({"a": 4, "b": 1}), None))
+    let ok = timeout(T, h.call("add", json!({"a": 4, "b": 1}), None, Some(false)))
         .await
         .expect("runtime died after deep chunk")
         .expect("post-chunk call failed");
@@ -157,9 +162,12 @@ async fn deep_isolated_result_fails_the_call_only() {
     let h = spawn_h(real_runtime_spec(), cfg(), tx);
     wait_ready(&h).await;
 
-    match timeout(T, h.call("isolated_deep", json!({"n": 200}), None))
-        .await
-        .expect("isolated call never returned")
+    match timeout(
+        T,
+        h.call("isolated_deep", json!({"n": 200}), None, Some(false)),
+    )
+    .await
+    .expect("isolated call never returned")
     {
         Err(e) => assert_eq!(e.code, proto::LIMIT_EXCEEDED, "wrong code: {e:?}"),
         Ok(v) => panic!(
@@ -167,10 +175,13 @@ async fn deep_isolated_result_fails_the_call_only() {
             &v.to_string()[..60]
         ),
     }
-    let ok = timeout(T, h.call("isolated_add", json!({"a": 1, "b": 2}), None))
-        .await
-        .expect("runtime died after deep isolated result")
-        .expect("post-depth isolated call failed");
+    let ok = timeout(
+        T,
+        h.call("isolated_add", json!({"a": 1, "b": 2}), None, Some(false)),
+    )
+    .await
+    .expect("runtime died after deep isolated result")
+    .expect("post-depth isolated call failed");
     assert_eq!(ok, Value::from(3));
     h.shutdown().await;
 }

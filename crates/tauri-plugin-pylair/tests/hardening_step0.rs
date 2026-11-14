@@ -156,7 +156,12 @@ async fn non_owner_cannot_cancel_another_windows_task() {
     wait_state(&h, State::Ready).await;
 
     let ct = h
-        .call_task("sleep_forever", json!({}), Some("win-a".into()))
+        .call_task(
+            "sleep_forever",
+            json!({}),
+            Some("win-a".into()),
+            Some(false),
+        )
         .unwrap();
     let task = timeout(T, ct.task)
         .await
@@ -201,7 +206,12 @@ async fn non_owner_cannot_grant_credit_on_another_windows_stream() {
 
     let (task, mut items) = timeout(
         T,
-        h.call_stream("counter", json!({"n": 1_000}), Some("win-a".into())),
+        h.call_stream(
+            "counter",
+            json!({"n": 1_000}),
+            Some("win-a".into()),
+            Some(true),
+        ),
     )
     .await
     .expect("call_stream timed out")
@@ -277,7 +287,7 @@ async fn cancel_not_dropped_when_frame_queue_full() {
 
     // Register a real task while the data lane is empty — its frame sits
     // in the pipe buffer: delivered, never read by the wedged runtime.
-    let ct = h.call_task("echo", json!({}), None).unwrap();
+    let ct = h.call_task("echo", json!({}), None, Some(false)).unwrap();
     let task = timeout(T, ct.task)
         .await
         .expect("task id timed out")
@@ -291,7 +301,7 @@ async fn cancel_not_dropped_when_frame_queue_full() {
     let big = "x".repeat(16 * 1024);
     let (full_tx, mut full_rx) = mpsc::channel::<()>(1);
     for _ in 0..400 {
-        match h.call_task("echo", json!({"input": big}), None) {
+        match h.call_task("echo", json!({"input": big}), None, Some(false)) {
             Ok(ct) => {
                 let tx = full_tx.clone();
                 tokio::spawn(async move {
@@ -669,7 +679,7 @@ async fn host_sigkill_does_not_orphan_isolated_worker() {
         // Start the long-running isolated task — the worker it spawns is
         // the grandchild under test.
         let ct = h
-            .call_task("isolated_sleep", json!({"seconds": 600}), None)
+            .call_task("isolated_sleep", json!({"seconds": 600}), None, Some(false))
             .expect("isolated call rejected");
         let _ = timeout(T, ct.task).await.expect("task id timed out");
         loop {
@@ -753,7 +763,7 @@ async fn pdeathsig_does_not_kill_a_healthy_runtime_early() {
     );
 
     // And it must still serve a call — "alive" means functioning.
-    let out = timeout(T, h.call("add", json!({"a": 1, "b": 2}), None))
+    let out = timeout(T, h.call("add", json!({"a": 1, "b": 2}), None, Some(false)))
         .await
         .expect("call timed out")
         .expect("call failed after the wait");

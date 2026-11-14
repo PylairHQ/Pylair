@@ -191,7 +191,7 @@ async fn saturate_data_lane(h: &Handle, rx: &mut mpsc::Receiver<RuntimeEvent>) -
     // pump must interleave dispatch with actor progress.
     for _ in 0..40 {
         for _ in 0..20 {
-            match h.call_task("echo", json!(pad), None) {
+            match h.call_task("echo", json!(pad), None, Some(false)) {
                 Ok(ct) => inflight.push(ct),
                 Err(e) => panic!("command queue rejected pump call: {e:?}"),
             }
@@ -241,7 +241,7 @@ async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
     saturate_data_lane(&h, &mut rx).await;
 
     let (_task, mut items) = h
-        .call_stream("count_stream", json!({}), None)
+        .call_stream("count_stream", json!({}), None, Some(true))
         .await
         .expect("stream call rejected — the call frame should still enqueue");
 
@@ -296,7 +296,10 @@ async fn initial_credit_undeliverable_rejects_stream() {
     .await
     .expect("control lane never filled with cancels");
 
-    let err = match h.call_stream("count_stream", json!({}), None).await {
+    let err = match h
+        .call_stream("count_stream", json!({}), None, Some(true))
+        .await
+    {
         Ok(_) => panic!("stream opened despite an undeliverable initial grant"),
         Err(e) => e,
     };
@@ -348,7 +351,7 @@ while True:
     wait_state(&h, State::Ready).await;
 
     let (_task, mut items) = h
-        .call_stream("count_stream", json!({}), None)
+        .call_stream("count_stream", json!({}), None, Some(true))
         .await
         .expect("stream call rejected");
     let mut terminal = None;

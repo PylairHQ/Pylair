@@ -132,7 +132,12 @@ async fn two_hundred_window_generations_no_leaks_no_stale_events() {
     for gen in 0..GENS {
         // Create: streaming work owned by this window generation.
         let (task, mut rx) = h
-            .call_stream("infinite_counted", json!({}), Some(label.clone()))
+            .call_stream(
+                "infinite_counted",
+                json!({}),
+                Some(label.clone()),
+                Some(true),
+            )
             .await
             .unwrap_or_else(|e| panic!("gen {gen}: call_stream rejected: {e:?}"));
 
@@ -155,7 +160,12 @@ async fn two_hundred_window_generations_no_leaks_no_stale_events() {
         // New window, SAME label: its stream must be a clean generation —
         // first event is seq 0 of a NEW task, never a stale chunk.
         let (task2, mut rx2) = h
-            .call_stream("infinite_counted", json!({}), Some(label.clone()))
+            .call_stream(
+                "infinite_counted",
+                json!({}),
+                Some(label.clone()),
+                Some(true),
+            )
             .await
             .unwrap_or_else(|e| panic!("gen {gen}: next-generation stream rejected: {e:?}"));
         assert_ne!(task, task2, "gen {gen}: task id reused across generations");

@@ -506,6 +506,10 @@ enum Command {
     Call {
         fn_name: String,
         input: Value,
+        /// Client intent to declare on the wire (`"stream": <bool>`).
+        /// `None` sends no field — the legacy shape a pre-flag host used,
+        /// which the runtime answers without mismatch validation.
+        stream: Option<bool>,
         respond: oneshot::Sender<Result<Value, ErrorObj>>,
         task_out: oneshot::Sender<u64>,
         owner: Option<String>,
@@ -513,6 +517,13 @@ enum Command {
     CallStream {
         fn_name: String,
         input: Value,
+        /// Declared client intent: `Some(false)` is a plain `call()` —
+        /// no stream slot, no initial credit, `"stream": false` on the
+        /// wire. `Some(true)` is `stream()` — slot + credit, `"stream":
+        /// true`. `None` is a pre-flag client: accounted as a stream
+        /// (slot + credit) but the field is OMITTED from the request so
+        /// the runtime applies no mismatch validation.
+        stream: Option<bool>,
         items: StreamSink,
         /// Ok(task id) or the typed rejection — `call_stream` must surface
         /// the REAL error (e.g. LIMIT_EXCEEDED), not a bare disconnect.
@@ -676,11 +687,16 @@ impl Handle {
     /// `owner` is the controlling caller's identity (a webview label from
     /// Tauri — never a JS-supplied value); `None` marks the task unowned
     /// (test/dev paths only — plugin commands always pass the label).
+    /// `stream` is the wire `stream` field: `Some(false)` for `call()`
+    /// (the only sane value here — `Some(true)` asks the runtime to
+    /// stream into a call that cannot receive chunks), `None` omits the
+    /// field entirely (no runtime mismatch validation).
     pub fn call_task(
         &self,
         fn_name: &str,
         input: Value,
         owner: Option<String>,
+        stream: Option<bool>,
     ) -> Result<CallTask, ErrorObj> {
         let (rtx, rrx) = oneshot::channel();
         let (ttx, trx) = oneshot::channel();
@@ -688,6 +704,7 @@ impl Handle {
             .try_send(Command::Call {
                 fn_name: fn_name.into(),
                 input,
+                stream,
                 respond: rtx,
                 task_out: ttx,
                 owner,
@@ -709,17 +726,22 @@ impl Handle {
         fn_name: &str,
         input: Value,
         owner: Option<String>,
+        stream: Option<bool>,
     ) -> Result<Value, ErrorObj> {
-        let ct = self.call_task(fn_name, input, owner)?;
+        let ct = self.call_task(fn_name, input, owner, stream)?;
         ct.result.await.map_err(|_| stopped_err())?
     }
 
-    /// Start a streaming call; yields chunks until `StreamItem::End`.
+    /// Start a call delivered over a per-call stream channel — chunks
+    /// until `StreamItem::End`. `stream` is the declared client intent
+    /// (`Some(false)` = plain `call()`, `Some(true)` = `stream()`,
+    /// `None` = pre-flag client, see `Command::CallStream`).
     pub async fn call_stream(
         &self,
         fn_name: &str,
         input: Value,
         owner: Option<String>,
+        stream: Option<bool>,
     ) -> Result<(u64, StreamRx), ErrorObj> {
         let (items_tx, items_rx) = stream_pair(
             self.stream_buffer,
@@ -732,6 +754,7 @@ impl Handle {
             .try_send(Command::CallStream {
                 fn_name: fn_name.into(),
                 input,
+                stream,
                 items: items_tx,
                 task_out: task_tx,
                 owner,
@@ -1461,7 +1484,7 @@ impl Supervisor {
                         return ExitCause::CleanShutdown;
                     };
                     match cmd {
-                        Command::Call { fn_name, input, respond, task_out, owner } => {
+                        Command::Call { fn_name, input, stream, respond, task_out, owner } => {
                             let lim = &self.config.limits;
                             if tasks.len() >= lim.max_concurrent_tasks {
                                 let _ = respond.send(Err(limit_err(
@@ -1472,8 +1495,12 @@ impl Supervisor {
                             }
                             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                             let task = self.next_task.fetch_add(1, Ordering::Relaxed);
-                            let body = proto::request(id, "call",
-                                serde_json::json!({"fn": fn_name, "task": task, "input": input}));
+                            let mut params = serde_json::json!({"fn": fn_name, "task": task,
+                                "input": input});
+                            if let Some(s) = stream {
+                                params["stream"] = serde_json::json!(s);
+                            }
+                            let body = proto::request(id, "call", params);
                             match send_frame(&io, &body, self.config.max_frame) {
                                 Ok(()) => {
                                     let _ = task_out.send(task);
@@ -1496,7 +1523,14 @@ impl Supervisor {
                                 }
                             }
                         }
-                        Command::CallStream { fn_name, input, items, task_out, owner } => {
+                        Command::CallStream { fn_name, input, stream, items, task_out, owner } => {
+                            // `None` = a pre-flag client: it could be
+                            // either API, so the conservative accounting
+                            // is "stream" — a slot is taken and the
+                            // initial credit is granted exactly as before,
+                            // but the wire field stays absent so the
+                            // runtime applies no mismatch validation.
+                            let is_stream = stream.unwrap_or(true);
                             let lim = &self.config.limits;
                             if tasks.len() >= lim.max_concurrent_tasks {
                                 reject_stream(items, task_out, limit_err(
@@ -1505,32 +1539,40 @@ impl Supervisor {
                                     "too many in-flight tasks"));
                                 continue;
                             }
-                            let streams = tasks.values().filter(|m| m.is_stream).count();
-                            if streams >= lim.max_concurrent_streams {
-                                reject_stream(items, task_out, limit_err(
-                                    "max_concurrent_streams",
-                                    lim.max_concurrent_streams as u64,
-                                    "too many in-flight streams"));
-                                continue;
+                            if is_stream {
+                                let streams = tasks.values().filter(|m| m.is_stream).count();
+                                if streams >= lim.max_concurrent_streams {
+                                    reject_stream(items, task_out, limit_err(
+                                        "max_concurrent_streams",
+                                        lim.max_concurrent_streams as u64,
+                                        "too many in-flight streams"));
+                                    continue;
+                                }
                             }
                             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                             let task = self.next_task.fetch_add(1, Ordering::Relaxed);
-                            let body = proto::request(id, "call",
-                                serde_json::json!({"fn": fn_name, "task": task, "input": input}));
-                            let credit = proto::notification("stream.credit",
-                                serde_json::json!({"task": task, "n": self.config.initial_stream_credit}));
-                            // The initial grant is control traffic and goes
-                            // FIRST: the runtime buffers credit for a task it
-                            // has not registered yet (pending credit), so the
-                            // grant cannot be starved or reordered behind
-                            // data-lane traffic — and a failed send fails the
-                            // stream BEFORE the call is committed instead of
-                            // leaving it uncredited forever.
-                            if !send_ctrl(&io, &credit, self.config.max_frame) {
-                                reject_stream(items, task_out, limit_err(
-                                    "ctrl_queue", 16,
-                                    "control queue full — credit not delivered"));
-                                continue;
+                            let mut params = serde_json::json!({"fn": fn_name, "task": task,
+                                "input": input});
+                            if let Some(s) = stream {
+                                params["stream"] = serde_json::json!(s);
+                            }
+                            let body = proto::request(id, "call", params);
+                            if is_stream {
+                                let credit = proto::notification("stream.credit",
+                                    serde_json::json!({"task": task, "n": self.config.initial_stream_credit}));
+                                // The initial grant is control traffic and goes
+                                // FIRST: the runtime buffers credit for a task it
+                                // has not registered yet (pending credit), so the
+                                // grant cannot be starved or reordered behind
+                                // data-lane traffic — and a failed send fails the
+                                // stream BEFORE the call is committed instead of
+                                // leaving it uncredited forever.
+                                if !send_ctrl(&io, &credit, self.config.max_frame) {
+                                    reject_stream(items, task_out, limit_err(
+                                        "ctrl_queue", 16,
+                                        "control queue full — credit not delivered"));
+                                    continue;
+                                }
                             }
                             match send_frame(&io, &body, self.config.max_frame) {
                                 Ok(()) => {
@@ -1538,8 +1580,12 @@ impl Supervisor {
                                     pending.insert(id, PendingKind::Stream(items));
                                     task_of_call.insert(id, task);
                                     tasks.insert(task, TaskMeta {
-                                        call_id: id, owner, is_stream: true,
-                                        credit: self.config.initial_stream_credit,
+                                        call_id: id, owner, is_stream,
+                                        credit: if is_stream {
+                                            self.config.initial_stream_credit
+                                        } else {
+                                            0
+                                        },
                                     });
                                 }
                                 Err(e) => {

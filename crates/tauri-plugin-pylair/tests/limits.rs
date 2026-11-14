@@ -147,15 +147,19 @@ async fn task_cap_rejects_then_recovers() {
     wait_state(&h, State::Ready).await;
 
     // Two in-flight tasks.
-    let ct1 = h.call_task("sleep_forever", json!({}), None).unwrap();
-    let ct2 = h.call_task("sleep_forever", json!({}), None).unwrap();
+    let ct1 = h
+        .call_task("sleep_forever", json!({}), None, Some(false))
+        .unwrap();
+    let ct2 = h
+        .call_task("sleep_forever", json!({}), None, Some(false))
+        .unwrap();
     // ct.task resolves when the actor registers the task — the cap is
     // counted on the Rust side, so this IS the registration barrier.
     let t1 = timeout(T, ct1.task).await.unwrap().unwrap();
     let t2 = timeout(T, ct2.task).await.unwrap().unwrap();
 
     let err = h
-        .call("add", json!({"a": 1, "b": 2}), None)
+        .call("add", json!({"a": 1, "b": 2}), None, Some(false))
         .await
         .unwrap_err();
     assert_limit(&err, "max_concurrent_tasks");
@@ -165,7 +169,10 @@ async fn task_cap_rejects_then_recovers() {
     let oc = h.cancel(t1, None).await.unwrap();
     assert_eq!(oc, CancelOutcome::Cancelled);
     let _ = timeout(T, ct1.result).await;
-    let out = h.call("add", json!({"a": 1, "b": 2}), None).await.unwrap();
+    let out = h
+        .call("add", json!({"a": 1, "b": 2}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!(3));
 
     let _ = h.cancel(t2, None).await;
@@ -182,9 +189,12 @@ async fn stream_cap_rejects_second_stream() {
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let (task, mut items) = h.call_stream("infinite", json!({}), None).await.unwrap();
+    let (task, mut items) = h
+        .call_stream("infinite", json!({}), None, Some(true))
+        .await
+        .unwrap();
     let err = h
-        .call_stream("infinite", json!({}), None)
+        .call_stream("infinite", json!({}), None, Some(true))
         .await
         .err()
         .unwrap();
@@ -220,10 +230,13 @@ async fn full_command_queue_is_limit_error_not_stopped() {
 
     // Capacity 1: the first call queues, the second MUST fail with
     // LIMIT_EXCEEDED{limit:"max_queued_commands"} — not "runtime is stopped".
-    let first = h.call_task("x", json!({}), None);
+    let first = h.call_task("x", json!({}), None, Some(false));
     let err = match first {
         Err(e) => e,
-        Ok(_) => h.call_task("x", json!({}), None).err().unwrap(),
+        Ok(_) => h
+            .call_task("x", json!({}), None, Some(false))
+            .err()
+            .unwrap(),
     };
     assert_limit(&err, "max_queued_commands");
 }
@@ -260,7 +273,10 @@ async fn credit_cap_rejects_overgrant() {
     let h = spawn_h(spec(FAKE_HOLD_STREAM), cfg, ev);
     wait_state(&h, State::Ready).await;
 
-    let (task, _items) = h.call_stream("hold", json!({}), None).await.unwrap();
+    let (task, _items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
     // Outstanding = initial grant = 4 (the fake never produces).
     // 4 + 4 == 8: allowed, exactly at the cap.
     h.grant_credit(task, 4, None).await.unwrap();
@@ -306,7 +322,7 @@ async fn per_stream_byte_cap_ends_stream_with_limit_error() {
     wait_state(&h, State::Ready).await;
 
     let (task, mut items) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .unwrap();
     // Don't drain while the flood accumulates — every recv releases a
@@ -329,7 +345,10 @@ async fn per_stream_byte_cap_ends_stream_with_limit_error() {
     assert_limit(&err, "stream_buffer_bytes");
 
     // Producer was cancelled, supervisor still serves calls.
-    let out = h.call("add", json!({"a": 2, "b": 3}), None).await.unwrap();
+    let out = h
+        .call("add", json!({"a": 2, "b": 3}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!(5));
     let _ = h.cancel(task, None).await;
     h.shutdown().await;
@@ -352,15 +371,15 @@ async fn total_byte_cap_trips_across_streams() {
     wait_state(&h, State::Ready).await;
 
     let (_t1, mut s1) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .unwrap();
     let (_t2, mut s2) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .unwrap();
     let (_t3, mut s3) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .unwrap();
     // Don't drain before the trip — the diagnostic fires exactly then.
@@ -401,13 +420,16 @@ async fn oversized_call_fails_limit_not_runtime() {
     // with LIMIT_EXCEEDED — not trip the peer's read cap and kill the runtime.
     let big = "x".repeat(4 * 1024);
     let err = h
-        .call("echo", json!({"input": big}), None)
+        .call("echo", json!({"input": big}), None, Some(false))
         .await
         .unwrap_err();
     assert_limit(&err, "max_frame");
 
     // Runtime survived: normal calls still work.
-    let out = h.call("echo", json!({"input": "ok"}), None).await.unwrap();
+    let out = h
+        .call("echo", json!({"input": "ok"}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!({"input": "ok"}));
     h.shutdown().await;
 }
@@ -439,7 +461,10 @@ async fn absurd_limits_are_clamped_and_logged() {
     assert!(joined.contains("initial_stream_credit"), "{joined}");
 
     // Clamps actually applied: a call still works (task cap >= 1).
-    let out = h.call("echo", json!({"ok": true}), None).await.unwrap();
+    let out = h
+        .call("echo", json!({"ok": true}), None, Some(false))
+        .await
+        .unwrap();
     assert_eq!(out, json!({"ok": true}));
     h.shutdown().await;
 }
@@ -457,9 +482,9 @@ async fn isolated_worker_cap_is_typed_error() {
     wait_state(&h, State::Ready).await;
 
     // Three concurrent isolated calls, cap 2.
-    let r1 = h.call("isolated_sleep", json!({"seconds": 3.0}), None);
-    let r2 = h.call("isolated_sleep", json!({"seconds": 3.0}), None);
-    let r3 = h.call("isolated_sleep", json!({"seconds": 3.0}), None);
+    let r1 = h.call("isolated_sleep", json!({"seconds": 3.0}), None, Some(false));
+    let r2 = h.call("isolated_sleep", json!({"seconds": 3.0}), None, Some(false));
+    let r3 = h.call("isolated_sleep", json!({"seconds": 3.0}), None, Some(false));
     let (r1, r2, r3) = tokio::join!(r1, r2, r3);
     let errs: Vec<_> = [r1, r2, r3].into_iter().filter_map(|r| r.err()).collect();
     assert_eq!(errs.len(), 1, "exactly one call must be refused: {errs:?}");
@@ -480,7 +505,7 @@ async fn byte_capped_stream_bounds_memory_under_flood() {
     wait_state(&h, State::Ready).await;
 
     let (_task, mut items) = h
-        .call_stream("infinite_counted", json!({}), None)
+        .call_stream("infinite_counted", json!({}), None, Some(true))
         .await
         .unwrap();
     // The flood runs >1s with no consumer; buffered bytes stay <= 4KiB
@@ -496,7 +521,7 @@ async fn byte_capped_stream_bounds_memory_under_flood() {
     }
     let err = end.expect("no terminal after flood").unwrap_err();
     assert_limit(&err, "stream_buffer_bytes");
-    let out = timeout(T, h.call("add", json!({"a": 1, "b": 1}), None))
+    let out = timeout(T, h.call("add", json!({"a": 1, "b": 1}), None, Some(false)))
         .await
         .expect("supervisor died under flood")
         .unwrap();
