@@ -22,6 +22,9 @@ import httpx
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
 _DEFAULT_PORT = 11434
+# Port defaults follow Ollama itself: schemeless values get 11434, while
+# an explicit scheme gets that scheme's default port.
+_SCHEME_PORTS = {"http": 80, "https": 443}
 # Bind addresses, not destinations: a client must dial loopback instead.
 _ANY_HOSTS = {"0.0.0.0", "::"}
 
@@ -31,9 +34,10 @@ def normalize_host(value: str | None) -> str:
 
     Accepts "host", "host:port", "http(s)://host[:port]", a bare ":port"
     and bracketed IPv6. Bind-any addresses (0.0.0.0, ::) map to loopback;
-    a missing port defaults to 11434 and the scheme to http; any path,
-    query or trailing slash is dropped. Raises OllamaError naming the
-    variable on garbage.
+    a missing port defaults to 11434 without a scheme, or to 80/443 when
+    http(s):// is given; the scheme defaults to http; any path, query or
+    trailing slash is dropped. Raises OllamaError naming the variable on
+    garbage.
     """
 
     def bad(reason: str = "expected [http(s)://]host[:port]") -> OllamaError:
@@ -61,7 +65,9 @@ def normalize_host(value: str | None) -> str:
         host = "127.0.0.1"
     if ":" in host:
         host = f"[{host}]"
-    return f"{u.scheme}://{host}:{port or _DEFAULT_PORT}"
+    if port is None:
+        port = _SCHEME_PORTS[u.scheme] if "://" in raw else _DEFAULT_PORT
+    return f"{u.scheme}://{host}:{port}"
 
 
 def _host(explicit: str | None) -> str:

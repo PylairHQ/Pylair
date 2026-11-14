@@ -20,7 +20,10 @@ from pylair_ollama import Message, OllamaError, chat, normalize_host, pull, stat
         ("localhost", "http://localhost:11434"),
         ("localhost:1234", "http://localhost:1234"),
         ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
-        ("https://ollama.example.com", "https://ollama.example.com:11434"),
+        # An explicit scheme gets the scheme's default port, not 11434.
+        ("http://example.com", "http://example.com:80"),
+        ("https://ollama.example.com", "https://ollama.example.com:443"),
+        ("https://example.com:8443", "https://example.com:8443"),
         ("0.0.0.0", "http://127.0.0.1:11434"),
         ("0.0.0.0:11434", "http://127.0.0.1:11434"),
         ("::", "http://127.0.0.1:11434"),
@@ -30,7 +33,7 @@ from pylair_ollama import Message, OllamaError, chat, normalize_host, pull, stat
         # A trailing colon is a portless value, not garbage.
         ("localhost:", "http://localhost:11434"),
         # Paths, queries and trailing slashes are dropped.
-        ("http://ollama.lan/api/", "http://ollama.lan:11434"),
+        ("http://ollama.lan/api/", "http://ollama.lan:80"),
     ],
 )
 def test_normalize_host(given, want):

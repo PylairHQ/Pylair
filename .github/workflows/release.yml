@@ -82,6 +82,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: python/pylair/dist
+          # A rerun after a partial publish must be idempotent.
+          skip-existing: true
 
       # Tag only runs if the upload above succeeded — a failed publish
       # leaves nothing behind.
@@ -142,6 +144,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: integrations/ollama/dist
+          # A rerun after a partial publish must be idempotent.
+          skip-existing: true
 
       - name: Tag the release
         if: ${{ !inputs.dry_run }}
