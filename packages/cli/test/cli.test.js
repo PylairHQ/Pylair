@@ -1,17 +1,25 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, symlinkSync } from "node:fs";
+import { mkdtempSync, symlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBuildArgs } from "../dist/cli.js";
 
 const cli = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
+const pkgVersion = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 test("--version prints version", () => {
-  const out = execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" });
-  assert.equal(out.trim(), "0.0.0");
+  // From an unrelated cwd: the version comes from the package's own
+  // package.json next to dist/, not from wherever the user stands.
+  const out = execFileSync(process.execPath, [cli, "--version"], {
+    encoding: "utf8",
+    cwd: mkdtempSync(join(tmpdir(), "pylair-ver-")),
+  });
+  assert.equal(out.trim(), pkgVersion);
 });
 
 // A node_modules/.bin/pylair symlink is how pack-mode apps invoke the
@@ -20,7 +28,7 @@ test("bin runs through a .bin-style symlink", { skip: process.platform === "win3
   const shim = join(mkdtempSync(join(tmpdir(), "pylair-bin-")), "pylair");
   symlinkSync(cli, shim);
   const out = execFileSync(process.execPath, [shim, "--version"], { encoding: "utf8" });
-  assert.equal(out.trim(), "0.0.0");
+  assert.equal(out.trim(), pkgVersion);
 });
 
 test("--help lists commands and exits 0", () => {
