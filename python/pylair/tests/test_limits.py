@@ -89,7 +89,7 @@ def test_send_full_marks_out_full_and_injects_eof(capsys):
         return await asyncio.wait_for(s._in.get(), 5)
 
     fut = asyncio.run_coroutine_threadsafe(get(), loop)
-    # Queue items are (prio, seq, msg) tuples — the sentinel rides at 2.
+    # Queue items are (prio, seq, msg) tuples - the sentinel rides at 2.
     assert fut.result(timeout=5)[2].__class__.__name__ == "object"  # _EOF sentinel
     loop.call_soon_threadsafe(loop.stop)
     err = capsys.readouterr().err
@@ -195,7 +195,7 @@ def test_stalled_host_exits_with_distinct_reason():
 def test_inbound_flood_rejects_over_bound_but_never_stalls_control():
     """IN_MAX is a real bound: data frames past it get the standard
     LIMIT_EXCEEDED shape, while control frames sort ahead of the queued
-    backlog — a cancel and a shutdown written behind the flood are still
+    backlog - a cancel and a shutdown written behind the flood are still
     handled promptly."""
     from conftest import Runtime
 

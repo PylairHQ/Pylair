@@ -15,7 +15,7 @@ from pylair import _json
 from pylair import _protocol as proto
 
 ISOLATED_GRACE_S = 3.0
-# taskkill is awaited with this bound — a hung taskkill or a nonzero
+# taskkill is awaited with this bound - a hung taskkill or a nonzero
 # exit falls back to proc.kill() rather than parking the loop forever.
 TASKKILL_TIMEOUT_S = 5.0
 
@@ -340,7 +340,7 @@ class TaskRegistry:
         if proc is None or proc.returncode is not None:
             return
         if sys.platform == "win32":
-            # taskkill /T kills the whole tree — already covers
+            # taskkill /T kills the whole tree - already covers
             # grandchildren. Await it with a bound, check the exit code,
             # fall back to proc.kill() on failure or timeout, and bound
             # the wait for the worker to actually exit: the loop never
@@ -370,7 +370,7 @@ class TaskRegistry:
             except TimeoutError:
                 _log(
                     f"worker {proc.pid} did not exit within "
-                    f"{ISOLATED_GRACE_S}s of taskkill — last-resort kill"
+                    f"{ISOLATED_GRACE_S}s of taskkill - last-resort kill"
                 )
                 try:
                     proc.kill()
@@ -379,7 +379,7 @@ class TaskRegistry:
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except TimeoutError:
-                    _log(f"worker {proc.pid} survived kill — abandoning reap")
+                    _log(f"worker {proc.pid} survived kill - abandoning reap")
             return
         try:
             os.killpg(proc.pid, signal.SIGTERM)

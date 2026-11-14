@@ -532,7 +532,7 @@ def test_shutdown_grace_ms_is_one_shared_budget(runtime, tmp_path):
     runtime.proc.wait(timeout=10)
     total = time.monotonic() - start
     assert total < 4.0, (
-        f"shutdown took {total:.2f}s — a per-phase timeout would exceed "
+        f"shutdown took {total:.2f}s - a per-phase timeout would exceed "
         "the shared grace budget"
     )
 

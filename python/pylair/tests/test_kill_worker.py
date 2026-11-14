@@ -1,5 +1,5 @@
 """Windows worker-kill path: taskkill is awaited with a bound, its exit
-code is checked, and a failure or hang falls back to proc.kill() — the
+code is checked, and a failure or hang falls back to proc.kill() - the
 loop never parks on a worker that refuses to die. The win32 branch is
 exercised on every OS by stubbing sys.platform and the taskkill exec;
 one real test runs only on Windows."""
@@ -16,7 +16,7 @@ from pylair._tasks import Task, TaskRegistry
 
 
 class _FakeProc:
-    """Stands in for asyncio.subprocess.Process — the worker or the
+    """Stands in for asyncio.subprocess.Process - the worker or the
     taskkill helper, depending on where it is plugged in."""
 
     def __init__(self, pid: int = 4321, rc: int = 0, delay: float = 0.0) -> None:

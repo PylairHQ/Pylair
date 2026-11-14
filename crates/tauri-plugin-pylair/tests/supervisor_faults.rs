@@ -89,7 +89,7 @@ while True:
 /// Exits immediately — exercises restart + breaker.
 const FAKE_EXIT_NOW: &str = "import sys; sys.exit(1)";
 
-/// Echoes the shutdown request's params on stderr, acks, exits — lets a
+/// Echoes the shutdown request's params on stderr, acks, exits - lets a
 /// test read back exactly what the host put on the wire.
 const FAKE_ECHO_SHUTDOWN: &str = r#"
 import sys, struct, json
@@ -285,7 +285,7 @@ async fn wedged_runtime_killed_on_missed_pongs() {
     wait_state(&h, State::Failed).await;
 }
 
-/// Reads slowly (10ms per frame) but always answers pings on arrival —
+/// Reads slowly (10ms per frame) but always answers pings on arrival -
 /// the host's writer blocks on a full pipe, so its data lane stays
 /// saturated while liveness keeps flowing.
 const FAKE_SLOW_READER_PONGS: &str = r#"
@@ -319,7 +319,7 @@ async fn pings_survive_data_lane_backpressure() {
 
     // ~1.2s of sustained flood: pushes far outpace the slow reader, so
     // the data lane sits saturated across several ping ticks. The ping
-    // rides the control lane — written ahead of the queued data — so the
+    // rides the control lane - written ahead of the queued data - so the
     // runtime still answers it, and a tick whose ping cannot be queued
     // must never count as a missed pong.
     let lane_full = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -353,7 +353,7 @@ async fn pings_survive_data_lane_backpressure() {
     // The flood really did saturate the data lane.
     assert!(
         lane_full.load(std::sync::atomic::Ordering::SeqCst) > 0,
-        "data lane never filled — no backpressure"
+        "data lane never filled - no backpressure"
     );
     let mut killed = false;
     while let Ok(e) = rx.try_recv() {

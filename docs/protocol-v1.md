@@ -385,7 +385,7 @@ Call data and lifecycle events use different mechanisms:
   but not yet dispatched (`PYLAIR_IN_MAX`, default 4096); a data frame
   over that bound is rejected with
   `LIMIT_EXCEEDED{limit:"inbound_queue"}` if it carries a request id,
-  or dropped with a log line if not — the reader never waits, so a
+  or dropped with a log line if not - the reader never waits, so a
   control frame later in the pipe is never stuck behind queued data.
   Inbound control (`cancel`, `stream.credit`, `shutdown`) always
   enqueues and sorts ahead of queued data, so a flood cannot starve
@@ -445,8 +445,8 @@ platform:
   The host sends `grace_ms` = its own kill grace minus ~1s (floored at
   500 ms), so the runtime's drain always finishes before escalation.
   The runtime treats `grace_ms` as ONE deadline shared across every
-  shutdown phase — stop accepting, task cancel, isolated-worker kill
-  waits, writer flush, close — never a fresh timeout per phase. A host
+  shutdown phase - stop accepting, task cancel, isolated-worker kill
+  waits, writer flush, close - never a fresh timeout per phase. A host
   that sends no params gets the runtime's 5000 ms default.
 - Calls issued while the runtime is *restarting* (crash backoff) or
   *failed* fail fast with `RUNTIME_UNAVAILABLE`; calls issued while it is

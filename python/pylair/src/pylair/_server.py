@@ -65,7 +65,7 @@ OUT_MAX_BYTES = int(os.environ.get("PYLAIR_OUT_MAX_BYTES", str(64 * 1024 * 1024)
 # here.
 IN_MAX = int(os.environ.get("PYLAIR_IN_MAX", "4096"))
 # Requests and notifications that must reach dispatch even under a data
-# flood. `ping` never reaches the queue — it is answered in the reader.
+# flood. `ping` never reaches the queue - it is answered in the reader.
 _CONTROL_METHODS = frozenset({"cancel", "stream.credit", "shutdown"})
 
 
@@ -143,7 +143,7 @@ class Server:
         self._loop: asyncio.AbstractEventLoop | None = None
         # Set when `shutdown` arrives: grace_ms becomes ONE deadline the
         # drain, the post-loop drain, the worker kills and the writer
-        # flush all share — never a fresh timeout per phase (protocol §7).
+        # flush all share - never a fresh timeout per phase (protocol §7).
         self._deadline: float | None = None
         # Last time the asyncio loop proved it was making progress; read by the
         # reader thread when answering pings (single float store: atomic).
@@ -266,7 +266,7 @@ class Server:
                     )
                     continue
                 # Inbound bound: control enqueues ahead of queued data;
-                # data beyond IN_MAX is rejected or dropped — the reader
+                # data beyond IN_MAX is rejected or dropped - the reader
                 # never waits, so control later in the pipe is never
                 # stuck behind data (see the IN_MAX comment).
                 method = msg.get("method") if isinstance(msg, dict) else None
@@ -282,13 +282,13 @@ class Server:
                             proto.error_response(
                                 rid,
                                 proto.LIMIT_EXCEEDED,
-                                "inbound queue full — loop is behind",
+                                "inbound queue full - loop is behind",
                                 {"limit": "inbound_queue", "max": self._in_max},
                             )
                         )
                     else:
                         _log(
-                            f"inbound queue full ({self._in_max}) — dropping data frame"
+                            f"inbound queue full ({self._in_max}) - dropping data frame"
                         )
                     continue
                 loop.call_soon_threadsafe(
