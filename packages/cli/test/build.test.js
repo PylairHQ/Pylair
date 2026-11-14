@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { matchGlob } from "../dist/glob.js";
 import { stageNotices, download, ensureTarball, uvExportArgs, uvPipInstallArgs, requirementsHaveHashes, PYC_INVALIDATION_MODE } from "../dist/build.js";
 import { DEFAULT_PRUNE, prune } from "../dist/prune.js";
-import { loadConfig } from "../dist/config.js";
+import { loadConfig, windowsSigningConfigured } from "../dist/config.js";
 
 describe("matchGlob", () => {
   test("literal and single-star", () => {
@@ -622,5 +622,53 @@ describe("uv export / pip-install flags", () => {
     assert.ok(!exported.includes("--require-hashes"));
     const fallback = uvPipInstallArgs("python3", "/t", "/r/r.txt", true);
     assert.ok(fallback.includes("--require-hashes"));
+  });
+});
+
+describe("windowsSigningConfigured", () => {
+  const saved = process.env.WINDOWS_CERTIFICATE_THUMBPRINT;
+  const clear = () => delete process.env.WINDOWS_CERTIFICATE_THUMBPRINT;
+  const restore = () => {
+    if (saved === undefined) clear();
+    else process.env.WINDOWS_CERTIFICATE_THUMBPRINT = saved;
+  };
+  const appWithConf = (conf) => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-sign-"));
+    mkdirSync(join(dir, "src-tauri"), { recursive: true });
+    if (conf !== null)
+      writeFileSync(join(dir, "src-tauri", "tauri.conf.json"), conf);
+    return dir;
+  };
+
+  test("env alone counts as configured", () => {
+    process.env.WINDOWS_CERTIFICATE_THUMBPRINT = "abc123";
+    try {
+      assert.ok(windowsSigningConfigured(mkdtempSync(join(tmpdir(), "x-"))));
+    } finally {
+      restore();
+    }
+  });
+
+  test("config certificateThumbprint alone counts", () => {
+    clear();
+    const dir = appWithConf(
+      JSON.stringify({ bundle: { windows: { certificateThumbprint: "abc" } } }),
+    );
+    assert.ok(windowsSigningConfigured(dir));
+  });
+
+  test("config signCommand alone counts", () => {
+    clear();
+    const dir = appWithConf(
+      JSON.stringify({ bundle: { windows: { signCommand: "signtool %1" } } }),
+    );
+    assert.ok(windowsSigningConfigured(dir));
+  });
+
+  test("neither env nor config warns (not configured)", () => {
+    clear();
+    assert.ok(!windowsSigningConfigured(appWithConf(JSON.stringify({ bundle: {} }))));
+    assert.ok(!windowsSigningConfigured(appWithConf("not json")));
+    assert.ok(!windowsSigningConfigured(mkdtempSync(join(tmpdir(), "x-")))); // no file
   });
 });

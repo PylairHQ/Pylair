@@ -94,6 +94,25 @@ export function loadTauriConfig(appDir: string): TauriConfig {
   };
 }
 
+/** Windows signing counts as configured when the cert-thumbprint env is
+ * set OR tauri.conf.json names a thumbprint or a custom sign command
+ * under bundle.windows. Missing file, malformed JSON or absent keys all
+ * mean not configured; never throws. */
+export function windowsSigningConfigured(appDir: string): boolean {
+  if (process.env.WINDOWS_CERTIFICATE_THUMBPRINT) return true;
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(appDir, "src-tauri", "tauri.conf.json"), "utf-8"),
+    );
+    return !!(
+      raw?.bundle?.windows?.certificateThumbprint ||
+      raw?.bundle?.windows?.signCommand
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The directory that must be on PYTHONPATH for `cfg.appModule` to import:
  * the PARENT of the source dir ("backend.app" lives at <root>/backend/app.py).
