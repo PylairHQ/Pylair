@@ -87,6 +87,15 @@ async def sleep_forever() -> None:
 
 
 @expose
+async def loop_block(seconds: float) -> str:
+    """Blocks the EVENT LOOP with a sync sleep - the pathological
+    "blocking code inside an async def" case: inbound data floods while
+    the loop is wedged and control must still reach dispatch."""
+    time.sleep(seconds)  # noqa: ASYNC251 - blocking the loop is the point
+    return "unblocked"
+
+
+@expose
 def sync_sleep(seconds: float) -> str:
     time.sleep(seconds)
     return "slept"
