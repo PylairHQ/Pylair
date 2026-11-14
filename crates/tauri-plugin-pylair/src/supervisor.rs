@@ -2186,9 +2186,17 @@ async fn spawn_child(
             // CREATE_NO_WINDOW suppresses it. Orthogonal to containment —
             // the Job Object attaches by handle after spawn, and stdio
             // stays on the pipes either way.
-            cmd.creation_flags(child_creation_flags(
-                std::env::var_os("PYLAIR_CONSOLE").as_deref(),
-            ));
+            //
+            // CREATE_SUSPENDED: the runtime must not execute one instruction
+            // before it is inside the Job Object, or a process it spawns in
+            // that gap is born outside the job and survives it (K2,
+            // docs/design/windows-job-object-race.md). Resumed below, on
+            // every path, right after assignment.
+            const CREATE_SUSPENDED: u32 = 0x0000_0004;
+            cmd.creation_flags(
+                child_creation_flags(std::env::var_os("PYLAIR_CONSOLE").as_deref())
+                    | CREATE_SUSPENDED,
+            );
         }
         #[cfg(unix)]
         {
@@ -2205,6 +2213,16 @@ async fn spawn_child(
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
 
+    // Test seam (debug builds only): widen the spawn-to-assignment gap so a
+    // regression test can make the runtime act inside it (tests/job_race.rs).
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(ms) = std::env::var("PYLAIR_TEST_ASSIGN_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
     // Job Object handle must outlive the child — held by the monitor task.
     #[cfg(windows)]
     let job = assign_to_job_object(pid);
@@ -2215,6 +2233,20 @@ async fn spawn_child(
              taskkill /T for cleanup (descendants may survive a hard host exit)"
                 .into(),
         ));
+    }
+    // Let the runtime run, whether or not the job assignment worked (the
+    // taskkill fallback needs a running child to be useful, and a child left
+    // suspended would only end at the hello timeout). A thread that cannot
+    // be resumed is a failed spawn: kill it so nothing is left suspended.
+    #[cfg(windows)]
+    if let Err(e) = pid
+        .ok_or_else(|| io::Error::other("child exited before it could be resumed"))
+        .and_then(resume_main_thread)
+    {
+        let _ = child.start_kill();
+        return Err(io::Error::other(format!(
+            "could not start the Python runtime (resuming its main thread failed: {e})"
+        )));
     }
     #[cfg(windows)]
     let tree_pid = pid;
@@ -2683,6 +2715,50 @@ impl Drop for JobHandle {
             windows_sys::Win32::Foundation::CloseHandle(self.0);
         }
     }
+}
+
+/// Resume the single thread of a process created with `CREATE_SUSPENDED`.
+/// std and tokio close the primary thread handle at spawn, so find the
+/// thread by walking a Toolhelp snapshot for the one owned by `pid`. We hold
+/// the child's process handle, so `pid` cannot have been recycled.
+#[cfg(windows)]
+fn resume_main_thread(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut tid = None;
+        let mut more = Thread32First(snap, &mut entry);
+        while more != 0 {
+            if entry.th32OwnerProcessID == pid {
+                tid = Some(entry.th32ThreadID);
+                break;
+            }
+            more = Thread32Next(snap, &mut entry);
+        }
+        CloseHandle(snap);
+        let tid = tid.ok_or_else(|| io::Error::other("no thread found for the new process"))?;
+        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, tid);
+        if thread.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let previous = ResumeThread(thread);
+        let err = io::Error::last_os_error();
+        CloseHandle(thread);
+        if previous == u32::MAX {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

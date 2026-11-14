@@ -407,7 +407,12 @@ platform:
 - **Windows:** "process group" doesn't exist — the host puts the
   runtime in a **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`;
   when the host's last job handle closes (clean or crash), the kernel
-  kills everything in the job. The runtime does the same for workers.
+  kills everything in the job. The runtime is created suspended
+  (`CREATE_SUSPENDED`), assigned to the job, and only then resumed, so
+  it executes no instruction (and spawns no descendant) outside the job;
+  see `docs/design/windows-job-object-race.md`. Isolated workers are
+  not given a job of their own: they inherit the runtime's, and a
+  worker cancel uses `taskkill /T`.
 - **POSIX:** the runtime gets its own process group and the supervisor
   kills `-pgid` — both on a forced kill and when the runtime exits on its
   own (so group members cannot outlive a dead leader). Isolated workers
