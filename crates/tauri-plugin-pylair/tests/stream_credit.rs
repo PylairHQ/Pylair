@@ -12,7 +12,7 @@
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
     spawn, CancelOutcome, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
@@ -58,6 +58,21 @@ fn spec(script: &str) -> SpawnSpec {
         cwd: None,
         ..Default::default()
     }
+}
+
+/// Like `spec`, with extra environment for the fake runtime.
+fn spec_env(script: &str, env: &[(&str, &str)]) -> SpawnSpec {
+    let mut s = spec(script);
+    s.env = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    s
+}
+
+/// Which `LIMIT_EXCEEDED` cap an error names, if any.
+fn limit_of(e: &proto::ErrorObj) -> Option<&str> {
+    e.data.as_ref().and_then(|d| d["limit"].as_str())
 }
 
 fn fast_config() -> SupervisorConfig {
@@ -115,9 +130,14 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
 ///   * it then reads ONE frame and reports `READ 1` on stderr — the
 ///     synchronization point: one frame's worth of pipe space just
 ///     drained, so the writer lane has exactly one free slot;
-///   * it pauses 1.5 s (the action window — enough for a test to act
-///     while the lane/queue depths hold), then reads on at 50 ms per
-///     frame to drain the backlog quickly.
+///   * it pauses for the action window (1.5 s, or `FAKE_PAUSE_S` — long
+///     enough for a test to act while the lane/queue depths hold), then
+///     reads on at 50 ms per frame to drain the backlog quickly.
+///
+/// Note the single read does NOT guarantee the test a free lane slot:
+/// pump commands still queued in the actor race it for the slot it
+/// frees. Tests treat `frame_out_queue` as "full right now" and wait on
+/// the real condition instead of counting slots.
 ///
 /// `stream.credit` notifications are stashed per task (the same
 /// pending-credit shape the real runtime uses for a grant that beats
@@ -127,6 +147,7 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
 /// input; `cancel` answers terminated.
 const FAKE_SLOW_READER: &str = r#"
 import sys, os, struct, json, time
+PAUSE = float(os.environ.get("FAKE_PAUSE_S", "1.5"))
 def w(o):
     b = json.dumps(o).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
@@ -161,6 +182,7 @@ while True:
     elif method == "stream.credit":
         t = params.get("task")
         credit[t] = credit.get(t, 0) + params.get("n", 0)
+        print("CREDIT t=%s n=%s" % (t, params.get("n", 0)), file=sys.stderr, flush=True)
     elif "id" in m:
         if params.get("fn") == "count_stream":
             t = params.get("task")
@@ -174,7 +196,7 @@ while True:
             w({"jsonrpc":"2.0","id": m["id"],"result": params.get("input")})
     # One slow tick after the first read — the action window — then fast
     # ticks to drain the backlog.
-    time.sleep(1.5 if n == 1 else 0.05)
+    time.sleep(PAUSE if n == 1 else 0.05)
 "#;
 
 /// Pump data-lane call frames until the runtime's stdin queue is full —
@@ -240,10 +262,30 @@ async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
 
     saturate_data_lane(&h, &mut rx).await;
 
-    let (_task, mut items) = h
-        .call_stream("count_stream", json!({}), None, Some(true))
-        .await
-        .expect("stream call rejected — the call frame should still enqueue");
+    // Open the stream once the lane has a slot. The single read in
+    // `saturate_data_lane` frees one slot, but pump commands still queued
+    // in the actor race it for that slot, so `frame_out_queue` means "full
+    // right now", not failure: poll with a deadline for the real
+    // condition. Every other error is a real failure. A rejected attempt
+    // has already granted credit for a task that never registers; the
+    // host cancels it, so retrying leaves nothing behind.
+    let deadline = Instant::now() + T;
+    let (task, mut items) = loop {
+        match h
+            .call_stream("count_stream", json!({}), None, Some(true))
+            .await
+        {
+            Ok(opened) => break opened,
+            Err(e) if limit_of(&e) == Some("frame_out_queue") && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("stream call rejected: {e:?}"),
+        }
+    };
+
+    // The grant is control traffic: the runtime must observe it for THIS
+    // task (it is buffered as pending credit until the call arrives).
+    wait_for_diag(&mut rx, &format!("CREDIT t={task} ")).await;
 
     // The call waits out the remaining backlog (~64 slow reads); the
     // credit, if it ever arrives, must be there when the call is.
@@ -265,7 +307,14 @@ async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
 #[tokio::test]
 async fn initial_credit_undeliverable_rejects_stream() {
     let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(512);
-    let h = spawn_h(spec(FAKE_SLOW_READER), fast_config(), ev);
+    // Hold the writer blocked well past the cancels below: the control
+    // lane stays full only while the OS pipe is not draining, and a slow
+    // CI machine can burn a 1.5 s window before the stream call lands.
+    let h = spawn_h(
+        spec_env(FAKE_SLOW_READER, &[("FAKE_PAUSE_S", "25")]),
+        fast_config(),
+        ev,
+    );
     wait_state(&h, State::Ready).await;
 
     let tasks = saturate_data_lane(&h, &mut rx).await;
@@ -296,13 +345,44 @@ async fn initial_credit_undeliverable_rejects_stream() {
     .await
     .expect("control lane never filled with cancels");
 
-    let err = match h
-        .call_stream("count_stream", json!({}), None, Some(true))
-        .await
-    {
-        Ok(_) => panic!("stream opened despite an undeliverable initial grant"),
-        Err(e) => e,
-    };
+    // Reaching a full control lane once is not enough: after the read the
+    // writer may flush queued control frames into the freed pipe space, so
+    // by the time the stream call runs the lane can have room again (a
+    // `frame_out_queue` or even an `Ok` answer then is legitimate, not a
+    // bug). Keep pressing the lane with cancels on live tasks and probe
+    // with stream calls until the host reports the real condition,
+    // `ctrl_queue`, within a deadline. A host that silently dropped the
+    // grant and opened the stream anyway would never report it, so that
+    // regression still fails here, at the deadline.
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut err = None;
+    while Instant::now() < deadline {
+        for t in tasks.iter().take(40) {
+            let h2 = h.clone();
+            let t = *t;
+            tokio::spawn(async move {
+                let _ = h2.cancel(t, None).await;
+            });
+        }
+        tokio::task::yield_now().await;
+        match h
+            .call_stream("count_stream", json!({}), None, Some(true))
+            .await
+        {
+            Err(e) if limit_of(&e) == Some("ctrl_queue") => {
+                err = Some(e);
+                break;
+            }
+            // The lane had room at that instant: try again.
+            Ok(_) => {}
+            Err(e) if limit_of(&e) == Some("frame_out_queue") => {}
+            Err(e) => panic!("unexpected rejection while probing: {e:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let err = err.expect(
+        "the host never rejected a stream with ctrl_queue while the control lane was pressed full",
+    );
     assert_eq!(
         err.code,
         proto::LIMIT_EXCEEDED,
