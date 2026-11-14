@@ -115,9 +115,24 @@ class Server:
         self._stopping = False
         self._out_full = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Set when `shutdown` arrives: grace_ms becomes ONE deadline the
+        # drain, the post-loop drain, the worker kills and the writer
+        # flush all share — never a fresh timeout per phase (protocol §7).
+        self._deadline: float | None = None
         # Last time the asyncio loop proved it was making progress; read by the
         # reader thread when answering pings (single float store: atomic).
         self._loop_beat = time.monotonic()
+
+    def _remaining(self, cap: float | None = None) -> float | None:
+        """Time left in the shared shutdown budget.
+
+        `cap` is a phase's own ceiling; a set deadline wins and the phase
+        gets whichever is smaller. No deadline -> the cap stands alone.
+        """
+        if self._deadline is None:
+            return cap
+        rem = max(self._deadline - time.monotonic(), 0.0)
+        return rem if cap is None else min(cap, rem)
 
     def _send(self, msg: dict) -> None:
         # Depth check before serialization: a frame nested deeper than
@@ -311,7 +326,12 @@ class Server:
                 self._send(proto.response(rid, {}))
                 self._stopping = True
                 grace = params.get("grace_ms", 5000) / 1000
-                await self._drain(grace)
+                # One deadline shared by every phase that follows: the
+                # drain here, the post-loop drain, per-worker kills and
+                # the writer flush/close all draw from it.
+                self._deadline = time.monotonic() + grace
+                self._tasks.deadline = self._deadline
+                await self._drain()
             elif method == "stream.credit":  # tolerate request-shaped credit
                 self._send(
                     proto.error_response(
@@ -391,10 +411,16 @@ class Server:
 
     # ---- lifecycle ---------------------------------------------------------
 
-    async def _drain(self, grace_s: float) -> None:
-        """Cancel tasks, then exit. Called on shutdown and stdin EOF."""
+    async def _drain(self, grace_s: float | None = None) -> None:
+        """Cancel tasks, then exit. Called on shutdown and stdin EOF.
+
+        `grace_s` is this phase's own cap; a set shutdown deadline wins,
+        so a slow earlier phase can never buy the later ones extra time.
+        """
         try:
-            await asyncio.wait_for(self._tasks.cancel_all(), timeout=grace_s)
+            await asyncio.wait_for(
+                self._tasks.cancel_all(), timeout=self._remaining(grace_s)
+            )
         except TimeoutError:
             _log("grace period expired during drain")
             for t in self._tasks.all():
@@ -461,7 +487,7 @@ class Server:
         # only once the queue is empty. Join it BEFORE closing the fd —
         # closing first makes write_frame fail on the closed stream and
         # every final frame (shutdown ack, TASK_CANCELLEDs) is dropped.
-        writer.join(timeout=2)
+        writer.join(timeout=self._remaining(2.0) or 0)
         self._channel.close_write()
 
 

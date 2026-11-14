@@ -513,6 +513,41 @@ def test_shutdown_emits_ack_and_task_terminals(runtime):
     )
 
 
+def test_shutdown_grace_ms_is_one_shared_budget(runtime, tmp_path):
+    """grace_ms covers every shutdown phase, not a fresh timeout per
+    phase: a SIGTERM-immune worker would eat ISOLATED_GRACE_S (3s) on
+    its own if the kill got a new budget. With a shared 1.5s deadline
+    the whole exit stays well inside the budget plus margin."""
+    runtime.recv()  # hello
+    ready = tmp_path / "ready.txt"
+    runtime.send(call(1, "sigterm_immune", task=1, input={"ready_file": str(ready)}))
+    deadline = time.time() + 10
+    while not ready.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert ready.exists(), "worker never signalled ready"
+    start = time.monotonic()
+    runtime.send(proto.request(2, "shutdown", {"grace_ms": 1500}))
+    resp = runtime.recv_until(lambda m: m.get("id") == 2, timeout=10)
+    assert resp.get("result") == {}
+    runtime.proc.wait(timeout=10)
+    total = time.monotonic() - start
+    assert total < 4.0, (
+        f"shutdown took {total:.2f}s — a per-phase timeout would exceed "
+        "the shared grace budget"
+    )
+
+
+def test_shutdown_without_params_uses_default_grace(runtime):
+    """A pre-grace_ms host sends no params: the 5000 ms default applies
+    and a clean runtime still exits."""
+    runtime.recv()  # hello
+    runtime.send(proto.request(1, "shutdown", None))
+    resp = runtime.recv_until(lambda m: m.get("id") == 1, timeout=10)
+    assert resp.get("result") == {}
+    runtime.proc.wait(timeout=10)
+    assert runtime.proc.returncode == 0
+
+
 # ---- depth cap ---------------------------------------------------------------
 # serde_json on the host refuses frames nested deeper than 128, so a
 # legitimate deep Python result is indistinguishable from a malformed

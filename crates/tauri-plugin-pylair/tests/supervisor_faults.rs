@@ -89,6 +89,26 @@ while True:
 /// Exits immediately — exercises restart + breaker.
 const FAKE_EXIT_NOW: &str = "import sys; sys.exit(1)";
 
+/// Echoes the shutdown request's params on stderr, acks, exits — lets a
+/// test read back exactly what the host put on the wire.
+const FAKE_ECHO_SHUTDOWN: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif m["method"] == "shutdown":
+        print("SHUTDOWN_PARAMS=" + json.dumps(m.get("params")), file=sys.stderr, flush=True)
+        w({"jsonrpc":"2.0","id": m["id"],"result": {}}); break
+"#;
+
 /// hello with the wrong protocol version — deployment bug, not a crash.
 const FAKE_BAD_VERSION: &str = r#"
 import sys, struct, json
@@ -197,6 +217,29 @@ async fn hello_echo_pong_shutdown() {
     assert_eq!(out, json!({"x": 1}));
     h.shutdown().await;
     wait_state(&h, State::Stopped).await;
+}
+
+#[tokio::test]
+async fn shutdown_sends_grace_ms_inside_host_budget() {
+    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let mut cfg = fast_config();
+    cfg.shutdown_grace = Duration::from_secs(3);
+    let h = spawn_h(spec(FAKE_ECHO_SHUTDOWN), cfg, ev);
+    wait_state(&h, State::Ready).await;
+    h.shutdown().await;
+    wait_state(&h, State::Stopped).await;
+    // 3s host grace -> grace_ms 2000: the runtime's shared drain budget
+    // must always end inside our kill timer (~1s margin).
+    let mut seen = None;
+    while let Ok(e) = rx.try_recv() {
+        if let RuntimeEvent::Stderr(line) = e {
+            if let Some(pos) = line.find("SHUTDOWN_PARAMS=") {
+                seen = Some(line[pos + "SHUTDOWN_PARAMS=".len()..].to_string());
+            }
+        }
+    }
+    let params: Value = serde_json::from_str(&seen.expect("runtime never saw shutdown")).unwrap();
+    assert_eq!(params["grace_ms"], 2000);
 }
 
 #[tokio::test]

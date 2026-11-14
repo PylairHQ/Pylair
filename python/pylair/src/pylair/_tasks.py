@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import sys
+import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -59,6 +60,15 @@ class TaskRegistry:
         # an unknown id <= the mark is finished-or-rejected, never early.
         self._highest_task_id = 0
         self._isolated = 0
+        # Set by the server on `shutdown`: worker kills then draw their
+        # wait from the shared grace budget, never a fresh ISOLATED_GRACE_S.
+        self.deadline: float | None = None
+
+    def _budget(self, cap: float) -> float:
+        """A phase's cap shrunk to whatever the shared deadline leaves."""
+        if self.deadline is None:
+            return cap
+        return min(cap, max(self.deadline - time.monotonic(), 0.0))
 
     def note_call_id(self, task_id: int | str) -> None:
         """Advance the id high-water mark and drop dead early-entries.
@@ -338,7 +348,7 @@ class TaskRegistry:
         except ProcessLookupError:
             pass
         try:
-            await asyncio.wait_for(proc.wait(), timeout=ISOLATED_GRACE_S)
+            await asyncio.wait_for(proc.wait(), timeout=self._budget(ISOLATED_GRACE_S))
         except TimeoutError:
             pass
         # No leaked grandchildren: SIGKILL the whole process group whether or

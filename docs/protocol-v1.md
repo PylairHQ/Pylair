@@ -426,6 +426,12 @@ platform:
   call is retried is the app's choice — the supervisor never replays
   calls (no idempotency guarantees in Python user code).
 - Graceful `shutdown` → `grace_ms` deadline → SIGTERM → 5s → SIGKILL.
+  The host sends `grace_ms` = its own kill grace minus ~1s (floored at
+  500 ms), so the runtime's drain always finishes before escalation.
+  The runtime treats `grace_ms` as ONE deadline shared across every
+  shutdown phase — stop accepting, task cancel, isolated-worker kill
+  waits, writer flush, close — never a fresh timeout per phase. A host
+  that sends no params gets the runtime's 5000 ms default.
 - Calls issued while the runtime is *restarting* (crash backoff) or
   *failed* fail fast with `RUNTIME_UNAVAILABLE`; calls issued while it is
   merely *starting* queue until the handshake completes.

@@ -1709,7 +1709,23 @@ impl Supervisor {
                         Command::Shutdown { ack } => {
                             self.shutdown_acks.push(ack);
                             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                            let body = proto::request(id, "shutdown", Value::Null);
+                            // The runtime's drain budget must finish inside
+                            // our kill timer: give it the grace minus ~1s
+                            // for the ack, exit and reap, floored so a tiny
+                            // configured grace still buys real drain time.
+                            // grace_ms is ONE budget the runtime shares
+                            // across every shutdown phase (protocol §7).
+                            let grace_ms = self
+                                .config
+                                .shutdown_grace
+                                .saturating_sub(Duration::from_millis(1000))
+                                .max(Duration::from_millis(500))
+                                .as_millis() as u64;
+                            let body = proto::request(
+                                id,
+                                "shutdown",
+                                serde_json::json!({"grace_ms": grace_ms}),
+                            );
                             // Flush ordering: calls committed to the data
                             // lane before this shutdown must be written
                             // first, so the drain can return their real
