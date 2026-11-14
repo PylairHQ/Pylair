@@ -43,11 +43,16 @@ jobs:
       - name: Validate the version input
         env:
           VERSION: ${{ inputs.version }}
+        shell: bash
         run: |
-          echo "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || {
+          # Whole-string bash regex — grep -x-style anchoring — plus an
+          # explicit newline/CR rejection (=~ $ can sit before a trailing
+          # newline under REG_NEWLINE).
+          if [[ "$VERSION" == *$'\n'* || "$VERSION" == *$'\r'* ]] || \
+             [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "invalid version input: '$VERSION' — expected N.N.N[-suffix]"
             exit 1
-          }
+          fi
 
       - name: Check version matches Cargo.toml
         # The version lives in the repo, bumped by a normal commit — the
