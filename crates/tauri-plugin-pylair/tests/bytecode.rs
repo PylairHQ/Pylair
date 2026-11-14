@@ -49,7 +49,13 @@ fn import_with_env(root: &PathBuf, extra: &[(&str, &str)]) {
     cmd.arg("-c")
         .arg("import libhelper.mod")
         .env("PYTHONPATH", root)
-        .env("PYTHONNOUSERSITE", "1");
+        .env("PYTHONNOUSERSITE", "1")
+        // The control import must write __pycache__ next to the module, so
+        // neither of these may leak in from the developer's shell:
+        // DONTWRITEBYTECODE would suppress the write, PYCACHEPREFIX would
+        // redirect it. The release flag under test is passed via `extra`.
+        .env_remove("PYTHONDONTWRITEBYTECODE")
+        .env_remove("PYTHONPYCACHEPREFIX");
     for (k, v) in extra {
         cmd.env(k, v);
     }
