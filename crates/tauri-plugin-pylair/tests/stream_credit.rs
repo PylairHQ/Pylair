@@ -130,7 +130,7 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
 ///   * it then reads ONE frame and reports `READ 1` on stderr — the
 ///     synchronization point: one frame's worth of pipe space just
 ///     drained, so the writer lane has exactly one free slot;
-///   * it pauses for the action window (1.5 s, or `FAKE_PAUSE_S` — long
+///   * it pauses for the action window (1.5 s, or `FAKE_PAUSE_S`, long
 ///     enough for a test to act while the lane/queue depths hold), then
 ///     reads on at 50 ms per frame to drain the backlog quickly.
 ///
