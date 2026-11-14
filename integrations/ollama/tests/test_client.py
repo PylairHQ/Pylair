@@ -9,7 +9,44 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from pylair_ollama import Message, OllamaError, chat, pull, status
+from pylair_ollama import Message, OllamaError, chat, normalize_host, pull, status
+
+
+@pytest.mark.parametrize(
+    "given,want",
+    [
+        ("", "http://127.0.0.1:11434"),
+        (None, "http://127.0.0.1:11434"),
+        ("localhost", "http://localhost:11434"),
+        ("localhost:1234", "http://localhost:1234"),
+        ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
+        # An explicit scheme gets the scheme's default port, not 11434.
+        ("http://example.com", "http://example.com:80"),
+        ("https://ollama.example.com", "https://ollama.example.com:443"),
+        ("https://example.com:8443", "https://example.com:8443"),
+        ("0.0.0.0", "http://127.0.0.1:11434"),
+        ("0.0.0.0:11434", "http://127.0.0.1:11434"),
+        ("::", "http://127.0.0.1:11434"),
+        ("[::]:11434", "http://127.0.0.1:11434"),
+        (":8080", "http://127.0.0.1:8080"),
+        ("[::1]:11434", "http://[::1]:11434"),
+        # A trailing colon is a portless value, not garbage.
+        ("localhost:", "http://localhost:11434"),
+        # Paths, queries and trailing slashes are dropped.
+        ("http://ollama.lan/api/", "http://ollama.lan:80"),
+    ],
+)
+def test_normalize_host(given, want):
+    assert normalize_host(given) == want
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["not a host", "http://", "host:abc", "ftp://x", "host:99999"],
+)
+def test_normalize_host_rejects(given):
+    with pytest.raises(OllamaError, match="OLLAMA_HOST"):
+        normalize_host(given)
 
 
 class Stub(BaseHTTPRequestHandler):

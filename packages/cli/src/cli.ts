@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "./build.js";
 import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
@@ -147,6 +148,20 @@ function codegen(argv: string[]): number {
   return 0;
 }
 
+/** The CLI's own version, read from package.json relative to this built
+ * file (dist/cli.js -> ../package.json), so it works from any cwd and
+ * from the published tarball. Falls back to 0.0.0 if unreadable. */
+function cliVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf-8"),
+    );
+    return String(pkg.version ?? "0.0.0");
+  } catch {
+    return "0.0.0";
+  }
+}
+
 export function main(argv: string[]): number | Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
@@ -154,7 +169,7 @@ export function main(argv: string[]): number | Promise<number> {
     return command ? 0 : 1;
   }
   if (command === "--version" || command === "-v") {
-    console.log("0.0.0");
+    console.log(cliVersion());
     return 0;
   }
   if (command === "codegen") {

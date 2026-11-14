@@ -12,19 +12,68 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import httpx
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
+_DEFAULT_PORT = 11434
+# Port defaults follow Ollama itself: schemeless values get 11434, while
+# an explicit scheme gets that scheme's default port.
+_SCHEME_PORTS = {"http": 80, "https": 443}
+# Bind addresses, not destinations: a client must dial loopback instead.
+_ANY_HOSTS = {"0.0.0.0", "::"}
+
+
+def normalize_host(value: str | None) -> str:
+    """Normalize an OLLAMA_HOST (or host= arg) to a base URL.
+
+    Accepts "host", "host:port", "http(s)://host[:port]", a bare ":port"
+    and bracketed IPv6. Bind-any addresses (0.0.0.0, ::) map to loopback;
+    a missing port defaults to 11434 without a scheme, or to 80/443 when
+    http(s):// is given; the scheme defaults to http; any path, query or
+    trailing slash is dropped. Raises OllamaError naming the variable on
+    garbage.
+    """
+
+    def bad(reason: str = "expected [http(s)://]host[:port]") -> OllamaError:
+        return OllamaError(f"invalid OLLAMA_HOST {value!r}: {reason}")
+
+    raw = (value or "").strip()
+    if not raw:
+        return DEFAULT_HOST
+    if raw == "::":
+        # Unbracketed IPv6 bind-any is unparseable as host:port.
+        return DEFAULT_HOST
+    if re.search(r"\s", raw):
+        raise bad()
+    candidate = raw if "://" in raw else f"http://{raw}"
+    try:
+        u = urlsplit(candidate)
+        host, port = u.hostname, u.port
+    except ValueError as e:
+        raise bad() from e
+    if not u.netloc:
+        raise bad()
+    if u.scheme not in ("http", "https"):
+        raise bad("scheme must be http or https")
+    if host is None or host in _ANY_HOSTS:
+        host = "127.0.0.1"
+    if ":" in host:
+        host = f"[{host}]"
+    if port is None:
+        port = _SCHEME_PORTS[u.scheme] if "://" in raw else _DEFAULT_PORT
+    return f"{u.scheme}://{host}:{port}"
 
 
 def _host(explicit: str | None) -> str:
     """`host` arg, else OLLAMA_HOST (the same env var the Ollama CLI and
     its own SDK honor), else localhost."""
-    return explicit or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST
+    return normalize_host(explicit or os.environ.get("OLLAMA_HOST"))
 
 
 # Generation streams can run for minutes; only the connect is bounded.
@@ -81,8 +130,8 @@ async def status(host: str | None = None, timeout: float = 2.0) -> OllamaStatus:
             t = await c.get("/api/tags")
             t.raise_for_status()
             s.models = [m["name"] for m in t.json().get("models", [])]
-    except httpx.HTTPError as e:
-        s.error = str(_err(e))
+    except (httpx.HTTPError, OllamaError) as e:
+        s.error = str(_err(e)) if isinstance(e, httpx.HTTPError) else str(e)
         if not s.running and s.installed:
             s.error += " (binary found on PATH but API is down)"
     return s

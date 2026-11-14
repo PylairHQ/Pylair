@@ -25,7 +25,13 @@ import { get } from "node:https";
 import { arch, platform, tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { importRoot, loadConfig, loadTauriConfig, tauriCliEntry } from "./config.js";
+import {
+  importRoot,
+  loadConfig,
+  loadTauriConfig,
+  tauriCliEntry,
+  windowsSigningConfigured,
+} from "./config.js";
 import { matchGlob } from "./glob.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
 import { x as untar } from "tar";
@@ -797,7 +803,7 @@ export async function build(opts: BuildOptions): Promise<void> {
     platform() === "darwin"
       ? appleSigned
       : platform() === "win32"
-        ? !!process.env.WINDOWS_CERTIFICATE_THUMBPRINT
+        ? windowsSigningConfigured(appDir)
         : true; // no signing concept on Linux — don't warn
   run(process.execPath, [tauriCliEntry(appDir), "build", ...(opts.tauriArgs ?? [])], appDir);
   // Unsigned macOS builds get a full-bundle ad-hoc signature — better

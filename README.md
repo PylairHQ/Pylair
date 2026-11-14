@@ -75,6 +75,11 @@ integration → `M6` reference app + RC.
   runtime is killed via missed pongs instead. `loop_stall_kill` can make
   loop stalls fatal sooner — it's off by default because legitimate
   blocking work (multi-GB model loads) can stall the loop for minutes.
+- **macOS is CI-tested only.** Windows and Linux are the hand-verified
+  platforms: maintainers dogfood installers and run the lifecycle suite
+  there directly. macOS, Apple Silicon included, is exercised only by
+  the CI legs. It builds, ad-hoc signs and passes the same suite, but
+  no maintainer runs it day to day.
 - **A wedged runtime can survive an abrupt host kill on macOS.** If the
   app dies while Python can't read stdin (blocked in native code), the
   stdin-EOF fallback never reaches it and macOS has no parent-death
