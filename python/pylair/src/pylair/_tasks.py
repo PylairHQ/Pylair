@@ -15,6 +15,9 @@ from pylair import _json
 from pylair import _protocol as proto
 
 ISOLATED_GRACE_S = 3.0
+# taskkill is awaited with this bound — a hung taskkill or a nonzero
+# exit falls back to proc.kill() rather than parking the loop forever.
+TASKKILL_TIMEOUT_S = 5.0
 
 # RC.8A ceilings — the host enforces these on the way in; the runtime
 # clamps defensively so a host bug can't grow them without bound.
@@ -337,11 +340,46 @@ class TaskRegistry:
         if proc is None or proc.returncode is not None:
             return
         if sys.platform == "win32":
-            # taskkill /T kills the whole tree — already covers grandchildren.
-            await asyncio.create_subprocess_exec(
-                "taskkill", "/PID", str(proc.pid), "/T", "/F"
-            )
-            await proc.wait()
+            # taskkill /T kills the whole tree — already covers
+            # grandchildren. Await it with a bound, check the exit code,
+            # fall back to proc.kill() on failure or timeout, and bound
+            # the wait for the worker to actually exit: the loop never
+            # parks on a worker that refuses to die.
+            try:
+                tk = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(proc.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await asyncio.wait_for(tk.wait(), timeout=TASKKILL_TIMEOUT_S)
+            except (TimeoutError, OSError):
+                rc = -1
+            if rc != 0:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=self._budget(ISOLATED_GRACE_S)
+                )
+            except TimeoutError:
+                _log(
+                    f"worker {proc.pid} did not exit within "
+                    f"{ISOLATED_GRACE_S}s of taskkill — last-resort kill"
+                )
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except TimeoutError:
+                    _log(f"worker {proc.pid} survived kill — abandoning reap")
             return
         try:
             os.killpg(proc.pid, signal.SIGTERM)
