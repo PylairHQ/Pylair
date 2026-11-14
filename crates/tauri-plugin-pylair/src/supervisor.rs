@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1037,6 +1037,20 @@ struct ChildIo {
     /// lane the writer task always drains first, so a data flood cannot
     /// starve or silently drop control (RC.6B).
     ctrl_out: mpsc::Sender<Ctrl>,
+    /// Liveness slot: the actor overwrites it each ping tick and fires
+    /// `ping_notify`; the writer takes and writes the latest. One slot,
+    /// never a queue - a stalled writer cannot pile up pings and crowd
+    /// out real control frames.
+    ping_slot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Wakes the writer so it drains `ping_slot` - the frame select alone
+    /// would sleep through a ping when no other traffic exists.
+    ping_notify: Arc<tokio::sync::Notify>,
+    /// Ping frames actually written to the child, bumped by the writer
+    /// after each successful write. Only a ping the runtime could have
+    /// answered counts toward the missed-pong kill - a ping still
+    /// sitting in the slot behind a full pipe is backpressure, not a
+    /// miss.
+    pings_sent: Arc<AtomicU64>,
     /// Received decoded incoming messages / transport errors.
     msg_in: mpsc::Receiver<Result<InMsg, ChildReadErr>>,
     /// Exit status of the child process.
@@ -1309,7 +1323,7 @@ impl Supervisor {
         // Recently-finished task ids — lets cancel report Completed
         // instead of NotFound. Bounded; cleared on overflow.
         let mut done_tasks: HashSet<u64> = HashSet::new();
-        let mut pongs_outstanding: u32 = 0;
+        let mut pongs_received: u64 = 0;
         let mut ping_seq: u64 = 0;
         let mut ping_tick = interval(self.config.ping_interval);
         ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1355,7 +1369,7 @@ impl Supervisor {
                             let p = params.unwrap_or(Value::Null);
                             match method.as_str() {
                                 "pong" => {
-                                    pongs_outstanding = 0;
+                                    pongs_received += 1;
                                     // Transport is alive. Is the loop SERVING?
                                     let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
                                     match classify_pong(stale, self.config.loop_stall_kill) {
@@ -1756,6 +1770,12 @@ impl Supervisor {
                 }
                 // --- liveness ping ---
                 _ = ping_tick.tick() => {
+                    // Misses count only pings the writer actually put on
+                    // the wire: a ping still in the slot behind a full
+                    // pipe is backpressure, not evidence the runtime died.
+                    let pongs_outstanding = io.pings_sent
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(pongs_received) as u32;
                     if pongs_outstanding >= self.config.missed_pongs_to_kill {
                         self.set_state(State::Unresponsive,
                             format!("{} missed pongs — runtime wedged", pongs_outstanding));
@@ -1770,11 +1790,19 @@ impl Supervisor {
                         self.set_state(State::Unresponsive,
                             format!("missed {} pong(s)", pongs_outstanding));
                     }
-                    pongs_outstanding += 1;
                     ping_seq += 1;
                     let body = proto::request(self.next_id.fetch_add(1, Ordering::Relaxed),
                         "ping", serde_json::json!({"seq": ping_seq}));
-                    let _ = send_frame(&io, &body, self.config.max_frame);
+                    // Liveness gets its own slot the writer drains ahead
+                    // of data, never the shared control lane - a stalled
+                    // writer holds at most one pending ping, so liveness
+                    // cannot starve cancel/credit either.
+                    if let Ok(bytes) = serde_json::to_vec(&body) {
+                        if bytes.len() <= self.config.max_frame {
+                            *io.ping_slot.lock().unwrap() = Some(bytes);
+                            io.ping_notify.notify_one();
+                        }
+                    }
                 }
                 // --- dev restart trigger ---
                 _ = trigger_tick.tick(), if restart_trigger.is_some() => {
@@ -2205,12 +2233,35 @@ async fn spawn_child(
     // silently drop a control frame (RC.6B).
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Ctrl>(16);
+    let ping_slot = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let ping_notify = Arc::new(tokio::sync::Notify::new());
+    let pings_sent = Arc::new(AtomicU64::new(0));
+    let writer_ping_slot = ping_slot.clone();
+    let writer_ping_notify = ping_notify.clone();
+    let writer_pings_sent = pings_sent.clone();
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut w = stdin;
         loop {
+            // Latest ping first: take() so only the freshest frame the
+            // actor committed goes on the wire - and count the write,
+            // because only a ping the runtime could have answered may
+            // count as a miss.
+            let pending_ping = writer_ping_slot.lock().unwrap().take();
+            if let Some(b) = pending_ping {
+                if w.write_all(&(b.len() as u32).to_be_bytes()).await.is_err()
+                    || w.write_all(&b).await.is_err()
+                    || w.flush().await.is_err()
+                {
+                    return; // child stdin gone
+                }
+                writer_pings_sent.fetch_add(1, Ordering::Relaxed);
+            }
             let body: Vec<u8> = tokio::select! {
                 biased;
+                // A ping arrived while both lanes were quiet - loop back
+                // to the slot drain above instead of sleeping through it.
+                _ = writer_ping_notify.notified() => continue,
                 // Ctrl always wins when both lanes have a frame; a closed
                 // ctrl channel falls through to the data lane.
                 c = ctrl_rx.recv() => match c {
@@ -2320,6 +2371,9 @@ async fn spawn_child(
     Ok(ChildIo {
         frame_out: frame_tx,
         ctrl_out: ctrl_tx,
+        ping_slot,
+        ping_notify,
+        pings_sent,
         msg_in: msg_rx,
         exited: exit_rx,
         kill: kill_tx,

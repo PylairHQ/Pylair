@@ -285,6 +285,91 @@ async fn wedged_runtime_killed_on_missed_pongs() {
     wait_state(&h, State::Failed).await;
 }
 
+/// Reads slowly (10ms per frame) but always answers pings on arrival —
+/// the host's writer blocks on a full pipe, so its data lane stays
+/// saturated while liveness keeps flowing.
+const FAKE_SLOW_READER_PONGS: &str = r#"
+import sys, struct, json, time
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[{"name":"echo","kind":"sync"}]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    time.sleep(0.01)
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": {}}); break
+"#;
+
+#[tokio::test]
+async fn pings_survive_data_lane_backpressure() {
+    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(512);
+    let mut cfg = fast_config();
+    // Let the flood reach the frame lanes instead of tripping the
+    // command-queue or task-count limits first.
+    cfg.limits.max_queued_commands = 4096;
+    cfg.limits.max_concurrent_tasks = 4096;
+    let h = spawn_h(spec(FAKE_SLOW_READER_PONGS), cfg, ev);
+    wait_state(&h, State::Ready).await;
+
+    // ~1.2s of sustained flood: pushes far outpace the slow reader, so
+    // the data lane sits saturated across several ping ticks. The ping
+    // rides the control lane — written ahead of the queued data — so the
+    // runtime still answers it, and a tick whose ping cannot be queued
+    // must never count as a missed pong.
+    let lane_full = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let big = json!({"pad": "x".repeat(512 * 1024)});
+    let deadline = std::time::Instant::now() + Duration::from_millis(1200);
+    while std::time::Instant::now() < deadline {
+        // 512KB frames: the pipe holds only the in-flight frame, so a
+        // control-lane ping overtakes ~30MB of queued data and is
+        // answered within a frame or two of reader wakeups.
+        for _ in 0..80 {
+            if let Ok(ct) = h.call_task("echo", big.clone(), None, Some(false)) {
+                let c = lane_full.clone();
+                tokio::spawn(async move {
+                    if let Ok(Err(e)) = ct.result.await {
+                        if e.data.as_ref().and_then(|d| d["limit"].as_str())
+                            == Some("frame_out_queue")
+                        {
+                            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    // Give outstanding pings room to pong and the lane-full error
+    // collectors a moment to run, then verify no kill happened: a
+    // wedged-runtime kill shows up as a Restarting/Failed transition.
+    sleep(Duration::from_millis(500)).await;
+    // The flood really did saturate the data lane.
+    assert!(
+        lane_full.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "data lane never filled — no backpressure"
+    );
+    let mut killed = false;
+    while let Ok(e) = rx.try_recv() {
+        match e {
+            RuntimeEvent::StateChanged {
+                to: State::Restarting | State::Failed,
+                ..
+            } => killed = true,
+            RuntimeEvent::Stderr(line) if line.contains("wedged") => killed = true,
+            _ => {}
+        }
+    }
+    assert!(!killed, "runtime was killed under data backpressure");
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn kill_during_call_fails_caller_with_crashed() {
     let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);

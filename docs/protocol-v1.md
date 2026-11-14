@@ -262,9 +262,14 @@ Supervision based on process exit alone misses the most common real
 failure: a runtime **wedged** in native code (a C extension spinning, a
 deadlock) never crashes, so it never restarts.
 
-- The host sends `ping {seq}` every `PING_INTERVAL` (default 5s).
-  The runtime answers with a `pong {seq}` notification within
-  `PING_TIMEOUT` (default 10s).
+- The host sends `ping {seq}` every `PING_INTERVAL` (default 5s) through a
+  dedicated single-slot path the writer drains ahead of data, so a
+  saturated data lane cannot starve liveness and queued pings cannot
+  crowd out real control frames. Only a ping actually written to the
+  wire counts toward the miss accounting: one still waiting in the slot
+  behind a stalled writer is backpressure, not a miss. The runtime
+  answers with a `pong {seq}` notification within `PING_TIMEOUT`
+  (default 10s).
 - **Pongs are emitted by the reader thread, not the event loop.** A
   pong therefore proves the frame pipeline (and process) is alive —
   *not* that asyncio is making progress. Blocking code inside an
@@ -367,11 +372,13 @@ Call data and lifecycle events use different mechanisms:
   generation resolves `not_found` — it can never control a new task. The
   owner is always the Tauri-reported window label, never a JS-supplied
   argument. Destroying a window cancels all of its tasks.
-- **Control frames have their own lane.** `cancel`, `stream.credit`, and
+- **Control frames have their own lane.** `cancel`, `stream.credit` and
   `shutdown` are queued on a small dedicated channel the writer drains
   before data frames — a stream flood can fill the data lane but cannot
   starve or silently drop control; a failed queue send surfaces as an
-  explicit failure. Control can also *outrun* its call, so the runtime
+  explicit failure. `ping` is different again: a single latest-wins slot
+  drained ahead of everything, so repeated pings can never occupy the
+  finite control capacity that cancel/credit/shutdown need. Control can also *outrun* its call, so the runtime
   records cancels/credit for not-yet-registered task ids and applies
   them at registration.
 - `shutdown()` resolves to what cleanup achieved — `terminated` (grace
