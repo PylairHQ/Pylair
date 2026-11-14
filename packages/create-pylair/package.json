@@ -1,6 +1,6 @@
 {
   "name": "create-pylair",
-  "version": "0.1.0-rc.14",
+  "version": "0.1.0-rc.15",
   "description": "Scaffold a new Pylair project (npx create-pylair my-app)",
   "license": "MIT OR Apache-2.0",
   "repository": {
