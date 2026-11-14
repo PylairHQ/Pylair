@@ -1,7 +1,11 @@
 # Windows: the spawn-to-job-assignment gap (K2)
 
-Status: design only, no code changed. Decision needed from the owner
-before implementation (see section 4).
+Status: option (a) implemented (owner decision). The design below is kept
+as the record of why. What changed in code: `spawn_child` passes
+`CREATE_SUSPENDED`, assigns to the job, then calls `resume_main_thread`
+on every path; a debug-only `PYLAIR_TEST_ASSIGN_DELAY_MS` seam widens
+the gap for `tests/job_race.rs`. Sections 1 to 4 describe the situation
+before the change.
 
 Related: `docs/protocol-v1.md` section 6 (orphan prevention),
 `docs/security.md` section 7.
@@ -277,7 +281,7 @@ inside the job and dies with it. Under (d) the test is not added.
 harness from section 1 as an `#[ignore]` stress test: many spawns of a
 launcher-style interpreter under CPU load, assert zero outside the job.
 
-**Test 3, host death in the gap (documents the trade-off):** the host
+**Test 3, host death in the gap (not written):** the host
 role pattern of `host_sigkill_does_not_orphan_wedged_runtime`, with the
 delay set long and the host killed during it. Today the runtime may
 survive if wedged; with (a) a suspended child survives. If (a) is chosen,
@@ -287,3 +291,14 @@ Known limitation is backed by a test instead of prose.
 CI note: all three run on the `Rust (windows-latest)` leg only; they are
 `#[cfg(windows)]`. The existing three `host_sigkill_*` tests keep running
 on Windows and Linux and must stay green.
+
+## 6. After implementation
+
+- `tests/job_race.rs` fails on the unfixed code (grandchild survives the
+  job closing, with the delay seam on) and passes with (a). It also
+  asserts the runtime still reaches `Ready`, so a resume bug cannot hide.
+- Test 3 above was not written: asserting that a suspended child leaks
+  would pin a bug-shaped behavior. The residual is documented in
+  `docs/security.md` section 7 instead and is not covered by a test.
+- Worker containment: `docs/protocol-v1.md` section 6 now says workers
+  inherit the runtime's job rather than claiming a job of their own.
