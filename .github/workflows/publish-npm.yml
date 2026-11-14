@@ -1,12 +1,11 @@
 name: Publish npm packages
 
 # Manual dispatch only. Publishes @pylair/client, @pylair/cli and
-# create-pylair in dependency order under the `next` dist-tag, so
-# `npm create pylair` keeps resolving `latest` (nothing) until a stable
-# release. RC users run `npm create pylair@next` / `npm i @pylair/client@next`.
-# Requires the NPM_TOKEN repo secret (npm granular access token with
-# publish on the three packages — create it AFTER registering the
-# @pylair scope, or use an automation token).
+# create-pylair in dependency order under the `next` dist-tag.
+# dist-tag `latest` policy (scripts/npm-latest-guard.mjs): while no
+# stable version exists on the registry, latest tracks the newest RC so
+# `npm create pylair@latest` resolves; once any stable exists, an RC
+# publish must not move latest — only next.
 # Runs inside the `npm` environment if you create one (recommended:
 # required reviewers before any registry write).
 #
@@ -35,9 +34,21 @@ jobs:
       contents: write # tag after a successful upload — never commits to main
       id-token: write # --provenance attestations
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      # Inputs reach the shell via env only — never ${{ inputs.* }}
+      # inside run: (script-injection surface). Validate shape once,
+      # before any use.
+      - name: Validate the version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || {
+            echo "invalid version input: '$VERSION' — expected N.N.N[-suffix]"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@f53f5227a9e83886ab598c617f3c170fab62f0d3 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -46,17 +57,20 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-      - name: npm >= 11.5.1 for OIDC trusted publishing
-        run: npm install -g npm@11
+      # Pinned exact — OIDC trusted publishing needs >= 11.5.1.
+      - name: npm for OIDC trusted publishing
+        run: npm install -g npm@11.21.2
 
       - name: Check all three versions match the input
         # Versions live in the repo, bumped by a normal commit — the job
         # only verifies, never pushes to main.
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           for p in packages/client packages/cli packages/create-pylair; do
             repo_ver=$(grep '"version":' "$p/package.json" | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
-            [ "$repo_ver" = "${{ inputs.version }}" ] || {
-              echo "input '${{ inputs.version }}' != $p/package.json '$repo_ver' — bump versions in a normal commit first"
+            [ "$repo_ver" = "$VERSION" ] || {
+              echo "input '$VERSION' != $p/package.json '$repo_ver' — bump versions in a normal commit first"
               exit 1
             }
           done
@@ -71,44 +85,51 @@ jobs:
 
       - name: Publish to npm
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           # client first — cli and create-pylair may reference it.
-          # --tag next: RCs must not become `latest` (npm still sets
-          # latest on a package's very first publish — harmless here).
+          # --tag next on the publish itself; `latest` is moved (or not)
+          # by the guard below, not by publish.
           # npm has no --skip-existing: a mid-loop failure leaves earlier
           # packages published, so skip what's already live on a rerun.
           for p in packages/client packages/cli packages/create-pylair; do
             name=$(node -p "require('./$p/package.json').name")
-            if npm view "$name@${{ inputs.version }}" version >/dev/null 2>&1; then
-              echo "$name@${{ inputs.version }} already published — skipping"
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION already published — skipping"
             else
               (cd "$p" && npm publish --access public --provenance --tag next)
             fi
-            # `latest` must move to every new release or `npm create pylair`
-            # keeps handing out the first (buggier) RC — while there's no
-            # stable, newest RC is what we want latest to mean. Idempotent,
-            # so it also heals a tag left behind by a partial run.
+            # latest: while no stable exists on the registry it tracks
+            # the newest RC (`npm create pylair@latest` must resolve);
+            # once any stable exists an RC must NOT move it. The guard
+            # queries the registry and decides — idempotent, so it also
+            # heals a tag left behind by a partial run.
             # CAVEAT: `npm publish` does the OIDC exchange transparently,
             # but npm may not exchange for non-publish commands. If this
             # fails with an auth error under trusted publishing, the fix
             # is a granular per-package token scoped to this step only —
             # check before deciding trusted publishing is done.
-            npm dist-tag add "$name@${{ inputs.version }}" latest
+            node "$GITHUB_WORKSPACE/scripts/npm-latest-guard.mjs" "$name" "$VERSION"
           done
 
       - name: Tag the release
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         # Tag before verify: the tag marks the commit the release was
         # cut from — the packages ARE live once publish returns, so a
         # registry-lag verify timeout must not skip it (rc.6 did).
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "npm-v${{ inputs.version }}" -m "npm packages ${{ inputs.version }}"
-          git push origin "npm-v${{ inputs.version }}"
+          git tag -a "npm-v$VERSION" -m "npm packages $VERSION"
+          git push origin "npm-v$VERSION"
 
       - name: Verify all three are installable
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         # A green publish must mean installable. Registry propagation
         # lags — npm docs replicate per-package and a fresh version can
         # 404 for minutes (run #9: client lagged ~2min, cli longer).
@@ -118,11 +139,11 @@ jobs:
           for p in packages/client packages/cli packages/create-pylair; do
             name=$(node -p "require('./$p/package.json').name")
             for i in $(seq 1 60); do
-              if npm view "$name@${{ inputs.version }}" version --prefer-online >/dev/null 2>&1; then
-                echo "$name@${{ inputs.version }} live on the registry"
+              if npm view "$name@$VERSION" version --prefer-online >/dev/null 2>&1; then
+                echo "$name@$VERSION live on the registry"
                 break
               fi
-              [ "$i" = 60 ] && { echo "::error::$name@${{ inputs.version }} published but not yet visible on the registry after ~10min — registry lag, not a failed publish"; exit 1; }
+              [ "$i" = 60 ] && { echo "::error::$name@$VERSION published but not yet visible on the registry after ~10min — registry lag, not a failed publish"; exit 1; }
               sleep 10
             done
           done

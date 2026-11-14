@@ -29,17 +29,35 @@ jobs:
       contents: write # tag after a successful upload — never commits to main
       id-token: write # OIDC token for crates.io trusted publishing
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Same pin as every other workflow — a drifting stable could
+      # compile the published crate with a different rustc than CI.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+
+      # Inputs reach the shell via env only — never ${{ inputs.* }}
+      # inside run: (script-injection surface). Validate shape once,
+      # before any use.
+      - name: Validate the version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || {
+            echo "invalid version input: '$VERSION' — expected N.N.N[-suffix]"
+            exit 1
+          }
 
       - name: Check version matches Cargo.toml
         # The version lives in the repo, bumped by a normal commit — the
         # job only verifies it, never pushes to main.
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           repo_ver=$(grep '^version = ' crates/tauri-plugin-pylair/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          [ "$repo_ver" = "${{ inputs.version }}" ] || {
-            echo "input '${{ inputs.version }}' != Cargo.toml '$repo_ver' — bump the version in a normal commit first"
+          [ "$repo_ver" = "$VERSION" ] || {
+            echo "input '$VERSION' != Cargo.toml '$repo_ver' — bump the version in a normal commit first"
             exit 1
           }
 
@@ -64,8 +82,10 @@ jobs:
       # leaves nothing behind.
       - name: Tag the release
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "tauri-plugin-pylair-v${{ inputs.version }}" -m "tauri-plugin-pylair ${{ inputs.version }}"
-          git push origin "tauri-plugin-pylair-v${{ inputs.version }}"
+          git tag -a "tauri-plugin-pylair-v$VERSION" -m "tauri-plugin-pylair $VERSION"
+          git push origin "tauri-plugin-pylair-v$VERSION"

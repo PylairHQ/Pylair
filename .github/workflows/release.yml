@@ -39,16 +39,30 @@ jobs:
       contents: write
       id-token: write # OIDC trusted publishing
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      # Inputs reach the shell via env only — never ${{ inputs.* }}
+      # inside run: (script-injection surface). Validate shape once,
+      # before any use.
+      - name: Validate the version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || {
+            echo "invalid version input: '$VERSION' — expected N.N.N[-suffix]"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
 
       - name: Check version matches pyproject.toml
         # The version lives in the repo, bumped by a normal commit — the
         # job only verifies it, never pushes to main.
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           repo_ver=$(grep '^version = ' python/pylair/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          [ "$repo_ver" = "${{ inputs.version }}" ] || {
-            echo "input '${{ inputs.version }}' != pyproject.toml '$repo_ver' — bump the version in a normal commit first"
+          [ "$repo_ver" = "$VERSION" ] || {
+            echo "input '$VERSION' != pyproject.toml '$repo_ver' — bump the version in a normal commit first"
             exit 1
           }
 
@@ -60,7 +74,7 @@ jobs:
 
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: python/pylair/dist
 
@@ -68,11 +82,13 @@ jobs:
       # leaves nothing behind.
       - name: Tag the release
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "pylair-v${{ inputs.version }}" -m "pylair ${{ inputs.version }}"
-          git push origin "pylair-v${{ inputs.version }}"
+          git tag -a "pylair-v$VERSION" -m "pylair $VERSION"
+          git push origin "pylair-v$VERSION"
 
   publish-ollama:
     if: ${{ inputs.dry_run || inputs.package == 'pylair-ollama' || inputs.package == 'both' }}
@@ -82,14 +98,26 @@ jobs:
       contents: write
       id-token: write # OIDC trusted publishing
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      # Same env-only input rule as the pylair job — validate before use.
+      - name: Validate the version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || {
+            echo "invalid version input: '$VERSION' — expected N.N.N[-suffix]"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
 
       - name: Check version matches pyproject.toml
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           repo_ver=$(grep '^version = ' integrations/ollama/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          [ "$repo_ver" = "${{ inputs.version }}" ] || {
-            echo "input '${{ inputs.version }}' != pyproject.toml '$repo_ver' — bump the version in a normal commit first"
+          [ "$repo_ver" = "$VERSION" ] || {
+            echo "input '$VERSION' != pyproject.toml '$repo_ver' — bump the version in a normal commit first"
             exit 1
           }
 
@@ -101,14 +129,16 @@ jobs:
 
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: integrations/ollama/dist
 
       - name: Tag the release
         if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "pylair-ollama-v${{ inputs.version }}" -m "pylair-ollama ${{ inputs.version }}"
-          git push origin "pylair-ollama-v${{ inputs.version }}"
+          git tag -a "pylair-ollama-v$VERSION" -m "pylair-ollama $VERSION"
+          git push origin "pylair-ollama-v$VERSION"

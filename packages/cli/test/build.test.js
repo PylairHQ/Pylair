@@ -9,7 +9,7 @@ import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
 import { matchGlob } from "../dist/glob.js";
-import { stageNotices, download, ensureTarball, PYC_INVALIDATION_MODE } from "../dist/build.js";
+import { stageNotices, download, ensureTarball, uvExportArgs, uvPipInstallArgs, PYC_INVALIDATION_MODE } from "../dist/build.js";
 import { DEFAULT_PRUNE, prune } from "../dist/prune.js";
 import { loadConfig } from "../dist/config.js";
 
@@ -599,4 +599,22 @@ describe("meetsMinPython", () => {
       assert.equal(meetsMinPython(v, "3.12"), want);
     });
   }
+});
+
+describe("uv export / pip-install flags", () => {
+  test("uv export drops dev deps and the project entry", () => {
+    const args = uvExportArgs("/tmp/out.txt");
+    assert.ok(args.includes("--no-dev"));
+    assert.ok(args.includes("--no-emit-project"));
+    assert.ok(args.includes("--frozen"));
+  });
+
+  test("--require-hashes only when the file carries --hash entries", () => {
+    const hashed = "flask==3.0.0 \\n    --hash=sha256:abcdef\n";
+    const plain = "flask==3.0.0\nrequests>=2\n";
+    const a = uvPipInstallArgs("python3", "/t", "/r/r.txt", hashed);
+    assert.ok(a.includes("--require-hashes"));
+    const b = uvPipInstallArgs("python3", "/t", "/r/r.txt", plain);
+    assert.ok(!b.includes("--require-hashes"));
+  });
 });
