@@ -10,6 +10,7 @@ from .client import (
     OllamaError,
     OllamaStatus,
     chat,
+    normalize_host,
     pull,
     status,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "OllamaError",
     "OllamaStatus",
     "chat",
+    "normalize_host",
     "pull",
     "status",
 ]
