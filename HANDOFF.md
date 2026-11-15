@@ -3,41 +3,43 @@
 Last rewritten 2026-11-14, against `main` at `a458e05` (after PR 57).
 The previous contents were the rc.6 CI-fix handoff; that work landed long
 ago and the document had gone stale. What is kept here is what is still
-true: where the rc.16 train stands, the release order, and the standing
+true: where the rc.17 train stands, the release order, and the standing
 rules that AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
 
-Manifests on `main` carry the rc.16 bump for the crate, `pylair` and
-`pylair-ollama`; the npm packages are at rc.16 (checked in the files, not against
-the registries; npm publishes after the pins PR merges):
+rc.16 is published: the crate at `0.1.0-rc.12`, `pylair` `0.1.0rc10`,
+`pylair-ollama` `0.1.0rc3` and the npm trio at `0.1.0-rc.16`.
 
-| Package | Version in the repo |
-|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.12` |
-| `pylair` (PyPI) | `0.1.0-rc.10` |
-| `pylair-ollama` (PyPI) | `0.1.0-rc.3` |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.16` |
+rc.17 is in preparation. Versions in the repo (checked in the files, not
+against the registries) and the plan for each:
 
-Merged for rc.16 so far, none of it published yet:
+| Package | Version in the repo | rc.17 plan |
+|---|---|---|
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.13` | released as `0.1.0-rc.13` |
+| `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, not released |
+| `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, not released |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.16` | released as `0.1.0-rc.17`; the bump lands in the pins PR |
 
-- PR 53, J: CI and supply-chain hardening (pinned actions, input validation).
-- PR 55, L: polish (real `--version`, `OLLAMA_HOST` normalization, signing
-  config warning, macOS CI-only note).
-- PR 56, K1: runtime robustness (shared `grace_ms` shutdown budget,
-  dedicated ping slot, bounded inbound queue with control priority,
-  bounded `taskkill`).
-- PR 57, K2: Windows runtime is created suspended, assigned to the Job
-  Object, then resumed (`docs/design/windows-job-object-race.md`).
-- PR M: test hygiene (flaky `stream_credit` tests, bytecode test env,
-  this file, a duplicated heading in `docs/cancellation.md`).
+Merged since rc.16 (76ebcdc):
 
-The crate (0.1.0-rc.12), `pylair` (0.1.0rc10) and `pylair-ollama`
-(0.1.0rc3) are published. `pylair-ollama` needed its own bump to ship the
-`OLLAMA_HOST` normalization and publishes separately via `release.yml`
-(`package` = `pylair-ollama`). The pins PR (scaffold pins, template
-`Cargo.lock`, npm trio at 0.1.0-rc.16) is the last commit before the npm
-publish; the steps below still describe the order.
+- PR 62, R1: `supervisor.rs` split into `crates/tauri-plugin-pylair/src/supervisor/`
+  (pure move).
+- PR 63, R2: client self-test moved to `src/selftest.ts`, bridge plumbing
+  to `src/internal.ts` (pure move).
+- PR 64: `stream_credit` retry waits on runtime reads, not a timer (test only).
+- PR 65, R2b: the client loads the installed-webview self-test on demand.
+- PR 66, R3: CLI `build.ts` split into `src/build/` (pure move).
+- PR 67: the CLI resolves `--dir` to an absolute path for build, dev and
+  doctor.
+- rc.17 version bump: crate `0.1.0-rc.13`; the reference app's `uv.lock`
+  refreshed (it still pinned its two local packages at `0.0.0`).
+
+`python/` and `integrations/` have not changed since rc.16, so step 2
+below is skipped for rc.17. The pins PR (scaffold pins, template
+`Cargo.lock` against the published crate, npm trio at `0.1.0-rc.17`, the
+README and npm README install lines) follows the crate publish; the steps
+below still describe the order.
 
 ## Release order
 
