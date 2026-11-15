@@ -1,0 +1,331 @@
+//! Runtime state and events, the spawn spec, limits and the supervisor
+//! configuration (hello timeout: docs/protocol-v1.md section 4; restart
+//! policy: section 7; limits: docs/security.md section 6).
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::protocol as proto;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Starting,
+    Ready,
+    Unresponsive,
+    Restarting,
+    Failed,
+    /// Supervisor received `Shutdown` and the runtime exited cleanly.
+    /// (Host-side terminal state; not a runtime-reported state.)
+    Stopped,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    StateChanged {
+        from: State,
+        to: State,
+        detail: String,
+    },
+    /// One line of runtime stderr (always drained — protocol §9).
+    Stderr(String),
+    /// Parsed `hello` exposes manifest.
+    Exposes(Value),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SpawnSpec {
+    /// Path to the Python interpreter (system python in dev, bundled in prod).
+    pub program: PathBuf,
+    /// e.g. `["-m", "pylair", "my_app"]`
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Variables stripped from the INHERITED environment before `env` is
+    /// applied (e.g. a launcher's PYTHONHOME must not reach a bundled Python).
+    pub env_remove: Vec<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl SpawnSpec {
+    pub fn pylair(python: PathBuf, app_module: &str) -> Self {
+        Self {
+            program: python,
+            args: vec!["-m".into(), "pylair".into(), app_module.into()],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+        }
+    }
+}
+
+/// Enforceable ceilings on input, output and concurrency (RC.8A). Every
+/// overload returns `LIMIT_EXCEEDED` naming the limit in `data.limit` —
+/// nothing is allowed to grow without bound. Limits are per RUNTIME, not
+/// per window: one busy webview can exhaust a shared cap and starve the
+/// others (no fairness — Known limitations).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Limits {
+    /// In-flight tasks (plain calls, streams and isolated workers — all
+    /// are tasks). Default `PYLAIR_MAX_TASKS` or 64.
+    pub max_concurrent_tasks: usize,
+    /// In-flight streaming tasks (a subset of `max_concurrent_tasks`).
+    /// Default `PYLAIR_MAX_STREAMS` or 32.
+    pub max_concurrent_streams: usize,
+    /// Bytes buffered for ONE stream's consumer (serialized-size estimate).
+    /// The separate `stream_buffer` chunk-count cap still applies —
+    /// whichever trips first ends the stream. Default
+    /// `PYLAIR_STREAM_BUFFER_BYTES` or 16 MiB.
+    pub stream_buffer_bytes: usize,
+    /// Total buffered stream bytes across all streams. Default
+    /// `PYLAIR_STREAM_BUFFER_BYTES_TOTAL` or 64 MiB.
+    pub stream_buffer_bytes_total: usize,
+    /// Outstanding pull-credit per stream task (initial grant + later
+    /// grants - chunks delivered). Default `PYLAIR_MAX_STREAM_CREDIT` or
+    /// 4096.
+    pub max_stream_credit: u64,
+    /// Commands queued to the supervisor. Default
+    /// `PYLAIR_MAX_QUEUED_COMMANDS` or 64.
+    pub max_queued_commands: usize,
+    /// Isolated worker processes in flight at once (enforced Python-side).
+    /// Default `PYLAIR_MAX_ISOLATED_WORKERS` or 8.
+    pub max_isolated_workers: usize,
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// `PYLAIR_HELLO_TIMEOUT_MS` default and supported window. A cold
+/// interpreter boot is ~0.05–1.3s and the worst observed CI boot
+/// exceeded 10s under starvation; 30s is ~3x that worst case. Below 1s
+/// even a trivial hello can lose to a cold machine; above 10min a silent
+/// runtime is a hang, not a slow start.
+const HELLO_TIMEOUT_DEFAULT_MS: u64 = 30_000;
+const HELLO_TIMEOUT_MIN_MS: u64 = 1_000;
+const HELLO_TIMEOUT_MAX_MS: u64 = 600_000;
+
+/// Parse the knob's raw value: a whole-millis count. Garbage falls back
+/// to the default with a warning — a malformed env var must not kill the
+/// supervisor's configuration.
+pub(super) fn parse_hello_timeout_ms(v: Option<String>) -> (u64, Option<String>) {
+    match v {
+        None => (HELLO_TIMEOUT_DEFAULT_MS, None),
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(ms) => (ms, None),
+            Err(_) => (
+                HELLO_TIMEOUT_DEFAULT_MS,
+                Some(format!(
+                    "PYLAIR_HELLO_TIMEOUT_MS={s:?} is not a whole number of \
+                     milliseconds — ignored"
+                )),
+            ),
+        },
+    }
+}
+
+/// Clamp a millis value into the supported window; the warning names
+/// both the bad value and the range it was clamped into.
+pub(super) fn clamp_hello_timeout_ms(ms: u64) -> (u64, Option<String>) {
+    if (HELLO_TIMEOUT_MIN_MS..=HELLO_TIMEOUT_MAX_MS).contains(&ms) {
+        (ms, None)
+    } else {
+        (
+            ms.clamp(HELLO_TIMEOUT_MIN_MS, HELLO_TIMEOUT_MAX_MS),
+            Some(format!(
+                "hello_timeout={ms}ms outside {HELLO_TIMEOUT_MIN_MS}..={HELLO_TIMEOUT_MAX_MS} — clamped"
+            )),
+        )
+    }
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: env_usize("PYLAIR_MAX_TASKS", 64),
+            max_concurrent_streams: env_usize("PYLAIR_MAX_STREAMS", 32),
+            stream_buffer_bytes: env_usize("PYLAIR_STREAM_BUFFER_BYTES", 16 * 1024 * 1024),
+            stream_buffer_bytes_total: env_usize(
+                "PYLAIR_STREAM_BUFFER_BYTES_TOTAL",
+                64 * 1024 * 1024,
+            ),
+            max_stream_credit: env_u64("PYLAIR_MAX_STREAM_CREDIT", 4096),
+            max_queued_commands: env_usize("PYLAIR_MAX_QUEUED_COMMANDS", 64),
+            max_isolated_workers: env_usize("PYLAIR_MAX_ISOLATED_WORKERS", 8),
+        }
+    }
+}
+
+impl Limits {
+    /// Clamp zero and absurd values into supported ranges; returns the
+    /// warnings for anything clamped. Called once at supervisor start —
+    /// the effective limits are logged with them.
+    pub(super) fn validated(mut self) -> (Self, Vec<String>) {
+        let mut warns = Vec::new();
+        let mut clamp = |v: &mut usize, name: &str, lo: usize, hi: usize| {
+            if *v < lo || *v > hi {
+                warns.push(format!("{name}={v} outside {lo}..={hi} — clamped"));
+                *v = (*v).clamp(lo, hi);
+            }
+        };
+        clamp(
+            &mut self.max_concurrent_tasks,
+            "max_concurrent_tasks",
+            1,
+            100_000,
+        );
+        clamp(
+            &mut self.max_concurrent_streams,
+            "max_concurrent_streams",
+            1,
+            100_000,
+        );
+        clamp(
+            &mut self.stream_buffer_bytes,
+            "stream_buffer_bytes",
+            1024,
+            1 << 30,
+        );
+        clamp(
+            &mut self.stream_buffer_bytes_total,
+            "stream_buffer_bytes_total",
+            1024,
+            8 << 30,
+        );
+        clamp(
+            &mut self.max_queued_commands,
+            "max_queued_commands",
+            1,
+            10_000,
+        );
+        clamp(
+            &mut self.max_isolated_workers,
+            "max_isolated_workers",
+            0,
+            1024,
+        );
+        if self.max_stream_credit < 1 || self.max_stream_credit > 1_000_000 {
+            warns.push(format!(
+                "max_stream_credit={} outside 1..=1000000 — clamped",
+                self.max_stream_credit
+            ));
+            self.max_stream_credit = self.max_stream_credit.clamp(1, 1_000_000);
+        }
+        // A per-stream cap above the total can never hold a full buffer.
+        if self.stream_buffer_bytes_total < self.stream_buffer_bytes {
+            warns.push(format!(
+                "stream_buffer_bytes_total={} below per-stream cap {} — raised",
+                self.stream_buffer_bytes_total, self.stream_buffer_bytes
+            ));
+            self.stream_buffer_bytes_total = self.stream_buffer_bytes;
+        }
+        (self, warns)
+    }
+
+    pub fn with_max_concurrent_tasks(mut self, v: usize) -> Self {
+        self.max_concurrent_tasks = v;
+        self
+    }
+    pub fn with_max_concurrent_streams(mut self, v: usize) -> Self {
+        self.max_concurrent_streams = v;
+        self
+    }
+    pub fn with_stream_buffer_bytes(mut self, v: usize) -> Self {
+        self.stream_buffer_bytes = v;
+        self
+    }
+    pub fn with_stream_buffer_bytes_total(mut self, v: usize) -> Self {
+        self.stream_buffer_bytes_total = v;
+        self
+    }
+    pub fn with_max_stream_credit(mut self, v: u64) -> Self {
+        self.max_stream_credit = v;
+        self
+    }
+    pub fn with_max_queued_commands(mut self, v: usize) -> Self {
+        self.max_queued_commands = v;
+        self
+    }
+    pub fn with_max_isolated_workers(mut self, v: usize) -> Self {
+        self.max_isolated_workers = v;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SupervisorConfig {
+    /// Deadline for the runtime's `hello` after spawn.
+    pub hello_timeout: Duration,
+    /// How often we ping while Ready.
+    pub ping_interval: Duration,
+    /// Pongs outstanding before we declare the runtime wedged and kill it.
+    /// A C extension holding the GIL can starve pongs — see cancellation.md.
+    pub missed_pongs_to_kill: u32,
+    pub backoff_base: Duration,
+    pub backoff_cap: Duration,
+    /// Crash-loop breaker: this many crashes within `breaker_window` -> Failed.
+    pub breaker_crashes: usize,
+    pub breaker_window: Duration,
+    /// Grace after `shutdown` request before we kill.
+    pub shutdown_grace: Duration,
+    /// Stream pull-credit granted to a new streaming call up front.
+    pub initial_stream_credit: u64,
+    /// Chunks buffered per stream between the supervisor and its consumer.
+    /// A consumer that falls this far behind is cut off (and its producer
+    /// cancelled) rather than allowed to stall the supervisor.
+    pub stream_buffer: usize,
+    /// Pongs come from a reader thread and only prove the process and pipe
+    /// are alive. The runtime also reports how long its asyncio loop has made
+    /// no progress (`loop_stale_ms`). `None` (the default) reports stalls as
+    /// a diagnostic only — legitimate blocking work (a multi-GB model load
+    /// inside `async def`) can stall the loop for minutes. `Some(limit)`
+    /// treats a stall at or beyond it as wedged: in-flight calls fail with
+    /// `RUNTIME_WEDGED` and the runtime is killed and restarted.
+    pub loop_stall_kill: Option<Duration>,
+    /// How long `cancel()` waits for the runtime's acknowledgement.
+    pub cancel_timeout: Duration,
+    pub max_frame: usize,
+    /// Dev-mode hot reload: when this file's mtime changes, respawn the
+    /// runtime (no crash accounting). Falls back to the
+    /// PYLAIR_RESTART_TRIGGER env var when unset.
+    pub restart_trigger: Option<PathBuf>,
+    /// Concurrency/queue/buffer ceilings (RC.8A). Validated and logged at
+    /// supervisor start.
+    pub limits: Limits,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            hello_timeout: Duration::from_millis(
+                parse_hello_timeout_ms(std::env::var("PYLAIR_HELLO_TIMEOUT_MS").ok()).0,
+            ),
+            ping_interval: Duration::from_secs(5),
+            missed_pongs_to_kill: 3,
+            backoff_base: Duration::from_millis(250),
+            backoff_cap: Duration::from_secs(8),
+            breaker_crashes: 5,
+            breaker_window: Duration::from_secs(60),
+            shutdown_grace: Duration::from_secs(5),
+            initial_stream_credit: 64,
+            stream_buffer: 256,
+            loop_stall_kill: None,
+            cancel_timeout: Duration::from_secs(5),
+            max_frame: proto::max_frame(),
+            restart_trigger: None,
+            limits: Limits::default(),
+        }
+    }
+}

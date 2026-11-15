@@ -13,7 +13,8 @@ Related: `docs/protocol-v1.md` section 6 (orphan prevention),
 ## 1. The race
 
 On Windows the supervisor starts the runtime and only then puts it in
-the Job Object (`spawn_child` in `supervisor.rs`: `cmd.spawn()`, then
+the Job Object (`spawn_child`, then in `supervisor.rs` and now in
+`crates/tauri-plugin-pylair/src/supervisor/spawn.rs`: `cmd.spawn()`, then
 `assign_to_job_object(pid)`, which does `CreateJobObjectW`,
 `SetInformationJobObject`, `OpenProcess`, `AssignProcessToJobObject`).
 `AssignProcessToJobObject` is not retroactive for descendants: a process
@@ -138,7 +139,8 @@ the job, so every descendant is born inside it.
   - `NtResumeProcess` from ntdll. Shorter, but not in `windows-sys`
     (checked), so it needs a hand-written `extern` block and relies on an
     undocumented export.
-- **Size:** about 30 lines in `supervisor.rs`: take the pid in
+- **Size:** about 30 lines in `supervisor.rs` (since split into
+  `supervisor/spawn.rs` and `supervisor/platform_windows.rs`): take the pid in
   `assign_to_job_object`, add `PROCESS_SUSPEND_RESUME` to the
   `OpenProcess` access mask, a roughly 20 line `resume_main_thread(pid)`
   helper, and a guarantee that resume runs on every path, including when
@@ -229,7 +231,8 @@ and adds no new unsafe pattern: the same `windows-sys` FFI style as
 that closes the host-dies-in-gap case too, but at 250+ lines and a
 rewrite of the spawn path it is not worth it for a 33 us window.
 
-It sits at the edge of "a few lines", it touches `supervisor.rs`
+It sits at the edge of "a few lines", it touches `supervisor.rs` (now
+`supervisor/spawn.rs` and `supervisor/platform_windows.rs`)
 containment, and it has the one trade-off in section 3(a) (inert orphan
 if the host dies in the gap), so I am stopping at the design for an owner
 decision rather than implementing. If the owner prefers zero risk to the
