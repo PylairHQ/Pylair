@@ -1,94 +1,79 @@
-# Handoff — RC.6 CI fix verification (mid-flight)
+# Handoff
 
-**State at handoff:** commit `2e9b483` + the working-tree fixes committed with
-this document. Everything below reflects what was true when this was written.
+Last rewritten 2026-11-14, against `main` at `a458e05` (after PR 57).
+The previous contents were the rc.6 CI-fix handoff; that work landed long
+ago and the document had gone stale. What is kept here is what is still
+true: where the rc.16 train stands, the release order, and the standing
+rules that AGENTS.md points at. Anything not listed here is in git history.
 
-## What this commit fixes (CI run #90 failures)
+## Where the tree is
 
-Three real failures, all diagnosed, all fixed in this working tree:
+Manifests on `main` still carry the rc.15 train versions (checked in the
+files, not against the registries):
 
-1. **Rust/Ubuntu compile error** — `tokio::process::Child::from_std` does not
-   exist. `crates/tauri-plugin-pylair/src/supervisor.rs`
-   `spawn_via_pdeathsig_anchor()` was rewritten: the anchor thread now carries
-   the tokio `Handle` in, calls `rt.enter()`, then `TokioCommand::spawn()` —
-   the fork still happens ON the parked anchor thread (the pdeathsig
-   guarantee), and `kill_on_drop(true)` is restored.
-2. **Ruff ×3** — `python/pylair/src/pylair/_worker.py:52` broad
-   `except Exception: pass` narrowed to `(ImportError, OSError)` with a
-   stderr diagnostic; `python/pylair/src/pylair/_tasks.py` keeps its
-   deliberate `except BaseException` catches with `noqa: BLE001` reasons.
-   `ruff check` is GREEN locally.
-3. `python/pylair/uv.lock` — version drift rc2→rc3, belongs in this batch.
+| Package | Version in the repo |
+|---|---|
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.11` |
+| `pylair` (PyPI) | `0.1.0-rc.9` |
+| `pylair-ollama` (PyPI) | `0.1.0-rc.2` |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.15` |
 
-## Proven / not proven
+Merged for rc.16 so far, none of it bumped or published yet:
 
-- **Green locally (macOS):** `cargo check --lib`, `cargo fmt --check`,
-  `ruff check`, 50/50 pytest.
-- **NOT proven:** the Linux build. An `ubuntu:24.04` Docker verification was
-  RUNNING when handed off — all deps resolved, `tauri` compiled, and the
-  plugin itself was mid-clippy when the container was stopped. No Linux
-  verdict exists. The 35s pdeathsig test and the abrupt-kill tests have
-  NEVER run on Linux.
-- macOS wedged-runtime orphan remains a documented gap (README Known
-  Limitations).
+- PR 53, J: CI and supply-chain hardening (pinned actions, input validation).
+- PR 55, L: polish (real `--version`, `OLLAMA_HOST` normalization, signing
+  config warning, macOS CI-only note).
+- PR 56, K1: runtime robustness (shared `grace_ms` shutdown budget,
+  dedicated ping slot, bounded inbound queue with control priority,
+  bounded `taskkill`).
+- PR 57, K2: Windows runtime is created suspended, assigned to the Job
+  Object, then resumed (`docs/design/windows-job-object-race.md`).
+- PR M: test hygiene (flaky `stream_credit` tests, bytecode test env,
+  this file, a duplicated heading in `docs/cancellation.md`).
 
-## Next step — run Linux verification (the script that was running)
+No rc.16 version bump, scaffold pin change or template `Cargo.lock`
+regeneration exists yet. Those come from the release train below.
 
-```bash
-cat > /tmp/pylair-linux-verify.sh <<'EOF'
-set -euxo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq build-essential curl pkg-config python3 \
-  libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-  libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev \
-  librsvg2-dev libdbus-1-dev > /dev/null
-curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-. "$HOME/.cargo/env"
-export CARGO_TARGET_DIR=/tmp/pylair-target   # do NOT share the host's target/
-cd /ws
-rustc --version && python3 --version
-cargo clippy -p tauri-plugin-pylair --all-targets -- -D warnings
-cargo test -p tauri-plugin-pylair
-curl -LsSf https://astral.sh/ruff/install.sh | sh > /dev/null
-export PATH="$HOME/.local/bin:$PATH"
-cd python/pylair && ruff check src/pylair/ tests/
-echo "=== LINUX VERIFY COMPLETE ==="
-EOF
-docker run --rm -i -v "$PWD":/ws -w /ws ubuntu:24.04 bash /dev/stdin \
-  < /tmp/pylair-linux-verify.sh
-```
+## Release order
 
-Notes: `ubuntu:24.04` matches `ubuntu-latest` CI and ships Python 3.12. The
-repo's `rust-toolchain.toml` auto-installs the pinned toolchain inside the
-container (it picked 1.92.0, ignoring the preinstalled one — expected). `-i`
-is required for `/dev/stdin` to work. First run takes ~20–30 min (apt webkit
-stack + full tauri dep build); target dir is container-local.
+Humans dispatch every publish; an agent's job stops at green CI and a
+prepared bump commit (AGENTS.md, "Release rules").
 
-## Then
-
-- If green: push, watch CI on the new commit — Ubuntu rust + both Ubuntu
-  acceptance legs + macOS/Ubuntu ruff should all clear.
-- Report Linux results as Linux results — do not extend macOS test claims.
-- **Do not publish npm rc.6 until CI is green.**
-
-## Release order (after CI green) — user-corrected, do not reorder
-
-1. crates.io: `tauri-plugin-pylair` `0.1.0-rc.3`
-2. PyPI: `pylair` `0.1.0-rc.3`
+1. crates.io: `tauri-plugin-pylair`.
+2. PyPI: `pylair` and `pylair-ollama` (`release.yml`, `package` input).
 3. Regenerate `packages/create-pylair/templates/default/src-tauri/Cargo.lock`
-   against the published crate, commit it (the lock ships verbatim in the
-   npm tarball; scaffold a registry-mode app, resolve, copy the lock back)
-4. Pack-mode CI green on THAT commit
-5. npm trio `0.1.0-rc.6`
-6. Registry acceptance `source=registry`
+   against the published crate and commit it (the lock ships verbatim in
+   the npm tarball; scaffold a registry-mode app, let cargo resolve, copy
+   the lock back; never hand-edit it).
+4. Pack-mode acceptance CI green on that commit.
+5. npm trio under `--tag next`.
+6. Registry acceptance with `source=registry`.
+
+Between a pin-bump commit and the actual publishes, pack-mode acceptance
+is expected red (it resolves the pins from the live registries).
+
+## Standing rules
+
+- Report Linux results as Linux results. Platform-gated code (pdeathsig,
+  process groups, Job Objects, ppid watchers) is proven only on its own
+  OS leg; a green macOS run says nothing about Linux or Windows code.
+- macOS is CI-tested only (README, Known limitations).
+- `docs/protocol-v1.md` and `docs/cancellation.md` are contracts: change
+  the doc in the same commit as the code.
+- Do not publish npm until CI is green on the pins commit.
 
 ## Known flags for release notes
 
-- `cancel(): boolean → CancelOutcome` is a BREAKING client change —
-  `if (await cancel(t))` callers must update. Template has no cancel usage
-  (verified).
-- The template `Cargo.lock` is still at crate rc.2 — expected until step 3.
-- Prior context: full summary at
-  `~/.local/share/devin/cli/summaries/history_47b24b3a7d554c5b.md` (does not
-  travel — key facts duplicated here).
+- `cancel()` returns a `CancelOutcome`, not a boolean (breaking for
+  callers written as `if (await cancel(t))`). Introduced in the rc.6
+  train; the template has no cancel usage.
+- Windows: the runtime now starts suspended and is resumed after job
+  assignment. If the host dies in the microseconds between spawn and
+  assignment the suspended runtime is left behind as an inert process
+  (`docs/security.md` section 7).
+
+## Historical
+
+The rc.6 handoff (Linux verification script, release order for
+`0.1.0-rc.3` crate and PyPI, npm `0.1.0-rc.6`) is superseded and was
+removed from this file; recover it from git history if needed.

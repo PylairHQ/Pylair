@@ -71,8 +71,6 @@ at `@expose` time, not at cancel time.
 
 ### Inline sync functions (non-isolated)
 
-### Inline sync functions (non-isolated)
-
 - **Cannot be safely cancelled.** Python cannot preempt a running
   sync function in a thread, full stop.
 - The cancel request is *recorded*: the function keeps running, its
