@@ -46,13 +46,22 @@ test("scaffolds a complete app skeleton", () => {
     assert.ok(gi.includes(line), `.gitignore missing "${line}"`);
   const py = readFileSync(join(app, "pyproject.toml"), "utf8");
   assert.match(py, /app-module = "backend\.app"/);
-  assert.match(py, /pylair==0\.1\.0rc9/);
+  assert.match(py, /pylair==0\.1\.0rc10/);
   const pkg = readFileSync(join(app, "package.json"), "utf8");
-  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.15"/);
-  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.15"/);
+  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.16"/);
+  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.16"/);
   const lock = readFileSync(join(app, "src-tauri/Cargo.lock"), "utf8");
   assert.match(lock, /name = "my-app"/);
-  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.11"/);
+  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.12"/);
+  // Tripwire: the shipped lock must carry exactly the crate version the
+  // scaffold pins in Cargo.toml, or a registry-mode build re-resolves.
+  const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
+  const pinned = cargo.match(/tauri-plugin-pylair = "=([^"]+)"/);
+  assert.ok(pinned, "scaffolded Cargo.toml has no exact tauri-plugin-pylair pin");
+  assert.ok(
+    lock.includes(`name = "tauri-plugin-pylair"\nversion = "${pinned[1]}"\n`),
+    `template Cargo.lock does not carry the pinned crate ${pinned[1]}`,
+  );
   // Webviews may listen but must not inject events — a forged
   // pylair://stream terminal resolves another window's call.
   const caps = readFileSync(join(app, "src-tauri/capabilities/default.json"), "utf8");
