@@ -1,0 +1,240 @@
+use crate::registry::subscribed;
+use crate::util::fmt_state;
+use crate::{protocol, supervisor, ErrorObj, Handle, PyRuntime, Registry, StreamItem};
+use serde_json::{json, Value};
+use tauri::{Emitter, Runtime};
+
+#[tauri::command]
+async fn python_call<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+    fn_name: String,
+    input: Value,
+) -> Result<Value, ErrorObj> {
+    subscribed(&window, &reg);
+    rt.0.call(
+        &fn_name,
+        input,
+        Some(window.label().to_string()),
+        Some(false),
+    )
+    .await
+}
+
+/// The `python_call_stream` answer. `protocol` is the client↔plugin
+/// bridge version (2 = per-call channel delivery), NOT the host↔Python
+/// wire protocol (`protocol::PROTOCOL_VERSION` = 1). It exists so a new
+/// client can spot an old plugin: the old command returned a bare task
+/// id and ignored `onEvent`, which would hang the call forever — a
+/// bare-number answer tells the client to fail loudly instead.
+pub(super) const BRIDGE_PROTOCOL: u32 = 2;
+
+#[derive(serde::Serialize)]
+pub struct StreamAck {
+    pub task: u64,
+    pub protocol: u32,
+}
+
+/// Start a call with per-call channel delivery. Returns `{task,
+/// protocol}`; chunks and the terminal arrive on `on_event` — delivery
+/// is bound to the invoking webview, no shared event bus (event-scoping
+/// fix).
+///
+/// `stream` is the client's declared intent: `false` for `call()`
+/// (task-slot accounting only — no stream slot, no initial credit), or
+/// `true` for `stream()`. Absent (older clients) the task is accounted
+/// as a stream exactly as before but NO `stream` field reaches the
+/// runtime, so no mismatch validation applies.
+#[tauri::command]
+async fn python_call_stream<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+    on_event: tauri::ipc::Channel<Value>,
+    fn_name: String,
+    input: Value,
+    stream: Option<bool>,
+) -> Result<StreamAck, ErrorObj> {
+    python_call_stream_impl(&window, &reg, &rt, on_event, fn_name, input, stream).await
+}
+
+/// `python_call_stream`'s body, callable in tests — driving it is the
+/// real command path minus Tauri's invoke-arg deserialization.
+#[doc(hidden)]
+pub async fn python_call_stream_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reg: &Registry,
+    rt: &PyRuntime,
+    on_event: tauri::ipc::Channel<Value>,
+    fn_name: String,
+    input: Value,
+    stream: Option<bool>,
+) -> Result<StreamAck, ErrorObj> {
+    subscribed(window, reg);
+    let label = window.label().to_string();
+    let (task, items) =
+        rt.0.call_stream(&fn_name, input, Some(label.clone()), stream)
+            .await?;
+    forward_stream(on_event, items, rt.0.clone(), task, label);
+    Ok(StreamAck {
+        task,
+        protocol: BRIDGE_PROTOCOL,
+    })
+}
+
+/// Forward one call's stream items to its per-call channel. A dead
+/// consumer — `Channel::send` fails when the webview is gone — reaps
+/// that task and stops forwarding, so no stream slot or credit is left
+/// tied up. The reap is per-task, not per-label: a webview closed and
+/// reopened under the same label can hold newer live calls that a stale
+/// forwarder must not kill. Uses `cancel_task`: the awaited send cannot
+/// be dropped by a full command queue the way a `try_send` cancel can.
+/// Returns the forwarder's join handle (tests await it).
+#[doc(hidden)]
+pub fn forward_stream(
+    on_event: tauri::ipc::Channel<Value>,
+    mut items: supervisor::StreamRx,
+    rt: Handle,
+    task: u64,
+    owner: String,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        while let Some(item) = items.recv().await {
+            let payload = match item {
+                StreamItem::Chunk { seq, value } => {
+                    json!({"task": task, "seq": seq, "value": value, "done": false})
+                }
+                StreamItem::End(Ok(result)) => {
+                    json!({"task": task, "done": true, "result": result})
+                }
+                StreamItem::End(Err(e)) => {
+                    json!({"task": task, "done": true, "error": e})
+                }
+            };
+            if on_event.send(payload).is_err() {
+                rt.cancel_task(task, owner.clone()).await;
+                break;
+            }
+        }
+    })
+}
+
+#[tauri::command]
+async fn python_grant_credit<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+    task: u64,
+    n: u64,
+) -> Result<(), ErrorObj> {
+    subscribed(&window, &reg);
+    rt.0.grant_credit(task, n, Some(window.label().to_string()))
+        .await
+}
+
+/// End of the installed-webview self-test: print the verdict and exit with
+/// it. Inert unless PYLAIR_SELF_TEST_WEBVIEW is set, so shipping the
+/// permission in a release app grants nothing.
+#[tauri::command]
+fn python_selftest_report<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    result: Value,
+) -> Result<(), ErrorObj> {
+    if std::env::var_os("PYLAIR_SELF_TEST_WEBVIEW").is_none() {
+        return Err(ErrorObj {
+            code: protocol::INVALID_REQUEST,
+            message: "webview self-test not enabled".into(),
+            data: None,
+        });
+    }
+    let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    println!("webview-self-test: {result}");
+    app.exit(if ok { 0 } else { 5 });
+    Ok(())
+}
+
+/// Intruder's verdict for the two-window self-test. win-b cannot send it
+/// via JS emit/emit_to: a `core:event:deny-emit(-to)` entry (as the default
+/// template ships for the main webview) denies those commands origin-wide —
+/// Tauri's authority ignores `windows:` scoping for denials — so the report
+/// relays through this ACL-checked command and the Rust side emits. Rust
+/// emit paths are not subject to webview permissions. Unlike
+/// python_selftest_report this does not exit the app, so win-b can hold it
+/// without gaining shutdown power. Inert unless PYLAIR_SELF_TEST_WEBVIEW.
+#[tauri::command]
+fn python_selftest_b_report<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    report: Value,
+) -> Result<(), ErrorObj> {
+    if std::env::var_os("PYLAIR_SELF_TEST_WEBVIEW").is_none() {
+        return Err(ErrorObj {
+            code: protocol::INVALID_REQUEST,
+            message: "webview self-test not enabled".into(),
+            data: None,
+        });
+    }
+    app.emit_to("main", "pylair://selftest-b", report)
+        .map_err(|e| ErrorObj {
+            code: protocol::INTERNAL,
+            message: e.to_string(),
+            data: None,
+        })
+}
+
+#[tauri::command]
+async fn python_cancel<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+    task: u64,
+) -> Result<supervisor::CancelOutcome, ErrorObj> {
+    subscribed(&window, &reg);
+    rt.0.cancel(task, Some(window.label().to_string())).await
+}
+
+/// Operator-initiated recovery: respawn the runtime out of the Failed state.
+#[tauri::command]
+async fn python_retry<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+) -> Result<(), ErrorObj> {
+    subscribed(&window, &reg);
+    rt.0.retry().await
+}
+
+#[tauri::command]
+fn python_state<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+) -> &'static str {
+    subscribed(&window, &reg);
+    fmt_state(rt.0.state())
+}
+
+#[tauri::command]
+async fn python_shutdown<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+) -> Result<supervisor::ShutdownOutcome, ErrorObj> {
+    subscribed(&window, &reg);
+    Ok(rt.0.shutdown().await)
+}
+
+pub(super) fn invoke_handler<R: Runtime>(
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        python_call,
+        python_call_stream,
+        python_grant_credit,
+        python_cancel,
+        python_retry,
+        python_state,
+        python_shutdown,
+        python_selftest_report,
+        python_selftest_b_report,
+    ]
+}
