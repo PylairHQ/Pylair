@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::{CancelOutcome, ChildIo};
+use super::handle::CancelOutcome;
+use super::run::ChildIo;
 use crate::protocol::ErrorObj;
 
 pub(super) fn mtime(p: &std::path::Path) -> Option<std::time::SystemTime> {

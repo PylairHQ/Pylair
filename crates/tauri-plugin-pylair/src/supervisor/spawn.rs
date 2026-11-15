@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
+use super::config::{RuntimeEvent, SpawnSpec, SupervisorConfig};
 #[cfg(not(windows))]
 use super::platform_unix::monitor_child;
 #[cfg(target_os = "linux")]
@@ -23,9 +24,9 @@ use super::platform_unix::{spawn_via_pdeathsig_anchor, PdeathAnchor};
 use super::platform_windows::{
     assign_to_job_object, child_creation_flags, monitor_child, resume_main_thread,
 };
+use super::run::{ChildIo, ChildReadErr};
 use super::stderr::{StderrLines, StderrSink};
 use super::wire::Ctrl;
-use super::{ChildIo, ChildReadErr, RuntimeEvent, SpawnSpec, SupervisorConfig};
 use crate::protocol::InMsg;
 use crate::transport::Transport;
 

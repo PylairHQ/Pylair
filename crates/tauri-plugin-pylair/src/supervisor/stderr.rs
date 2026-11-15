@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::RuntimeEvent;
+use super::config::RuntimeEvent;
 
 /// stderr line + queue plumbing (protocol §9: drain unconditionally,
 /// drop OLDEST with a "[dropped N lines]" marker under backpressure).

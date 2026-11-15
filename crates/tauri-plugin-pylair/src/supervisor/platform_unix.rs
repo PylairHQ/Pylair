@@ -15,7 +15,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(target_os = "linux")]
-use super::SpawnSpec;
+use super::config::SpawnSpec;
 
 /// Linux: spawn the child FROM a dedicated long-lived thread that parks
 /// for the host process's lifetime. PR_SET_PDEATHSIG is bound to the

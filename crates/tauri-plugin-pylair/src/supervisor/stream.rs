@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use super::stopped_err;
+use super::handle::stopped_err;
 use crate::protocol::ErrorObj;
 
 /// A streamed item delivered to the caller of `call_stream`.

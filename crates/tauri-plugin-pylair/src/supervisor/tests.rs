@@ -5,7 +5,15 @@ use super::platform_windows::child_creation_flags;
 use super::stderr::{
     StderrLines, StderrSink, STDERR_LINE_CAP, STDERR_QUEUE_CAP, STDERR_TRUNC_MARK,
 };
-use super::stream::stream_pair;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::mpsc;
+
+use super::config::{clamp_hello_timeout_ms, parse_hello_timeout_ms};
+use super::run::{classify_pong, PongVerdict, LOOP_STALL_WARN};
+use super::stream::{stream_pair, ChunkFail};
 use super::*;
 
 /// F5: PYLAIR_HELLO_TIMEOUT_MS parsing — real values pass through,

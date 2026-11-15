@@ -10,8 +10,8 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
-use super::stream::{stream_pair, StreamSink};
-use super::{Limits, State, StreamRx};
+use super::config::{Limits, State};
+use super::stream::{stream_pair, StreamRx, StreamSink};
 use crate::protocol::{self as proto, ErrorObj};
 
 pub(super) enum Command {
