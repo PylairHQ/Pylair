@@ -74,6 +74,34 @@ export function hostTriple(): string {
 
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
+const DOWNLOAD_ATTEMPTS = 4;
+/** Base delay before retries 2, 3 and 4; each gets +-25 percent jitter. */
+const RETRY_BASE_MS = [1_000, 3_000, 8_000];
+
+/** A download failure, plus whether trying again could plausibly help:
+ * stalls, socket errors, 5xx, 429 and short bodies can; a 404, a refused
+ * redirect or a redirect loop will fail the same way every time. */
+export class DownloadError extends Error {
+  readonly retryable: boolean;
+  constructor(message: string, retryable: boolean, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "DownloadError";
+    this.retryable = retryable;
+  }
+}
+
+/** Errors that surface from the socket or the response stream are
+ * transient by nature; classified ones keep their own verdict. */
+const asTransient = (e: unknown): Error =>
+  e instanceof DownloadError
+    ? e
+    : new DownloadError(e instanceof Error ? e.message : String(e), true, e);
+
+/** Delay before retry number `retry` (1-based), with jitter. */
+export function backoffMs(retry: number, rand: () => number = Math.random): number {
+  const base = RETRY_BASE_MS[Math.min(retry, RETRY_BASE_MS.length) - 1]!;
+  return Math.round(base * (0.75 + 0.5 * rand()));
+}
 
 /** Download `url` to `to`, following up to `maxRedirects` redirects and
  * failing after `timeoutMs` with no bytes. The body lands in `to.part`
@@ -121,7 +149,10 @@ export function download(
       try {
         if (redirects > maxRedirects)
           return fail(
-            new Error(`GET ${url}: too many redirects (cap ${maxRedirects})`),
+            new DownloadError(
+              `GET ${url}: too many redirects (cap ${maxRedirects})`,
+              false,
+            ),
           );
         const req = getImpl(u, (r) => {
           try {
@@ -131,14 +162,20 @@ export function download(
               const target = new URL(r.headers.location, u);
               if (target.protocol !== "https:")
                 return fail(
-                  new Error(
+                  new DownloadError(
                     `GET ${u}: refusing non-https redirect to ${target.origin}`,
+                    false,
                   ),
                 );
               return follow(target.href, redirects + 1);
             }
             if (r.statusCode !== 200)
-              return fail(new Error(`GET ${u} -> ${r.statusCode}`));
+              return fail(
+                new DownloadError(
+                  `GET ${u} -> ${r.statusCode}`,
+                  r.statusCode! >= 500 || r.statusCode === 429,
+                ),
+              );
             const want = Number(r.headers["content-length"]);
             let got = 0;
             let ended = false;
@@ -148,10 +185,12 @@ export function download(
             r.on("end", () => {
               ended = true;
             });
-            r.on("error", fail);
+            r.on("error", (e) => fail(asTransient(e)));
             r.on("close", () => {
               if (!ended)
-                fail(new Error(`GET ${u}: connection dropped mid-body`));
+                fail(
+                  new DownloadError(`GET ${u}: connection dropped mid-body`, true),
+                );
             });
             // Open eagerly — <part>'s existence is synchronous, so no
             // deferred fs.open can land after fail()'s rmSync and recreate
@@ -169,8 +208,9 @@ export function download(
               stream.once("close", () => {
                 if (!Number.isNaN(want) && got !== want)
                   return fail(
-                    new Error(
-                      `GET ${u}: incomplete body — ${got} of ${want} bytes`,
+                    new DownloadError(
+                      `GET ${u}: incomplete body: ${got} of ${want} bytes`,
+                      true,
                     ),
                   );
                 settled = true;
@@ -186,16 +226,50 @@ export function download(
         });
         req.setTimeout(timeoutMs, () =>
           req.destroy(
-            new Error(`GET ${u}: timed out — no data for ${timeoutMs / 1000}s`),
+            new DownloadError(
+              `GET ${u}: timed out: no data for ${timeoutMs / 1000}s`,
+              true,
+            ),
           ),
         );
-        req.on("error", fail);
+        req.on("error", (e) => fail(asTransient(e)));
       } catch (e) {
         onErr(e);
       }
     };
     follow(url, 0);
   });
+}
+
+/** `download` with up to 4 attempts and exponential backoff. Only failures
+ * marked retryable are retried; SHA verification stays with
+ * ensureTarball. `sleep` is injectable so tests do not wait. */
+export async function downloadWithRetry(
+  url: string,
+  to: string,
+  opts?: Parameters<typeof download>[2] & {
+    attempts?: number;
+    sleep?: (ms: number) => Promise<void>;
+    log?: (line: string) => void;
+  },
+): Promise<void> {
+  const attempts = opts?.attempts ?? DOWNLOAD_ATTEMPTS;
+  const sleep =
+    opts?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const log = opts?.log ?? ((line: string) => console.warn(line));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await download(url, to, opts);
+    } catch (e) {
+      if (!(e instanceof DownloadError && e.retryable) || attempt >= attempts)
+        throw e;
+      const wait = backoffMs(attempt);
+      log(
+        `retrying (${attempt + 1} of ${attempts}) in ${Math.round(wait / 1000)}s: ${e.message}`,
+      );
+      await sleep(wait);
+    }
+  }
 }
 
 const sha256File = (p: string) =>
@@ -209,7 +283,7 @@ export async function ensureTarball(
   url: string,
   tarball: string,
   want: string,
-  dl: (u: string, to: string) => Promise<void> = download,
+  dl: (u: string, to: string) => Promise<void> = downloadWithRetry,
 ): Promise<void> {
   const cached = existsSync(tarball);
   if (!cached) {
