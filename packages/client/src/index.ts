@@ -9,9 +9,11 @@
  */
 
 import { CMD, ipc, liveTasks } from "./internal.js";
+// Type only, erased at runtime: neither line loads selftest.js. The
+// self-test is imported on demand inside maybeSelfTest.
+import type { SelfTestSpec } from "./selftest.js";
 
 export { _resetForTests, setBridge } from "./internal.js";
-export { maybeSelfTest } from "./selftest.js";
 export type { SelfTestSpec } from "./selftest.js";
 
 /**
@@ -577,6 +579,39 @@ export async function onStderr(cb: (line: string) => void): Promise<() => void> 
 /** Subscribe to the exposes manifest emitted after handshake. */
 export async function onExposes<T = unknown>(cb: (manifest: T) => void): Promise<() => void> {
   return (await ipc()).listen<T>(EVT.exposes, cb);
+}
+
+// ---- installed-webview self-test, loaded on demand ---------------------------
+
+/**
+ * When the host runs the app with PYLAIR_SELF_TEST_WEBVIEW, the plugin sets
+ * `window.__PYLAIR_SELF_TEST__`. Call this once at startup: it drives the
+ * REAL bridge (ACL permissions, event routing, wire transform): a typed
+ * call, an ordered stream, cancellation, shutdown. It then reports the
+ * verdict so the host process exits 0/5. A no-op in normal runs.
+ *
+ * The self-test code (selftest.js) is loaded only when the flag is set.
+ */
+export async function maybeSelfTest(
+  spec: SelfTestSpec = { add: "add", count: "count" },
+): Promise<void> {
+  if (!(globalThis as { __PYLAIR_SELF_TEST__?: boolean }).__PYLAIR_SELF_TEST__) return;
+  // The import resolves before the self-test creates any task, so the
+  // task ids it relies on are unaffected.
+  let m: typeof import("./selftest.js");
+  try {
+    m = await import("./selftest.js");
+  } catch (e) {
+    // The host has no timeout of its own: without a verdict it would run
+    // until killed. Report a failing one through the same command and
+    // payload shape the owner role uses, then surface the error.
+    const checks = { "selftest-import": `FAIL: ${e instanceof Error ? e.message : String(e)}` };
+    await (await ipc())
+      .invoke(CMD.selftestReport, { result: { ok: false, checks } })
+      .catch(() => {});
+    throw e;
+  }
+  return m.maybeSelfTest(spec);
 }
 
 /**
