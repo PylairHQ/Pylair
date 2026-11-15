@@ -25,7 +25,7 @@ import {
 import type { IncomingMessage } from "node:http";
 import { get } from "node:https";
 import { arch, platform, tmpdir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   importRoot,
@@ -148,6 +148,8 @@ export function download(
     /** Progress line sink (default stderr) and its minimum interval. */
     progress?: (line: string) => void;
     progressMs?: number;
+    /** Filled in as bytes arrive, for the caller's failure message. */
+    state?: { total?: number };
   },
 ): Promise<void> {
   const getImpl = opts?.get ?? get;
@@ -260,6 +262,7 @@ export function download(
             const total = partial
               ? Number(/\/(\d+)$/.exec(String(r.headers["content-range"]))?.[1])
               : want;
+            if (opts?.state && Number.isFinite(total)) opts.state.total = total;
             let got = 0;
             let ended = false;
             // A slow link should look slow, not dead: one plain line on
@@ -348,18 +351,36 @@ export async function downloadWithRetry(
     attempts?: number;
     sleep?: (ms: number) => Promise<void>;
     log?: (line: string) => void;
+    /** The committed SHA-256, quoted in the manual-download advice. */
+    sha256?: string;
   },
 ): Promise<void> {
+  const state: { total?: number } = {};
   const attempts = opts?.attempts ?? DOWNLOAD_ATTEMPTS;
   const sleep =
     opts?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const log = opts?.log ?? ((line: string) => console.warn(line));
   for (let attempt = 1; ; attempt++) {
     try {
-      return await download(url, to, { resume: true, ...opts });
+      return await download(url, to, { resume: true, state, ...opts });
     } catch (e) {
-      if (!(e instanceof DownloadError && e.retryable) || attempt >= attempts)
-        throw e;
+      if (!(e instanceof DownloadError && e.retryable)) throw e;
+      if (attempt >= attempts) {
+        const part = `${to}.part`;
+        const received = existsSync(part) ? statSync(part).size : 0;
+        const size = state.total === undefined ? "unknown" : `${state.total} bytes`;
+        throw new DownloadError(
+          `could not download ${url} after ${attempts} attempts: received ` +
+            `${received} of ${state.total ?? "an unknown number of"} bytes ` +
+            `(last error: ${e.message}). ` +
+            `Download the file on a better connection and place it at ${resolve(to)}. ` +
+            `Expected size ${size}` +
+            (opts?.sha256 ? `, SHA-256 ${opts.sha256}` : "") +
+            `. The build verifies it and re-downloads if it does not match.`,
+          false,
+          e,
+        );
+      }
       const wait = backoffMs(attempt);
       log(
         `retrying (${attempt + 1} of ${attempts}) in ${Math.round(wait / 1000)}s: ${e.message}`,
@@ -380,7 +401,8 @@ export async function ensureTarball(
   url: string,
   tarball: string,
   want: string,
-  dl: (u: string, to: string) => Promise<void> = downloadWithRetry,
+  dl: (u: string, to: string) => Promise<void> = (u2, to2) =>
+    downloadWithRetry(u2, to2, { sha256: want }),
 ): Promise<void> {
   const cached = existsSync(tarball);
   if (!cached) {
