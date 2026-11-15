@@ -121,6 +121,42 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
     .unwrap_or_else(|_| panic!("diagnostic {needle:?} never arrived"));
 }
 
+/// The number in a fake-runtime `READ <n>` diagnostic line, if it is one.
+fn read_no(line: &str) -> Option<u64> {
+    line.trim().strip_prefix("READ ")?.parse().ok()
+}
+
+/// Fold every diagnostic already waiting in the channel into `seen`, the
+/// highest `READ <n>` reported so far. Never blocks.
+fn drain_reads(rx: &mut mpsc::Receiver<RuntimeEvent>, seen: &mut u64) {
+    while let Ok(e) = rx.try_recv() {
+        if let RuntimeEvent::Stderr(l) = e {
+            if let Some(n) = read_no(&l) {
+                *seen = (*seen).max(n);
+            }
+        }
+    }
+}
+
+/// Wait until the fake runtime reports a read numbered above `after`;
+/// returns that number.
+async fn wait_read_after(rx: &mut mpsc::Receiver<RuntimeEvent>, after: u64) -> u64 {
+    timeout(T, async {
+        while let Some(e) = rx.recv().await {
+            if let RuntimeEvent::Stderr(l) = e {
+                if let Some(n) = read_no(&l) {
+                    if n > after {
+                        return n;
+                    }
+                }
+            }
+        }
+        panic!("event channel closed before READ {}", after + 1);
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the fake runtime never read past frame {after}"))
+}
+
 /// Slow-starting, slow-reading fake runtime — the saturation harness.
 ///
 /// Timing contract:
@@ -265,19 +301,28 @@ async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
     // Open the stream once the lane has a slot. The single read in
     // `saturate_data_lane` frees one slot, but pump commands still queued
     // in the actor race it for that slot, so `frame_out_queue` means "full
-    // right now", not failure: poll with a deadline for the real
-    // condition. Every other error is a real failure. A rejected attempt
-    // has already granted credit for a task that never registers; the
-    // host cancels it, so retrying leaves nothing behind.
+    // right now", not failure. Every other error is a real failure.
+    //
+    // A rejected attempt is not free: the host already queued the
+    // initial credit on the control lane, then queues a cancel for the
+    // task that never registered. That is two frames on a 16-deep lane,
+    // and nothing drains either lane until the runtime reads again (one
+    // read is 1.5 s away during the action window). So retry only after
+    // the runtime has read past what it had read before the attempt:
+    // that read lets the writer flush the queued control frames and move
+    // one data frame, freeing a data-lane slot. A timer-driven retry
+    // filled the control lane in 8 attempts (macOS CI, PR 63).
     let deadline = Instant::now() + T;
+    let mut reads = 0;
     let (task, mut items) = loop {
+        drain_reads(&mut rx, &mut reads);
         match h
             .call_stream("count_stream", json!({}), None, Some(true))
             .await
         {
             Ok(opened) => break opened,
             Err(e) if limit_of(&e) == Some("frame_out_queue") && Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                reads = wait_read_after(&mut rx, reads).await;
             }
             Err(e) => panic!("stream call rejected: {e:?}"),
         }
