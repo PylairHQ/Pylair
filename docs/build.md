@@ -36,6 +36,43 @@ Tauri's bundler downloads its installer toolchain — WiX and NSIS on
 Windows, the AppImage runtime on Linux — on first use. Later builds
 reuse the caches; an offline rebuild works once they've been warmed.
 
+## Slow or flaky networks
+
+The python-build-standalone download (the part `pylair build` does
+itself) is built for a bad connection:
+
+- **Retry.** Up to 4 attempts, waiting about 1s, 3s and 8s between them
+  (with jitter). It retries a stall (no data for the timeout below), a
+  socket error such as `ECONNRESET`, a 5xx or 429 response, and a body
+  that ends short of its `Content-Length`. It does not retry a 404 or
+  other 4xx, a redirect to a non-https URL, or a redirect loop, since
+  those fail the same way every time. Each retry prints one line, for
+  example `retrying (2 of 4) in 3s: <reason>`.
+- **Resume.** The partial file is kept as `<asset>.part` in
+  `.pylair/cache/` and the next attempt (or the next run) continues it
+  with a `Range` request, including after GitHub's redirect to its CDN.
+  If the server ignores `Range`, or the partial file cannot be
+  continued, the download restarts from zero. Resuming never skips
+  verification: the finished file is still checked against the SHA-256
+  committed in the CLI, and a mismatch is handled as before (one
+  re-download, then the build refuses).
+- **Progress.** A slow download prints bytes received over total, with a
+  percentage when the size is known, to stderr at most every 10 seconds.
+  A fast download prints nothing extra.
+- **Timeout.** The no-data timeout is 30 seconds. Set
+  `PYLAIR_DOWNLOAD_TIMEOUT_MS` (milliseconds, clamped to 5000..600000) to
+  change it. A value that is not a whole number is an error.
+
+### Downloading by hand
+
+If every attempt fails, the error names the URL, how many bytes arrived
+of how many, the exact path to use, the expected size and the SHA-256.
+Fetch the file on a better connection (a browser or `curl -L -O` works),
+and put it at the path shown, which is
+`<your app>/.pylair/cache/<asset name>`. Keep the original file name. The next `pylair build` finds it in the cache,
+verifies it against the committed SHA-256, and re-downloads it only if
+the hash does not match.
+
 ## Configuration — one file
 
 Everything pylair-specific lives in `[tool.pylair]` in `pyproject.toml`.
