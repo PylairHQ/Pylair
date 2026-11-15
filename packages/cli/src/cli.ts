@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "./build.js";
 import { emit } from "./codegen.js";
@@ -52,6 +52,14 @@ function argValue(argv: string[], ...flags: string[]): string | undefined {
     if (i !== -1) return argv[i + 1];
   }
   return undefined;
+}
+
+/** The app directory a command works on, as an absolute path: `--dir`
+ * resolved against the current directory, or the current directory.
+ * Commands spawn tools with `cwd` set to this directory while also passing
+ * paths built from it, so a relative value would be resolved twice. */
+export function resolveAppDir(dir: string | undefined, cwd: string = process.cwd()): string {
+  return resolve(cwd, dir ?? ".");
 }
 
 function findPython(): string {
@@ -183,7 +191,7 @@ export function main(argv: string[]): number | Promise<number> {
   if (command === "build") {
     const { dir, skipFetch, tauriArgs } = parseBuildArgs(rest);
     return build({
-      appDir: dir ?? process.cwd(),
+      appDir: resolveAppDir(dir),
       tauriArgs,
       skipFetch,
     }).then(
@@ -195,7 +203,7 @@ export function main(argv: string[]): number | Promise<number> {
     );
   }
   if (command === "dev") {
-    const dir = argValue(rest, "--dir") ?? process.cwd();
+    const dir = resolveAppDir(argValue(rest, "--dir"));
     return dev({ appDir: dir }).then(
       (code) => code,
       (e) => {
@@ -205,7 +213,7 @@ export function main(argv: string[]): number | Promise<number> {
     );
   }
   if (command === "doctor") {
-    const dir = argValue(rest, "--dir") ?? process.cwd();
+    const dir = resolveAppDir(argValue(rest, "--dir"));
     return doctor(dir).then((code) => code);
   }
   console.error(`pylair: unknown command '${command}'. Run 'pylair --help'.`);
