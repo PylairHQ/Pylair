@@ -4,28 +4,29 @@
  *   source → prune → tauri build → unsigned warning.
  */
 
-import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
-import {
-  closeSync,
-  cpSync,
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import type { IncomingMessage } from "node:http";
-import { get } from "node:https";
+/*
+ * Where each step lives. build() below calls into them; this file also
+ * re-exports the helpers other modules and the tests import from here.
+ *
+ *   build/pbs.ts       python-build-standalone release, versions, host
+ *                      triples, committed SHA-256 table, hostTriple()
+ *   build/download.ts  the interpreter download: retry, resume, progress,
+ *                      timeout, cache and SHA-256 check (ensureTarball)
+ *   build/python.ts    fetchPython (unpack CPython), uv export and
+ *                      `uv pip install` into site-packages (stageEnv)
+ *   build/source.ts    stageSource: copy the app source, refuse secrets
+ *   build/notices.ts   stageNotices: THIRD-PARTY-NOTICES for the bundle
+ *   build/bytecode.ts  compileBytecode: checked-hash pycs for the bundle
+ *   build/sign.ts      macOS ad-hoc signing of the built .app (adHocSign)
+ *   build/util.ts      isWin and run(), shared by build() and the modules
+ *   ./prune.ts         pruning the staged tree (DEFAULT_PRUNE, prune)
+ *   ./config.ts        [tool.pylair] and tauri.conf.json loading
+ */
+
+import { spawnSync } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import { arch, platform, tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   importRoot,
@@ -34,13 +35,10 @@ import {
   tauriCliEntry,
   windowsSigningConfigured,
 } from "./config.js";
-import { matchGlob } from "./glob.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
-import { x as untar } from "tar";
 import { compileBytecode } from "./build/bytecode.js";
-import { ensureTarball } from "./build/download.js";
-import { PBS_SHA256, PBS_TAG, PBS_VERSIONS, hostTriple } from "./build/pbs.js";
 import { stageNotices } from "./build/notices.js";
+import { hostTriple } from "./build/pbs.js";
 import { fetchPython, stageEnv } from "./build/python.js";
 import { adHocSign } from "./build/sign.js";
 import { stageSource } from "./build/source.js";
