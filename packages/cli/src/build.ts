@@ -100,6 +100,21 @@ const asTransient = (e: unknown): Error =>
     ? e
     : new DownloadError(e instanceof Error ? e.message : String(e), true, e);
 
+/** The no-data timeout: 30s unless PYLAIR_DOWNLOAD_TIMEOUT_MS says
+ * otherwise, clamped to 5s..600s. A value that is not a whole number is an
+ * error, not a silent fallback, so a typo does not hide. */
+export function downloadTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PYLAIR_DOWNLOAD_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === "") return DOWNLOAD_IDLE_TIMEOUT_MS;
+  if (!/^\d+$/.test(raw))
+    throw new DownloadError(
+      `PYLAIR_DOWNLOAD_TIMEOUT_MS must be a whole number of milliseconds ` +
+        `(5000 to 600000), got "${raw}"`,
+      false,
+    );
+  return Math.min(600_000, Math.max(5_000, Number(raw)));
+}
+
 /** "downloaded 12.3 of 45.6 MB (27%)", or without the total when the server
  * did not send a length. */
 function progressLine(received: number, total: number): string {
@@ -136,11 +151,13 @@ export function download(
   },
 ): Promise<void> {
   const getImpl = opts?.get ?? get;
-  const timeoutMs = opts?.timeoutMs ?? DOWNLOAD_IDLE_TIMEOUT_MS;
   const maxRedirects = opts?.maxRedirects ?? MAX_REDIRECTS;
   const part = `${to}.part`;
   const resume = opts?.resume ?? false;
   return new Promise((res, rej) => {
+    // Read inside the executor so a bad PYLAIR_DOWNLOAD_TIMEOUT_MS rejects
+    // the promise instead of throwing synchronously.
+    const timeoutMs = opts?.timeoutMs ?? downloadTimeoutMs();
     let settled = false;
     let out: ReturnType<typeof createWriteStream> | undefined;
     let ticker: ReturnType<typeof setInterval> | undefined;
