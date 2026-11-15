@@ -43,11 +43,11 @@ export function substitutions(name: string, identifier: string, local?: string):
     subs.__PYLAIR_RS__ = `tauri-plugin-pylair = { path = "${unixPath(join(root, "crates/tauri-plugin-pylair"))}" }`;
     subs.__PYLAIR_CLI__ = `file:${unixPath(join(root, "packages/cli"))}`;
   } else {
-    subs.__PYLAIR_PY__ = "pylair==0.1.0rc9";
+    subs.__PYLAIR_PY__ = "pylair==0.1.0rc10";
     subs.__PYLAIR_JS_PKG__ = "@pylair/client";
-    subs.__PYLAIR_JS__ = "0.1.0-rc.15";
-    subs.__PYLAIR_CLI__ = "0.1.0-rc.15";
-    subs.__PYLAIR_RS__ = `tauri-plugin-pylair = "=0.1.0-rc.11"`;
+    subs.__PYLAIR_JS__ = "0.1.0-rc.16";
+    subs.__PYLAIR_CLI__ = "0.1.0-rc.16";
+    subs.__PYLAIR_RS__ = `tauri-plugin-pylair = "=0.1.0-rc.12"`;
   }
   return subs;
 }
