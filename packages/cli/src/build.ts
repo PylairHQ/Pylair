@@ -37,6 +37,7 @@ import {
 import { matchGlob } from "./glob.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
 import { x as untar } from "tar";
+import { isWin, run } from "./build/util.js";
 
 const PBS_TAG = "20251120";
 const PBS_VERSIONS: Record<string, string> = { "3.12": "3.12.12", "3.13": "3.13.9" };
@@ -47,8 +48,6 @@ const HOST_TRIPLES: Record<string, string> = {
   "linux:x64": "x86_64-unknown-linux-gnu",
   "linux:arm64": "aarch64-unknown-linux-gnu",
 };
-
-const isWin = platform() === "win32";
 
 /** Expected SHA256 per asset, committed in-repo — a hash fetched from the
  * same release as the tarball catches corruption but not a tampered
@@ -548,12 +547,6 @@ function stageEnv(resources: string, python: string, appDir: string, reqs: strin
     uvPipInstallArgs(python, target, reqsFile, requireHashes),
     { cwd: appDir, stdio: "inherit" },
   );
-}
-
-function run(cmd: string, args: string[], cwd: string) {
-  const r = spawnSync(cmd, args, { cwd, stdio: "inherit" });
-  if (r.error) throw new Error(`${cmd} ${args.join(" ")} failed to start: ${r.error.message}`);
-  if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}`);
 }
 
 /** pyc invalidation mode shipped in installers — see docs/build.md.
