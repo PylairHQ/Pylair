@@ -11,15 +11,22 @@ rules that AGENTS.md points at. Anything not listed here is in git history.
 rc.16 is published: the crate at `0.1.0-rc.12`, `pylair` `0.1.0rc10`,
 `pylair-ollama` `0.1.0rc3` and the npm trio at `0.1.0-rc.16`.
 
-rc.17 is in preparation. Versions in the repo (checked in the files, not
-against the registries) and the plan for each:
+rc.17 is in progress. Steps 1 and 3 are done: the crate `0.1.0-rc.13` is
+published on crates.io, and the pins PR has regenerated the template
+`Cargo.lock` against it. Next: pack-mode acceptance on the pins commit,
+then the npm trio at `0.1.0-rc.17`, then registry acceptance. Versions in
+the repo (checked in the files, not against the registries) and the state
+of each:
 
-| Package | Version in the repo | rc.17 plan |
+| Package | Version in the repo | rc.17 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.13` | released as `0.1.0-rc.13` |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.13` | published |
 | `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, not released |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, not released |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.16` | released as `0.1.0-rc.17`; the bump lands in the pins PR |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.17` | to publish after the pins PR merges |
+
+Scaffold pins for rc.17: `tauri-plugin-pylair = "=0.1.0-rc.13"`,
+`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.17`.
 
 Merged since rc.16 (76ebcdc):
 
@@ -32,14 +39,13 @@ Merged since rc.16 (76ebcdc):
 - PR 66, R3: CLI `build.ts` split into `src/build/` (pure move).
 - PR 67: the CLI resolves `--dir` to an absolute path for build, dev and
   doctor.
-- rc.17 version bump: crate `0.1.0-rc.13`; the reference app's `uv.lock`
-  refreshed (it still pinned its two local packages at `0.0.0`).
+- PR 68, rc.17 version bump: crate `0.1.0-rc.13`; the reference app's
+  `uv.lock` refreshed (it still pinned its two local packages at `0.0.0`).
+- rc.17 pins: scaffold pins, template `Cargo.lock` against the published
+  crate, npm trio at `0.1.0-rc.17`, README and npm README install lines.
 
 `python/` and `integrations/` have not changed since rc.16, so step 2
-below is skipped for rc.17. The pins PR (scaffold pins, template
-`Cargo.lock` against the published crate, npm trio at `0.1.0-rc.17`, the
-README and npm README install lines) follows the crate publish; the steps
-below still describe the order.
+below is skipped for rc.17.
 
 ## Release order
 
