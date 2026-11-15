@@ -12,6 +12,7 @@ pub mod transport;
 mod registry;
 mod selftest;
 mod spec;
+mod util;
 
 pub use protocol::ErrorObj;
 pub use registry::{PyRuntime, Registry, WindowRegistry};
@@ -20,11 +21,13 @@ pub use spec::{app_spawn_spec, release_spawn_spec, SpawnSpecError};
 pub use supervisor::{
     spawn as spawn_supervisor, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
+pub use util::same_origin;
 
 use registry::{handle_emit_failure, subscribed};
 use selftest::attach_parent_console;
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager, Runtime};
+use util::fmt_state;
 
 /// Frontend event names (kept in one place — the client SDK mirrors them).
 pub mod events {
@@ -278,28 +281,6 @@ impl<R: Runtime> Builder<R> {
                 python_selftest_b_report,
             ])
             .build()
-    }
-}
-
-/// Exact-origin check for wrap mode (P1-8): two URLs share an origin iff
-/// scheme, host and effective port are equal — parse, never prefix-match.
-/// `http://127.0.0.1:5000.evil.com` (fails to parse as the expected host)
-/// and `http://127.0.0.1@evil.com` (userinfo tricks) are NOT the app origin.
-pub fn same_origin(a: &str, b: &str) -> bool {
-    match (tauri::Url::parse(a), tauri::Url::parse(b)) {
-        (Ok(a), Ok(b)) => a.origin() == b.origin(),
-        _ => false,
-    }
-}
-
-fn fmt_state(s: State) -> &'static str {
-    match s {
-        State::Starting => "starting",
-        State::Ready => "ready",
-        State::Unresponsive => "unresponsive",
-        State::Restarting => "restarting",
-        State::Failed => "failed",
-        State::Stopped => "stopped",
     }
 }
 
