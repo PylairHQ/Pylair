@@ -1,5 +1,6 @@
 //! Non-Windows process containment: the Linux parent-death anchor thread,
-//! process-group kill and reaping, and the non-Windows process monitor.
+//! process-group kill and reaping, and the non-Windows process monitor
+//! (docs/protocol-v1.md section 6).
 //! The module is compiled for every non-Windows target; each item keeps
 //! its own narrower cfg (unix, or target_os = "linux").
 

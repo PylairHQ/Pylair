@@ -1,6 +1,6 @@
 //! Stream plumbing between the actor and a `call_stream` consumer: the
-//! byte-leased chunk channel and its single terminal (protocol-v1.md
-//! section 7, RC.8A stream buffer limits).
+//! byte-leased chunk channel and its single terminal (docs/protocol-v1.md
+//! section 3.1; buffer limits: docs/security.md section 6).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

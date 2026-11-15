@@ -1,6 +1,7 @@
-//! Outgoing frame helpers for the data and control lanes (protocol-v1.md
-//! section 4), plus small pure helpers the actor uses: ownership checks,
-//! cancel-ack mapping, restart jitter and trigger-file mtime.
+//! Outgoing frame helpers for the data and control lanes (docs/protocol-v1.md
+//! section 5.1, "Control frames have their own lane"), plus small pure
+//! helpers the actor uses: ownership checks, cancel-ack mapping, restart
+//! jitter and trigger-file mtime.
 
 use std::time::Duration;
 

@@ -1,6 +1,7 @@
 //! The supervisor actor: `spawn()`, the `Supervisor` event loop and
-//! restart policy, `run_child` (one runtime generation from spawn to
-//! teardown) and the helpers that fail or drain pending work.
+//! restart policy (docs/protocol-v1.md section 7), `run_child` (one runtime
+//! generation from hello to teardown; its phases are listed at its top)
+//! and the helpers that fail or drain pending work.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -397,6 +398,27 @@ impl Supervisor {
 
     /// One runtime lifecycle: handshake, then serve until exit/kill.
     async fn run_child(&mut self, mut io: ChildIo) -> ExitCause {
+        // Phases. Line numbers are in this file; each phase also starts at
+        // a marker comment, quoted here, if the numbers drift.
+        //
+        // 1. Spawn and hello (line 422, "---- handshake: hello within
+        //    deadline ----"). The child was already spawned by spawn_child
+        //    from run_loop. Wait for `hello` within `hello_timeout`, check
+        //    the protocol version, then go Ready.
+        // 2. Steady state (line 493, "---- serving ----"). Task, credit and
+        //    liveness bookkeeping, then one `tokio::select!` loop with five
+        //    arms: "--- incoming frame ---" (line 520), "--- app command ---"
+        //    (line 665), "--- liveness ping ---" (line 948), "--- dev
+        //    restart trigger ---" (line 984) and "--- child exit ---"
+        //    (line 996).
+        // 3. Shutdown and teardown. A requested shutdown is the
+        //    `Command::Shutdown { ack }` arm (line 900): shutdown frame on
+        //    the control lane after committed data, wait out the grace
+        //    budget, kill and reap if needed, deliver late replies, fail
+        //    the rest. An unexpected exit is the child exit arm (line 996).
+        //    Every other exit (hello failure, wedged loop, missed pongs,
+        //    protocol violation, dev restart, all handles dropped) kills
+        //    and reaps where it is detected and returns its ExitCause.
         // ---- handshake: hello within deadline ----
         // At half the deadline, emit a repeated `starting → starting`
         // state event so UIs can show "still starting" — informational

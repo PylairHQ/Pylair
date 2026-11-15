@@ -1,5 +1,6 @@
 //! Windows process containment: the Job Object, the suspended-spawn resume,
-//! console creation flags and the Windows process monitor.
+//! console creation flags and the Windows process monitor
+//! (docs/protocol-v1.md section 6; docs/design/windows-job-object-race.md).
 
 use std::io;
 

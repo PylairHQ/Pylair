@@ -1,5 +1,6 @@
 //! Runtime stderr: always drained, split into bounded lossy lines, and
-//! queued drop-oldest ahead of the event channel (protocol-v1.md section 9).
+//! queued drop-oldest ahead of the event channel (docs/protocol-v1.md
+//! section 1).
 
 use std::collections::VecDeque;
 use std::sync::Arc;

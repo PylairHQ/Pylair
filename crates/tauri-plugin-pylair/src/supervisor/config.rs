@@ -1,5 +1,6 @@
 //! Runtime state and events, the spawn spec, limits and the supervisor
-//! configuration (protocol-v1.md section 5; RC.8A limits).
+//! configuration (hello timeout: docs/protocol-v1.md section 4; restart
+//! policy: section 7; limits: docs/security.md section 6).
 
 use std::path::PathBuf;
 use std::time::Duration;
