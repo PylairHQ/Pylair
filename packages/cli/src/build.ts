@@ -19,8 +19,10 @@ import {
   readSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
+import type { IncomingMessage } from "node:http";
 import { get } from "node:https";
 import { arch, platform, tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
@@ -112,20 +114,31 @@ export function backoffMs(retry: number, rand: () => number = Math.random): numb
 export function download(
   url: string,
   to: string,
-  opts?: { get?: typeof get; timeoutMs?: number; maxRedirects?: number },
+  opts?: {
+    get?: typeof get;
+    timeoutMs?: number;
+    maxRedirects?: number;
+    /** Keep `<to>.part` on failure and continue it with a Range request. */
+    resume?: boolean;
+  },
 ): Promise<void> {
   const getImpl = opts?.get ?? get;
   const timeoutMs = opts?.timeoutMs ?? DOWNLOAD_IDLE_TIMEOUT_MS;
   const maxRedirects = opts?.maxRedirects ?? MAX_REDIRECTS;
   const part = `${to}.part`;
+  const resume = opts?.resume ?? false;
   return new Promise((res, rej) => {
     let settled = false;
     let out: ReturnType<typeof createWriteStream> | undefined;
+    // A resumable download keeps its partial file for the next attempt.
+    const dropPart = () => {
+      if (!resume) rmSync(part, { force: true });
+    };
     const fail = (e: Error) => {
       if (settled) return;
       settled = true;
       if (out === undefined) {
-        rmSync(part, { force: true });
+        dropPart();
         rej(e);
         return;
       }
@@ -138,13 +151,21 @@ export function download(
       const s = out;
       out = undefined;
       s.once("close", () => {
-        rmSync(part, { force: true });
+        dropPart();
         rej(e);
       });
       s.destroy();
     };
     const onErr = (e: unknown) =>
       fail(e instanceof Error ? e : new Error(String(e)));
+    // Bytes already on disk from an earlier attempt, asked for with Range.
+    // The header goes on every hop, so a redirect to a CDN keeps it.
+    let offset = 0;
+    const restart = () => {
+      rmSync(part, { force: true });
+      offset = 0;
+      follow(url, 0);
+    };
     const follow = (u: string, redirects: number): void => {
       try {
         if (redirects > maxRedirects)
@@ -154,11 +175,11 @@ export function download(
               false,
             ),
           );
-        const req = getImpl(u, (r) => {
+        const onResponse = (r: IncomingMessage) => {
           try {
             if (r.statusCode! >= 300 && r.statusCode! < 400 && r.headers.location) {
               // Location may be relative, and only https targets are
-              // fetchable — resolve first, refuse anything else.
+              // fetchable: resolve first, refuse anything else.
               const target = new URL(r.headers.location, u);
               if (target.protocol !== "https:")
                 return fail(
@@ -169,13 +190,36 @@ export function download(
                 );
               return follow(target.href, redirects + 1);
             }
-            if (r.statusCode !== 200)
+            // The kept .part is unusable (longer than the file, or not a
+            // range the server can serve): start over without Range.
+            if (r.statusCode === 416 && offset > 0) {
+              r.resume();
+              return restart();
+            }
+            const partial = r.statusCode === 206;
+            if (r.statusCode !== 200 && !partial)
               return fail(
                 new DownloadError(
                   `GET ${u} -> ${r.statusCode}`,
                   r.statusCode! >= 500 || r.statusCode === 429,
                 ),
               );
+            if (partial) {
+              if (offset === 0)
+                return fail(
+                  new DownloadError(`GET ${u}: 206 to a request without Range`, false),
+                );
+              const m = /^bytes (\d+)-\d+\/(?:\d+|\*)$/.exec(
+                String(r.headers["content-range"] ?? ""),
+              );
+              // Appending at the wrong position would corrupt the file.
+              if (!m || Number(m[1]) !== offset) {
+                r.resume();
+                return restart();
+              }
+            } else {
+              offset = 0; // 200: the server ignored Range, so write it all
+            }
             const want = Number(r.headers["content-length"]);
             let got = 0;
             let ended = false;
@@ -192,12 +236,12 @@ export function download(
                   new DownloadError(`GET ${u}: connection dropped mid-body`, true),
                 );
             });
-            // Open eagerly — <part>'s existence is synchronous, so no
+            // Open eagerly: <part>'s existence is synchronous, so no
             // deferred fs.open can land after fail()'s rmSync and recreate
             // the file. autoClose: false keeps fd closing on our explicit
             // destroy() calls only (see fail()).
             const stream = createWriteStream(part, {
-              fd: openSync(part, "w"),
+              fd: openSync(part, partial ? "a" : "w"),
               autoClose: false,
             });
             out = stream;
@@ -223,7 +267,11 @@ export function download(
           } catch (e) {
             onErr(e);
           }
-        });
+        };
+        const req =
+          offset > 0
+            ? getImpl(u, { headers: { Range: `bytes=${offset}-` } }, onResponse)
+            : getImpl(u, onResponse);
         req.setTimeout(timeoutMs, () =>
           req.destroy(
             new DownloadError(
@@ -237,6 +285,7 @@ export function download(
         onErr(e);
       }
     };
+    if (resume && existsSync(part)) offset = statSync(part).size;
     follow(url, 0);
   });
 }
@@ -259,7 +308,7 @@ export async function downloadWithRetry(
   const log = opts?.log ?? ((line: string) => console.warn(line));
   for (let attempt = 1; ; attempt++) {
     try {
-      return await download(url, to, opts);
+      return await download(url, to, { resume: true, ...opts });
     } catch (e) {
       if (!(e instanceof DownloadError && e.retryable) || attempt >= attempts)
         throw e;
