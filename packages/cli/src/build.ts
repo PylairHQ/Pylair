@@ -77,6 +77,7 @@ export function hostTriple(): string {
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const DOWNLOAD_ATTEMPTS = 4;
+const DOWNLOAD_PROGRESS_MS = 10_000;
 /** Base delay before retries 2, 3 and 4; each gets +-25 percent jitter. */
 const RETRY_BASE_MS = [1_000, 3_000, 8_000];
 
@@ -99,6 +100,15 @@ const asTransient = (e: unknown): Error =>
     ? e
     : new DownloadError(e instanceof Error ? e.message : String(e), true, e);
 
+/** "downloaded 12.3 of 45.6 MB (27%)", or without the total when the server
+ * did not send a length. */
+function progressLine(received: number, total: number): string {
+  const mb = (n: number) => (n / 1e6).toFixed(1);
+  return Number.isFinite(total) && total > 0
+    ? `downloaded ${mb(received)} of ${mb(total)} MB (${Math.floor((received / total) * 100)}%)`
+    : `downloaded ${mb(received)} MB`;
+}
+
 /** Delay before retry number `retry` (1-based), with jitter. */
 export function backoffMs(retry: number, rand: () => number = Math.random): number {
   const base = RETRY_BASE_MS[Math.min(retry, RETRY_BASE_MS.length) - 1]!;
@@ -120,6 +130,9 @@ export function download(
     maxRedirects?: number;
     /** Keep `<to>.part` on failure and continue it with a Range request. */
     resume?: boolean;
+    /** Progress line sink (default stderr) and its minimum interval. */
+    progress?: (line: string) => void;
+    progressMs?: number;
   },
 ): Promise<void> {
   const getImpl = opts?.get ?? get;
@@ -130,6 +143,11 @@ export function download(
   return new Promise((res, rej) => {
     let settled = false;
     let out: ReturnType<typeof createWriteStream> | undefined;
+    let ticker: ReturnType<typeof setInterval> | undefined;
+    const stopTicker = () => {
+      if (ticker) clearInterval(ticker);
+      ticker = undefined;
+    };
     // A resumable download keeps its partial file for the next attempt.
     const dropPart = () => {
       if (!resume) rmSync(part, { force: true });
@@ -137,6 +155,7 @@ export function download(
     const fail = (e: Error) => {
       if (settled) return;
       settled = true;
+      stopTicker();
       if (out === undefined) {
         dropPart();
         rej(e);
@@ -221,8 +240,19 @@ export function download(
               offset = 0; // 200: the server ignored Range, so write it all
             }
             const want = Number(r.headers["content-length"]);
+            const total = partial
+              ? Number(/\/(\d+)$/.exec(String(r.headers["content-range"]))?.[1])
+              : want;
             let got = 0;
             let ended = false;
+            // A slow link should look slow, not dead: one plain line on
+            // stderr at most every 10s, nothing at all for a fast download.
+            stopTicker();
+            ticker = setInterval(
+              () => (opts?.progress ?? console.error)(progressLine(offset + got, total)),
+              opts?.progressMs ?? DOWNLOAD_PROGRESS_MS,
+            );
+            ticker.unref();
             r.on("data", (c: Buffer) => {
               got += c.length;
             });
@@ -258,6 +288,7 @@ export function download(
                     ),
                   );
                 settled = true;
+                stopTicker();
                 renameSync(part, to);
                 res();
               });
