@@ -5,6 +5,7 @@ use super::platform_windows::child_creation_flags;
 use super::stderr::{
     StderrLines, StderrSink, STDERR_LINE_CAP, STDERR_QUEUE_CAP, STDERR_TRUNC_MARK,
 };
+use super::stream::stream_pair;
 use super::*;
 
 /// F5: PYLAIR_HELLO_TIMEOUT_MS parsing — real values pass through,
