@@ -1,15 +1,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
 import { matchGlob } from "../dist/glob.js";
-import { stageNotices, download, ensureTarball, uvExportArgs, uvPipInstallArgs, requirementsHaveHashes, PYC_INVALIDATION_MODE } from "../dist/build.js";
+import { stageNotices, download, downloadWithRetry, downloadTimeoutMs, ensureTarball, uvExportArgs, uvPipInstallArgs, requirementsHaveHashes, PYC_INVALIDATION_MODE } from "../dist/build.js";
 import { DEFAULT_PRUNE, prune } from "../dist/prune.js";
 import { loadConfig, windowsSigningConfigured } from "../dist/config.js";
 
@@ -395,6 +395,351 @@ describe("download", () => {
     );
     assert.ok(!existsSync(to));
     assert.ok(!existsSync(`${to}.part`));
+    rmSync(dir, { recursive: true });
+  });
+});
+
+describe("downloadWithRetry", () => {
+  const BODY = Buffer.from(Array.from({ length: 100 }, (_, i) => i));
+  const sha = createHash("sha256").update(BODY).digest("hex");
+  const noSleep = async () => {};
+
+  const fakeRequest = () => {
+    const req = new EventEmitter();
+    req.setTimeout = (ms, fn) => {
+      req._t = setTimeout(fn, ms);
+      return req;
+    };
+    req.destroy = (e) => {
+      clearTimeout(req._t);
+      req.emit("error", e ?? new Error("destroyed"));
+    };
+    return req;
+  };
+  // Handles both get(url, cb) and get(url, { headers }, cb); the handler
+  // sees the request headers so tests can assert on Range.
+  const rangeGet = (handler) => (u, a, b) => {
+    const [o, cb] = typeof a === "function" ? [{}, a] : [a, b];
+    const req = fakeRequest();
+    queueMicrotask(() => handler(u, o?.headers ?? {}, cb, req));
+    return req;
+  };
+  const reply = (chunks, { status = 200, headers = {}, error } = {}) => {
+    const r = Readable.from(
+      (async function* () {
+        for (const c of chunks) yield c;
+        if (error) throw new Error(error);
+      })(),
+    );
+    r.statusCode = status;
+    r.headers = headers;
+    return r;
+  };
+  const full = () => reply([BODY], { headers: { "content-length": String(BODY.length) } });
+  // First `n` bytes, then the connection resets.
+  const cutAt = (n) =>
+    reply([BODY.subarray(0, n)], {
+      headers: { "content-length": String(BODY.length) },
+      error: "ECONNRESET",
+    });
+  const stalled = () => {
+    const r = new Readable({ read() {} });
+    r.statusCode = 200;
+    r.headers = {};
+    return r;
+  };
+  const tmp = () => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-retry-"));
+    return { dir, to: join(dir, "asset.tar.gz") };
+  };
+  const opts = (get, extra = {}) => ({ get, sleep: noSleep, log: () => {}, ...extra });
+
+  test("a stall on attempt 1 is retried and attempt 2 succeeds", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    const lines = [];
+    const get = rangeGet((u, h, cb) => cb(++calls === 1 ? stalled() : full()));
+    await downloadWithRetry("https://x/a", to, opts(get, { timeoutMs: 50, log: (l) => lines.push(l) }));
+    assert.equal(calls, 2);
+    assert.deepEqual(readFileSync(to), BODY);
+    assert.equal(lines.length, 1, "one line per retry");
+    assert.match(lines[0], /^retrying \(2 of 4\) in \d+s: .*timed out/);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("resume: Range is sent and a 206 with a matching Content-Range appends", async () => {
+    const { dir, to } = tmp();
+    const seen = [];
+    const get = rangeGet((u, h, cb) => {
+      seen.push(h.Range);
+      if (seen.length === 1) return cb(cutAt(40));
+      const n = Number(/^bytes=(\d+)-$/.exec(h.Range)[1]);
+      assert.ok(n > 0, "the kept .part must have been continued");
+      cb(
+        reply([BODY.subarray(n)], {
+          status: 206,
+          headers: {
+            "content-length": String(BODY.length - n),
+            "content-range": `bytes ${n}-${BODY.length - 1}/${BODY.length}`,
+          },
+        }),
+      );
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.equal(seen[0], undefined, "first attempt has no Range");
+    assert.match(seen[1], /^bytes=\d+-$/);
+    assert.deepEqual(readFileSync(to), BODY);
+    assert.equal(createHash("sha256").update(readFileSync(to)).digest("hex"), sha);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a server that answers 200 to a Range request is restarted, not appended", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    const get = rangeGet((u, h, cb) => cb(++calls === 1 ? cutAt(40) : full()));
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.equal(calls, 2);
+    assert.equal(statSync(to).size, BODY.length, "no duplicated prefix");
+    assert.deepEqual(readFileSync(to), BODY);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a 416 deletes the .part and restarts from zero", async () => {
+    const { dir, to } = tmp();
+    const seen = [];
+    const get = rangeGet((u, h, cb) => {
+      seen.push(h.Range);
+      if (seen.length === 1) return cb(cutAt(40));
+      if (h.Range) return cb(reply([], { status: 416 }));
+      cb(full());
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.equal(seen.length, 3);
+    assert.equal(seen[0], undefined);
+    assert.match(seen[1], /^bytes=\d+-$/);
+    assert.equal(seen[2], undefined, "restart carries no Range");
+    assert.deepEqual(readFileSync(to), BODY);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a 206 whose Content-Range starts elsewhere is restarted, never appended", async () => {
+    const { dir, to } = tmp();
+    const seen = [];
+    const get = rangeGet((u, h, cb) => {
+      seen.push(h.Range);
+      if (seen.length === 1) return cb(cutAt(40));
+      if (h.Range)
+        return cb(
+          reply([BODY.subarray(10)], {
+            status: 206,
+            headers: { "content-range": "bytes 10-99/100", "content-length": "90" },
+          }),
+        );
+      cb(full());
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.deepEqual(readFileSync(to), BODY);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("the Range header is carried through a redirect", async () => {
+    const { dir, to } = tmp();
+    writeFileSync(`${to}.part`, "hello"); // left behind by an earlier run
+    const seen = [];
+    const get = rangeGet((u, h, cb) => {
+      seen.push([u, h.Range]);
+      if (u === "https://x/a")
+        return cb(reply([], { status: 302, headers: { location: "https://cdn.example/obj" } }));
+      cb(
+        reply([Buffer.from("world")], {
+          status: 206,
+          headers: { "content-range": "bytes 5-9/10", "content-length": "5" },
+        }),
+      );
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.deepEqual(seen, [
+      ["https://x/a", "bytes=5-"],
+      ["https://cdn.example/obj", "bytes=5-"],
+    ]);
+    assert.equal(readFileSync(to, "utf-8"), "helloworld");
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a 404 is not retried", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    let slept = 0;
+    const get = rangeGet((u, h, cb) => {
+      calls++;
+      cb(reply([], { status: 404 }));
+    });
+    await assert.rejects(
+      downloadWithRetry("https://x/a", to, opts(get, { sleep: async () => void slept++ })),
+      /404/,
+    );
+    assert.equal(calls, 1);
+    assert.equal(slept, 0);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("5xx and 429 are retried", async () => {
+    const { dir, to } = tmp();
+    const statuses = [503, 429, 200];
+    let i = 0;
+    const get = rangeGet((u, h, cb) => {
+      const st = statuses[i++];
+      cb(st === 200 ? full() : reply([], { status: st }));
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.equal(i, 3);
+    assert.deepEqual(readFileSync(to), BODY);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a refused redirect and a redirect loop are not retried", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    const insecure = rangeGet((u, h, cb) => {
+      calls++;
+      cb(reply([], { status: 302, headers: { location: "http://insecure.example/x" } }));
+    });
+    await assert.rejects(downloadWithRetry("https://x/a", to, opts(insecure)), /non-https|refus/i);
+    assert.equal(calls, 1);
+    calls = 0;
+    const loop = rangeGet((u, h, cb) => {
+      calls++;
+      cb(reply([], { status: 302, headers: { location: `${u}/n` } }));
+    });
+    await assert.rejects(downloadWithRetry("https://x/a", to, opts(loop)), /redirect/i);
+    assert.equal(calls, 6, "one attempt only: the first request plus 5 followed hops");
+    rmSync(dir, { recursive: true });
+  });
+
+  test("an incomplete body is retried", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    const get = rangeGet((u, h, cb) => {
+      // Ends cleanly but short of its Content-Length.
+      cb(
+        ++calls === 1
+          ? reply([BODY.subarray(0, 10)], { headers: { "content-length": "100" } })
+          : full(),
+      );
+    });
+    await downloadWithRetry("https://x/a", to, opts(get));
+    assert.equal(calls, 2);
+    assert.deepEqual(readFileSync(to), BODY);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("gives up after 4 attempts and names the cache path, sizes and hash", async () => {
+    const { dir, to } = tmp();
+    let calls = 0;
+    const lines = [];
+    const get = rangeGet((u, h, cb) => {
+      calls++;
+      // 200 each time (Range ignored), 10 bytes of a 32 byte file, then reset.
+      cb(
+        reply([Buffer.alloc(10, 1)], {
+          headers: { "content-length": "32" },
+          error: "ECONNRESET",
+        }),
+      );
+    });
+    const err = await downloadWithRetry(
+      "https://x/asset",
+      to,
+      opts(get, { sha256: sha, log: (l) => lines.push(l) }),
+    ).then(
+      () => null,
+      (e) => e,
+    );
+    assert.ok(err, "expected a failure");
+    assert.equal(calls, 4);
+    assert.equal(lines.length, 3);
+    assert.match(lines[2], /^retrying \(4 of 4\)/);
+    assert.ok(err.message.includes("https://x/asset"), err.message);
+    assert.ok(err.message.includes(`place it at ${resolve(to)}`), err.message);
+    assert.match(err.message, /received 10 of 32 bytes/);
+    assert.match(err.message, /Expected size 32 bytes, SHA-256 [0-9a-f]{64}/);
+    assert.ok(err.message.includes(sha));
+    assert.match(err.message, /verifies it and re-downloads if it does not match/);
+    assert.ok(!err.message.includes(String.fromCharCode(0x2014)), "no em dash in the message");
+    rmSync(dir, { recursive: true });
+  });
+
+  test("backoff delays grow roughly 1s, 3s, 8s", async () => {
+    const { dir, to } = tmp();
+    const waits = [];
+    const get = rangeGet((u, h, cb) => cb(reply([], { status: 503 })));
+    await assert.rejects(
+      downloadWithRetry("https://x/a", to, opts(get, { sleep: async (ms) => void waits.push(ms) })),
+    );
+    assert.equal(waits.length, 3);
+    for (const [w, base] of [[waits[0], 1000], [waits[1], 3000], [waits[2], 8000]])
+      assert.ok(w >= base * 0.75 && w <= base * 1.25, `${w} not within 25% of ${base}`);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("a slow download prints progress, a fast one stays quiet", async () => {
+    const { dir, to } = tmp();
+    // Slow producer so the (injected, short) progress interval fires.
+    const slowBody = new Readable({ read() {} });
+    slowBody.statusCode = 200;
+    slowBody.headers = { "content-length": "60" };
+    let n = 0;
+    const iv = setInterval(() => {
+      slowBody.push(BODY.subarray(n * 10, n * 10 + 10));
+      if (++n === 6) {
+        slowBody.push(null);
+        clearInterval(iv);
+      }
+    }, 30);
+    const lines = [];
+    await download("https://x/a", to, {
+      get: rangeGet((u, h, cb) => cb(slowBody)),
+      progress: (l) => lines.push(l),
+      progressMs: 40,
+    });
+    assert.ok(lines.length >= 1, "expected at least one progress line");
+    assert.match(lines[0], /^downloaded \d+\.\d of \d+\.\d MB \(\d+%\)$/);
+    assert.ok(!/[\u001b\r]/.test(lines.join("")), "no terminal control codes");
+
+    const quiet = [];
+    await download("https://x/b", join(dir, "b.tar.gz"), {
+      get: rangeGet((u, h, cb) => cb(full())),
+      progress: (l) => quiet.push(l),
+    });
+    assert.deepEqual(quiet, [], "a fast download prints nothing");
+    rmSync(dir, { recursive: true });
+  });
+
+  test("PYLAIR_DOWNLOAD_TIMEOUT_MS: default, override, clamp, bad value", () => {
+    const t = (v) => downloadTimeoutMs(v === undefined ? {} : { PYLAIR_DOWNLOAD_TIMEOUT_MS: v });
+    assert.equal(t(undefined), 30_000);
+    assert.equal(t(""), 30_000);
+    assert.equal(t("45000"), 45_000);
+    assert.equal(t("1000"), 5_000, "clamped up to 5s");
+    assert.equal(t("999999999"), 600_000, "clamped down to 600s");
+    assert.throws(() => t("abc"), /PYLAIR_DOWNLOAD_TIMEOUT_MS.*"abc"/);
+    assert.throws(() => t("1.5"), /PYLAIR_DOWNLOAD_TIMEOUT_MS/);
+    assert.throws(() => t("-5"), /PYLAIR_DOWNLOAD_TIMEOUT_MS/);
+  });
+
+  test("a bad PYLAIR_DOWNLOAD_TIMEOUT_MS rejects the download with a clear error", async () => {
+    const { dir, to } = tmp();
+    const prev = process.env.PYLAIR_DOWNLOAD_TIMEOUT_MS;
+    process.env.PYLAIR_DOWNLOAD_TIMEOUT_MS = "soon";
+    try {
+      await assert.rejects(
+        downloadWithRetry("https://x/a", to, opts(rangeGet((u, h, cb) => cb(full())))),
+        /PYLAIR_DOWNLOAD_TIMEOUT_MS/,
+      );
+    } finally {
+      if (prev === undefined) delete process.env.PYLAIR_DOWNLOAD_TIMEOUT_MS;
+      else process.env.PYLAIR_DOWNLOAD_TIMEOUT_MS = prev;
+    }
     rmSync(dir, { recursive: true });
   });
 });
