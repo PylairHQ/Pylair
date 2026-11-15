@@ -8,17 +8,18 @@ rules that AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
 
-Manifests on `main` still carry the rc.15 train versions (checked in the
+Manifests on `main` carry the rc.16 bump for the crate, `pylair` and
+`pylair-ollama`; the npm packages are still at rc.15 (checked in the
 files, not against the registries):
 
 | Package | Version in the repo |
 |---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.11` |
-| `pylair` (PyPI) | `0.1.0-rc.9` |
-| `pylair-ollama` (PyPI) | `0.1.0-rc.2` |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.12` |
+| `pylair` (PyPI) | `0.1.0-rc.10` |
+| `pylair-ollama` (PyPI) | `0.1.0-rc.3` |
 | `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.15` |
 
-Merged for rc.16 so far, none of it bumped or published yet:
+Merged for rc.16 so far, none of it published yet:
 
 - PR 53, J: CI and supply-chain hardening (pinned actions, input validation).
 - PR 55, L: polish (real `--version`, `OLLAMA_HOST` normalization, signing
@@ -31,8 +32,11 @@ Merged for rc.16 so far, none of it bumped or published yet:
 - PR M: test hygiene (flaky `stream_credit` tests, bytecode test env,
   this file, a duplicated heading in `docs/cancellation.md`).
 
-No rc.16 version bump, scaffold pin change or template `Cargo.lock`
-regeneration exists yet. Those come from the release train below.
+The rc.16 version bump has landed for the crate and the two PyPI packages
+(`pylair-ollama` needed its own bump to ship the `OLLAMA_HOST`
+normalization; it publishes separately via `release.yml`, `package`
+= `pylair-ollama`). No npm bump, scaffold pin change or template
+`Cargo.lock` regeneration exists yet. Those come from the release train below.
 
 ## Release order
 

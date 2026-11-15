@@ -1,6 +1,6 @@
 [project]
 name = "pylair-ollama"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 description = "Optional Ollama integration for Pylair apps: detect, status, stream completions through the normal bridge"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
