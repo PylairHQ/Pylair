@@ -10,12 +10,12 @@
 //! `"log": true` it reports every frame it reads on stderr as `RX {json}`,
 //! which lets a test check what reached the wire and in which order.
 //!
-//! Process state: the fake prints its pid first. On unix the event recorder
-//! checks, at the moment each state event arrives, whether that pid still
-//! exists (alive or not yet reaped). "Killed and reaped before the state
-//! changed" is therefore `present == Some(false)` on the event, and "callers
-//! were failed before the kill" is the pid still being present when the
-//! caller's error is received.
+//! Process state: the fake prints its pid first. The event recorder checks,
+//! at the moment each state event arrives, whether that pid still exists
+//! (unix: alive or not yet reaped; Windows: still running). "Killed and
+//! reaped before the state changed" is therefore `present == Some(false)` on
+//! the event. "Callers were failed before the kill" is observed by a spawned
+//! watcher task; see `Watch` for why that observation is deterministic.
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -202,7 +202,27 @@ fn pid_present(pid: u32) -> Option<bool> {
     Some(unsafe { libc::kill(pid as i32, 0) } == 0)
 }
 
-#[cfg(not(unix))]
+/// Whether `pid` is still running (an exited process reports its exit
+/// code instead of STILL_ACTIVE, 259).
+#[cfg(windows)]
+fn pid_present(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return Some(false);
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        Some(ok != 0 && code == 259)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_present(_pid: u32) -> Option<bool> {
     None
 }
@@ -405,11 +425,75 @@ fn assert_reaped(ev: &Ev) {
     }
 }
 
-/// On unix: the child must still exist when a caller's error arrives, i.e.
-/// callers were failed before the kill.
-fn assert_present(pid: u32, what: &str) {
-    if let Some(false) = pid_present(pid) {
-        panic!("the child was already gone when {what}");
+/// Held exclusively by the five ordering tests (the ones using `Watch`) and
+/// shared by every other test in this file, so while an ordering test runs
+/// no other test's child process exists. Every test reaps its children
+/// before it returns: it ends with `stop()`, which resolves only after
+/// cleanup, or (`dropping_every_handle_...`) waits for Stopped, which follows
+/// the reap.
+static CHILDREN: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+type Reply = Result<Value, ErrorObj>;
+
+/// Observes "callers were failed before the kill" from a SPAWNED task, not
+/// from the test body. Why this is deterministic (tokio 1.54,
+/// runtime/scheduler/current_thread/mod.rs; these tests run on the
+/// current_thread runtime, also #[tokio::test]'s default):
+///
+/// - A task woken on the runtime thread while another task is being polled
+///   goes to the back of one local FIFO queue (`schedule` -> `push_task`,
+///   `push_back`); tasks run from the front (`next_local_task`, `pop_front`).
+/// - The test body is the `block_on` future. It is polled only between
+///   batches of up to `event_interval` (61) queued tasks, so a check in the
+///   body can run after the monitor task has already sent the kill. That is
+///   the race behind the macOS failure on f3f17eb.
+/// - In one poll of the actor, `fail_all` sends the caller's error (waking
+///   this watcher, pushed to the back), then `kill_and_reap` does
+///   `kill.try_send` (waking the monitor, pushed behind the watcher). Both
+///   are synchronous; neither yields. So the watcher runs before the monitor:
+///   it checks the child before any kill was sent and sees it alive, on
+///   every OS.
+/// - In the reversed order `kill_and_reap` awaits the reap (the monitor's
+///   `child.wait()`) before the error is sent, so the watcher sees the child
+///   gone.
+/// - The monitor's only other waker is a child exit. On Linux tokio reaps
+///   through a pidfd (its own child only); on Windows through a wait on its
+///   own process handle. On macOS the reaper is SIGCHLD-driven, so ANY child
+///   exit in the test process wakes every monitor and could queue it ahead of
+///   the watcher; `CHILDREN` held exclusively rules that out (the watched
+///   test's own child is the only one, and it is alive until the kill).
+struct Watch(
+    tokio::task::JoinHandle<(
+        Result<Reply, tokio::sync::oneshot::error::RecvError>,
+        Option<bool>,
+    )>,
+);
+
+impl Watch {
+    /// Spawn the watcher and return once it is waiting on `rx`.
+    async fn arm(pid: u32, rx: tokio::sync::oneshot::Receiver<Reply>) -> Watch {
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            // One poll: signal armed, then register on rx.
+            let _ = armed_tx.send(());
+            let r = rx.await;
+            (r, pid_present(pid))
+        });
+        armed_rx.await.expect("watcher never ran");
+        Watch(handle)
+    }
+
+    /// The caller's result. Panics if the child was already gone when the
+    /// watcher woke, i.e. the kill came before the error.
+    async fn result(self, what: &str) -> Reply {
+        let (r, present) = timeout(T, self.0)
+            .await
+            .expect("call never resolved")
+            .expect("watcher panicked");
+        if let Some(false) = present {
+            panic!("the child was already gone when {what}");
+        }
+        r.expect("call channel closed")
     }
 }
 
@@ -468,6 +552,7 @@ async fn drain_stream(
 /// after hello even once the half-mark has long passed.
 #[tokio::test]
 async fn slow_start_event_never_fires_after_hello() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.hello_timeout = Duration::from_secs(6);
     let (h, rec, ready_at) = ready(json!({}), c).await;
@@ -485,6 +570,7 @@ async fn slow_start_event_never_fires_after_hello() {
 /// before Restarting is reported.
 #[tokio::test]
 async fn hello_first_frame_not_hello_crashes_and_reaps() {
+    let _children = CHILDREN.read().await;
     let (h, rec) = start(fake(json!({"hello": "not_hello"})), cfg());
     let (_, ev) = rec
         .state(0, State::Restarting, "first frame was not hello")
@@ -496,6 +582,7 @@ async fn hello_first_frame_not_hello_crashes_and_reaps() {
 /// a: a malformed frame during hello is a crash with the child reaped.
 #[tokio::test]
 async fn hello_malformed_frame_crashes_and_reaps() {
+    let _children = CHILDREN.read().await;
     let (h, rec) = start(fake(json!({"hello": "malformed"})), cfg());
     let (_, ev) = rec
         .state(0, State::Restarting, "protocol violation during hello")
@@ -507,6 +594,7 @@ async fn hello_malformed_frame_crashes_and_reaps() {
 /// a: EOF during hello is reported at once (not at the timeout) as a crash.
 #[tokio::test]
 async fn hello_eof_crashes_and_reaps() {
+    let _children = CHILDREN.read().await;
     let t0 = Instant::now();
     let (h, rec) = start(fake(json!({"hello": "eof"})), cfg());
     let (_, ev) = rec
@@ -524,6 +612,7 @@ async fn hello_eof_crashes_and_reaps() {
 /// a: no hello within the deadline is a crash with the child killed and reaped.
 #[tokio::test]
 async fn hello_timeout_crashes_kills_and_reaps() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.hello_timeout = Duration::from_secs(1);
     let t0 = Instant::now();
@@ -540,6 +629,7 @@ async fn hello_timeout_crashes_kills_and_reaps() {
 /// away, child reaped, no restart and no second spawn.
 #[tokio::test]
 async fn version_mismatch_is_fatal_reaped_and_never_restarted() {
+    let _children = CHILDREN.read().await;
     let (h, rec) = start(fake(json!({"protocol": 99})), cfg());
     let (_, ev) = rec
         .state(0, State::Failed, "protocol version mismatch")
@@ -565,6 +655,7 @@ async fn version_mismatch_is_fatal_reaped_and_never_restarted() {
 /// b: the exposes manifest is emitted before the Ready transition.
 #[tokio::test]
 async fn exposes_event_precedes_ready() {
+    let _children = CHILDREN.read().await;
     let (h, rec, ready_at) = ready(json!({}), cfg()).await;
     let log = rec.snapshot();
     let exposes_at = log
@@ -587,6 +678,7 @@ async fn exposes_event_precedes_ready() {
 /// terminal, a cancel its mapped outcome.
 #[tokio::test]
 async fn responses_route_by_pending_kind() {
+    let _children = CHILDREN.read().await;
     let plan = json!({"cancel_reply": {"cancelled": true, "status": "terminated"}});
     let (h, _rec, _) = ready(plan, cfg()).await;
     let out = h
@@ -627,6 +719,7 @@ async fn responses_route_by_pending_kind() {
 /// and the tombstone set is cleared when it reaches 1024 entries.
 #[tokio::test]
 async fn finished_tasks_are_tombstoned_and_the_set_clears_at_1024() {
+    let _children = CHILDREN.read().await;
     let (h, _rec, _) = ready(json!({}), cfg()).await;
     let first = h.call_task("echo", json!(0), None, Some(false)).unwrap();
     let t1 = first.task.await.unwrap();
@@ -674,18 +767,22 @@ async fn finished_tasks_are_tombstoned_and_the_set_clears_at_1024() {
 /// d: a pong reporting a stall past loop_stall_kill: Unresponsive, then
 /// pending callers get RUNTIME_WEDGED (child still alive), then the kill,
 /// then Crashed (Restarting) with the child reaped.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn pong_stall_past_kill_limit_wedges_callers_then_kills() {
+    let _children = CHILDREN.write().await;
     let mut c = cfg();
     c.loop_stall_kill = Some(Duration::from_millis(500));
     let (h, rec, ready_at) = ready(json!({}), c).await;
     let pid = rec.pid().await;
     let (_task, result) = hold(&h, None).await;
+    let watch = Watch::arm(pid, result).await;
     h.call("set", json!({"stale": 2000}), None, Some(false))
         .await
         .unwrap();
-    let err = result_of(result).await.unwrap_err();
-    assert_present(pid, "callers heard RUNTIME_WEDGED");
+    let err = watch
+        .result("callers heard RUNTIME_WEDGED")
+        .await
+        .unwrap_err();
     assert_eq!(err.code, proto::RUNTIME_WEDGED, "{err:?}");
     assert!(
         err.message.contains("event loop has been blocked for 2s"),
@@ -705,6 +802,7 @@ async fn pong_stall_past_kill_limit_wedges_callers_then_kills() {
 /// restart, calls keep pending), and a healthy pong goes back to Ready.
 #[tokio::test]
 async fn pong_stall_below_kill_limit_is_diagnostic_and_recovers() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.loop_stall_kill = Some(Duration::from_secs(30));
     let (h, rec, ready_at) = ready(json!({}), c).await;
@@ -755,8 +853,9 @@ async fn pong_stall_below_kill_limit_is_diagnostic_and_recovers() {
 /// e: each delivered chunk consumes one credit, and a chunk with zero
 /// credit left is PROTOCOL_VIOLATION for every pending caller (child still
 /// alive), then kill, then Crashed with the child reaped.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn uncredited_chunk_fails_all_then_kills_and_crashes() {
+    let _children = CHILDREN.write().await;
     let mut c = cfg();
     c.initial_stream_credit = 2;
     let (h, rec, _) = ready(json!({}), c).await;
@@ -768,8 +867,11 @@ async fn uncredited_chunk_fails_all_then_kills_and_crashes() {
     let ct = h
         .call_task("chunks", json!({"task": task, "n": 3}), None, Some(false))
         .unwrap();
-    let err = result_of(ct.result).await.unwrap_err();
-    assert_present(pid, "callers heard PROTOCOL_VIOLATION");
+    let watch = Watch::arm(pid, ct.result).await;
+    let err = watch
+        .result("callers heard PROTOCOL_VIOLATION")
+        .await
+        .unwrap_err();
     assert_eq!(err.code, proto::PROTOCOL_VIOLATION, "{err:?}");
     assert_eq!(
         err.message,
@@ -796,6 +898,7 @@ async fn uncredited_chunk_fails_all_then_kills_and_crashes() {
 /// e: a chunk for a task this generation does not know is ignored.
 #[tokio::test]
 async fn chunk_for_unknown_task_is_ignored() {
+    let _children = CHILDREN.read().await;
     let (h, rec, ready_at) = ready(json!({}), cfg()).await;
     let ok = h
         .call(
@@ -831,6 +934,7 @@ async fn chunk_for_unknown_task_is_ignored() {
 /// runtime.
 #[tokio::test]
 async fn stalled_consumer_ends_stream_notes_removes_and_cancels() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.stream_buffer = 2;
     c.initial_stream_credit = 50;
@@ -872,6 +976,7 @@ async fn stalled_consumer_ends_stream_notes_removes_and_cancels() {
 /// e: a vanished consumer: the stderr note, the task removed, the cancel sent.
 #[tokio::test]
 async fn vanished_consumer_ends_stream_notes_and_cancels() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.initial_stream_credit = 50;
     let (h, rec, _) = ready(json!({"log": true}), c).await;
@@ -904,16 +1009,20 @@ async fn vanished_consumer_ends_stream_notes_and_cancels() {
 
 /// f: a malformed frame while serving: PROTOCOL_VIOLATION to pending
 /// callers (child alive), then kill, then Crashed with the child reaped.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn malformed_frame_while_serving_fails_all_then_kills() {
+    let _children = CHILDREN.write().await;
     let (h, rec, _) = ready(json!({}), cfg()).await;
     let pid = rec.pid().await;
     let (_task, result) = hold(&h, None).await;
+    let watch = Watch::arm(pid, result).await;
     let _emit = h
         .call_task("emit", json!({"frames": ["nope"]}), None, Some(false))
         .unwrap();
-    let err = result_of(result).await.unwrap_err();
-    assert_present(pid, "callers heard PROTOCOL_VIOLATION");
+    let err = watch
+        .result("callers heard PROTOCOL_VIOLATION")
+        .await
+        .unwrap_err();
     assert_eq!(err.code, proto::PROTOCOL_VIOLATION);
     assert_eq!(err.message, "runtime sent a malformed frame");
     let (_, ev) = rec
@@ -927,6 +1036,7 @@ async fn malformed_frame_while_serving_fails_all_then_kills() {
 /// status, which the supervisor waits for (here 1.5s after stdout closed).
 #[tokio::test]
 async fn reader_eof_fails_pending_with_the_exit_status() {
+    let _children = CHILDREN.read().await;
     let (h, rec, _) = ready(json!({}), cfg()).await;
     let t0 = Instant::now();
     let ct = h
@@ -955,6 +1065,7 @@ async fn reader_eof_fails_pending_with_the_exit_status() {
 /// f: reader EOF with no exit status within 5s: "runtime gone".
 #[tokio::test]
 async fn reader_eof_without_exit_status_reports_runtime_gone_after_5s() {
+    let _children = CHILDREN.read().await;
     let (h, rec, _) = ready(json!({}), cfg()).await;
     let pid = rec.pid().await;
     let t0 = Instant::now();
@@ -989,6 +1100,7 @@ async fn reader_eof_without_exit_status_reports_runtime_gone_after_5s() {
 /// (Stopped, never a restart).
 #[tokio::test]
 async fn dropping_every_handle_kills_the_child_and_stops_clean() {
+    let _children = CHILDREN.read().await;
     let (h, rec, ready_at) = ready(json!({}), cfg()).await;
     let _pid = rec.pid().await;
     let mut srx = h.subscribe_state();
@@ -1017,6 +1129,7 @@ async fn dropping_every_handle_kills_the_child_and_stops_clean() {
 /// h: a stream's initial credit reaches the runtime before its call.
 #[tokio::test]
 async fn stream_credit_reaches_the_wire_before_its_call() {
+    let _children = CHILDREN.read().await;
     let (h, rec, _) = ready(json!({"log": true}), cfg()).await;
     let (task, _items) = h
         .call_stream("hold", json!({}), None, Some(true))
@@ -1048,6 +1161,7 @@ async fn stream_credit_reaches_the_wire_before_its_call() {
 /// cleanup cancel for that task (and the call never reaches the runtime).
 #[tokio::test]
 async fn failed_stream_call_after_its_credit_sends_a_cleanup_cancel() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.max_frame = 4096;
     let (h, rec, _) = ready(json!({"log": true}), c).await;
@@ -1083,6 +1197,7 @@ async fn failed_stream_call_after_its_credit_sends_a_cleanup_cancel() {
 /// unknown id, the runtime's outcome for the owner, and Completed after.
 #[tokio::test]
 async fn cancel_answers_rejected_notfound_cancelled_completed() {
+    let _children = CHILDREN.read().await;
     let (h, _rec, _) = ready(json!({}), cfg()).await;
     let (task, result) = hold(&h, Some("main")).await;
     assert_eq!(
@@ -1113,6 +1228,7 @@ async fn cancel_answers_rejected_notfound_cancelled_completed() {
 /// unknown task, and a finished task each get their own answer.
 #[tokio::test]
 async fn grant_credit_answers_name_the_case() {
+    let _children = CHILDREN.read().await;
     let (h, _rec, _) = ready(json!({}), cfg()).await;
     let main = || Some("main".to_string());
     let (task, items) = h
@@ -1160,6 +1276,7 @@ async fn grant_credit_answers_name_the_case() {
 /// credit is still a ctrl_queue error, never a max_stream_credit one.
 #[tokio::test]
 async fn grant_credit_counts_only_when_the_control_send_succeeds() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.initial_stream_credit = 1;
     c.limits.max_stream_credit = 200;
@@ -1206,6 +1323,7 @@ async fn grant_credit_counts_only_when_the_control_send_succeeds() {
 /// stream BEFORE its call is committed: the call never reaches the runtime.
 #[tokio::test]
 async fn undeliverable_initial_credit_rejects_before_the_call_is_sent() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.initial_stream_credit = 1;
     let (h, rec, _) = ready(json!({"log": true}), c).await;
@@ -1257,6 +1375,7 @@ async fn undeliverable_initial_credit_rejects_before_the_call_is_sent() {
 /// intent; `None` (a pre-flag client) omits it.
 #[tokio::test]
 async fn call_stream_field_is_sent_only_when_declared() {
+    let _children = CHILDREN.read().await;
     let (h, rec, _) = ready(json!({"log": true}), cfg()).await;
     h.call("echo", json!("none"), None, None).await.unwrap();
     h.call("echo", json!("false"), None, Some(false))
@@ -1278,6 +1397,7 @@ async fn call_stream_field_is_sent_only_when_declared() {
 /// for the stranded credit.
 #[tokio::test]
 async fn stream_call_on_a_full_data_lane_is_a_limit_error_and_cleans_up() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.limits.max_concurrent_tasks = 512;
     c.limits.max_queued_commands = 512;
@@ -1338,6 +1458,7 @@ async fn stream_call_on_a_full_data_lane_is_a_limit_error_and_cleans_up() {
 /// h: the task cap applies to stream calls too.
 #[tokio::test]
 async fn stream_call_over_the_task_cap_is_rejected() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.limits.max_concurrent_tasks = 1;
     let (h, _rec, _) = ready(json!({}), c).await;
@@ -1357,6 +1478,7 @@ async fn stream_call_over_the_task_cap_is_rejected() {
 /// theirs.
 #[tokio::test]
 async fn cancel_owned_with_and_without_watermark() {
+    let _children = CHILDREN.read().await;
     let (h, rec, _) = ready(json!({"log": true}), cfg()).await;
     let (a1, r_a1) = hold(&h, Some("A")).await;
     let (a2, r_a2) = hold(&h, Some("A")).await;
@@ -1420,6 +1542,7 @@ async fn cancel_owned_with_and_without_watermark() {
 /// h: Retry while serving does nothing: no state change, no respawn.
 #[tokio::test]
 async fn retry_while_serving_is_a_no_op() {
+    let _children = CHILDREN.read().await;
     let (h, rec, ready_at) = ready(json!({}), cfg()).await;
     h.retry().await.unwrap();
     sleep(Duration::from_millis(500)).await;
@@ -1442,6 +1565,7 @@ async fn retry_while_serving_is_a_no_op() {
 /// i: grace_ms is shutdown_grace minus 1s, floored at 500ms.
 #[tokio::test]
 async fn shutdown_grace_ms_is_grace_minus_one_second_floored_at_500() {
+    let _children = CHILDREN.read().await;
     for (grace_ms, want) in [(1000u64, 500u64), (1600, 600)] {
         let mut c = cfg();
         c.shutdown_grace = Duration::from_millis(grace_ms);
@@ -1462,6 +1586,7 @@ async fn shutdown_grace_ms_is_grace_minus_one_second_floored_at_500() {
 /// RUNTIME_UNAVAILABLE; the outcome is Terminated; the supervisor stops.
 #[tokio::test]
 async fn shutdown_follows_committed_calls_and_late_replies_win() {
+    let _children = CHILDREN.read().await;
     let (h, rec, ready_at) = ready(json!({"log": true, "shutdown": "finish_first"}), cfg()).await;
     let first = h.call_task("hold", json!({}), None, Some(false)).unwrap();
     let second = h.call_task("hold", json!({}), None, Some(false)).unwrap();
@@ -1500,6 +1625,7 @@ async fn shutdown_follows_committed_calls_and_late_replies_win() {
 /// ForcedKill, pending callers get RUNTIME_UNAVAILABLE, Stopped.
 #[tokio::test]
 async fn ignored_shutdown_is_force_killed_and_pending_get_unavailable() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.shutdown_grace = Duration::from_secs(1);
     let (h, rec, ready_at) = ready(json!({"shutdown": "ignore"}), c).await;
@@ -1518,18 +1644,22 @@ async fn ignored_shutdown_is_force_killed_and_pending_get_unavailable() {
 
 /// j: missed_pongs_to_kill written-but-unanswered pings: Unresponsive,
 /// RUNTIME_WEDGED to pending callers (child alive), kill, Crashed.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn missed_pongs_wedge_callers_then_kill() {
+    let _children = CHILDREN.write().await;
     let mut c = cfg();
     c.missed_pongs_to_kill = 3;
     let (h, rec, ready_at) = ready(json!({}), c).await;
     let pid = rec.pid().await;
     let (_task, result) = hold(&h, None).await;
+    let watch = Watch::arm(pid, result).await;
     h.call("set", json!({"pong": false}), None, Some(false))
         .await
         .unwrap();
-    let e = result_of(result).await.unwrap_err();
-    assert_present(pid, "callers heard RUNTIME_WEDGED");
+    let e = watch
+        .result("callers heard RUNTIME_WEDGED")
+        .await
+        .unwrap_err();
     assert_eq!(e.code, proto::RUNTIME_WEDGED);
     assert_eq!(
         e.message,
@@ -1550,6 +1680,7 @@ async fn missed_pongs_wedge_callers_then_kill() {
 /// stall the runtime reads one ping, not a backlog.
 #[tokio::test]
 async fn pings_behind_a_full_pipe_are_not_misses_and_only_the_latest_is_sent() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.ping_interval = Duration::from_millis(100);
     c.missed_pongs_to_kill = 3;
@@ -1606,8 +1737,9 @@ fn touch(p: &std::path::Path, k: u64) {
 /// k + run_loop: a changed trigger file fails pending callers with
 /// RUNTIME_RESTARTED, kills, and respawns with no crash accounting (with
 /// breaker_crashes = 1 a single crash would go straight to Failed).
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn dev_restart_fails_pending_restarted_and_skips_crash_accounting() {
+    let _children = CHILDREN.write().await;
     let dir = std::env::temp_dir().join(format!("pylair-rcg-trig-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let trigger = dir.join("trigger");
@@ -1618,9 +1750,12 @@ async fn dev_restart_fails_pending_restarted_and_skips_crash_accounting() {
     let (h, rec, ready_at) = ready(json!({}), c).await;
     let pid = rec.pid().await;
     let (_task, result) = hold(&h, None).await;
+    let watch = Watch::arm(pid, result).await;
     touch(&trigger, 1);
-    let e = result_of(result).await.unwrap_err();
-    assert_present(pid, "callers heard RUNTIME_RESTARTED");
+    let e = watch
+        .result("callers heard RUNTIME_RESTARTED")
+        .await
+        .unwrap_err();
     assert_eq!(e.code, proto::RUNTIME_RESTARTED);
     assert_eq!(e.message, "python restarted (source change)");
     rec.stderr("source changed").await;
@@ -1649,6 +1784,7 @@ async fn dev_restart_fails_pending_restarted_and_skips_crash_accounting() {
 /// RUNTIME_CRASHED, and the generation ends Crashed.
 #[tokio::test]
 async fn child_exit_delivers_last_words_then_fails_the_rest() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.limits.max_concurrent_tasks = 512;
     c.limits.max_queued_commands = 512;
@@ -1693,6 +1829,7 @@ async fn child_exit_delivers_last_words_then_fails_the_rest() {
 /// the shutdown tests.)
 #[tokio::test]
 async fn crash_waits_out_the_backoff_before_respawning() {
+    let _children = CHILDREN.read().await;
     let mut c = cfg();
     c.backoff_base = Duration::from_secs(1);
     c.backoff_cap = Duration::from_secs(1);
