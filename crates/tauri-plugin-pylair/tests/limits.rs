@@ -315,7 +315,7 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
 async fn per_stream_byte_cap_ends_stream_with_limit_error() {
     let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     let mut cfg = fast_config();
-    cfg.limits.stream_buffer_bytes = 128; // ~30 int chunks
+    cfg.limits.stream_buffer_bytes = 128; // clamped up to the 1024-byte minimum; the flood still trips it
     cfg.initial_stream_credit = 100_000;
     cfg.stream_buffer = 100_000; // count cap must NOT trip first
     let h = spawn_h(real_runtime_spec(), cfg, ev);
