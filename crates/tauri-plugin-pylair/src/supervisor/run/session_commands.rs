@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use super::super::handle::{limit_err, CancelOutcome, ShutdownOutcome};
+use super::super::spawn::{CTRL_OUT_CAPACITY, FRAME_OUT_CAPACITY};
 use super::super::stream::StreamSink;
 use super::super::wire::{owner_allows, send_ctrl, send_ctrl_flushed, send_frame, SendFail};
 use super::session::Session;
@@ -70,7 +71,7 @@ impl Session<'_> {
             Err(SendFail::LaneFull) => {
                 let _ = respond.send(Err(limit_err(
                     "frame_out_queue",
-                    64,
+                    FRAME_OUT_CAPACITY as u64,
                     "runtime stdin queue full — not draining",
                 )));
             }
@@ -148,7 +149,7 @@ impl Session<'_> {
                     task_out,
                     limit_err(
                         "ctrl_queue",
-                        16,
+                        CTRL_OUT_CAPACITY as u64,
                         "control queue full — credit not delivered",
                     ),
                 );
@@ -196,7 +197,7 @@ impl Session<'_> {
                         ),
                         SendFail::LaneFull => limit_err(
                             "frame_out_queue",
-                            64,
+                            FRAME_OUT_CAPACITY as u64,
                             "runtime stdin queue full — not draining",
                         ),
                     },
@@ -283,7 +284,7 @@ impl Session<'_> {
                             } else {
                                 Err(limit_err(
                                     "ctrl_queue",
-                                    16,
+                                    CTRL_OUT_CAPACITY as u64,
                                     "control queue full — credit not delivered",
                                 ))
                             },

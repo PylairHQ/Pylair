@@ -32,6 +32,14 @@ use crate::transport::Transport;
 
 // ---- process spawning & kill plumbing ----
 
+/// Capacity of the outbound data lane (calls, the call frame of a stream).
+/// It is also the `max` of a `LIMIT_EXCEEDED { limit: "frame_out_queue" }`
+/// error, so the constructor and the error both read this one value.
+pub(super) const FRAME_OUT_CAPACITY: usize = 64;
+/// Capacity of the outbound control lane (cancel, credit, shutdown). Also
+/// the `max` of `LIMIT_EXCEEDED { limit: "ctrl_queue" }`.
+pub(super) const CTRL_OUT_CAPACITY: usize = 16;
+
 pub(super) async fn spawn_child(
     spec: &SpawnSpec,
     config: &SupervisorConfig,
@@ -141,8 +149,8 @@ pub(super) async fn spawn_child(
     // shutdown, small and always drained first) and data (calls, initial
     // credit). A stream flood can fill the data lane; it cannot starve or
     // silently drop a control frame (RC.6B).
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(64);
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Ctrl>(16);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(FRAME_OUT_CAPACITY);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Ctrl>(CTRL_OUT_CAPACITY);
     let ping_slot = Arc::new(Mutex::new(None::<Vec<u8>>));
     let ping_notify = Arc::new(tokio::sync::Notify::new());
     let pings_sent = Arc::new(AtomicU64::new(0));
