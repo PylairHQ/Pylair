@@ -475,9 +475,7 @@ impl Supervisor {
                 }
                 // --- child exit ---
                 status = &mut session.io.exited => {
-                    if let ControlFlow::Break(cause) = session.on_child_exit(status).await {
-                        return cause;
-                    }
+                    return session.on_child_exit(status).await;
                 }
             }
         }

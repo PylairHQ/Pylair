@@ -140,7 +140,7 @@ impl Session<'_> {
     pub(super) async fn on_child_exit(
         &mut self,
         status: Result<io::Result<ExitStatus>, RecvError>,
-    ) -> ControlFlow<ExitCause> {
+    ) -> ExitCause {
         let detail = match status {
             Ok(Ok(s)) => format!("exited {s}"),
             Ok(Err(e)) => format!("wait error: {e}"),
@@ -157,7 +157,7 @@ impl Session<'_> {
         )
         .await;
         fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
-        ControlFlow::Break(ExitCause::Crashed(detail))
+        ExitCause::Crashed(detail)
     }
 
     pub(super) async fn on_frame(
