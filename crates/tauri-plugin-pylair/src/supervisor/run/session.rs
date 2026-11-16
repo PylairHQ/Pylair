@@ -2,8 +2,12 @@
 //! bookkeeping and the methods the `select!` arms call.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
+use std::sync::atomic::Ordering;
 
-use super::{ChildIo, PendingKind, Supervisor, TaskMeta};
+use super::super::config::State;
+use super::{fail_all, kill_and_reap, ChildIo, ExitCause, PendingKind, Supervisor, TaskMeta};
+use crate::protocol as proto;
 
 /// The steady-state bookkeeping of one runtime generation (everything
 /// `run_child` used to keep in locals), plus the supervisor and child IO it
@@ -43,4 +47,56 @@ impl<'a> Session<'a> {
     }
 }
 
-impl Session<'_> {}
+impl Session<'_> {
+    pub(super) async fn on_ping_tick(&mut self) -> ControlFlow<ExitCause> {
+        // Misses count only pings the writer actually put on
+        // the wire: a ping still in the slot behind a full
+        // pipe is backpressure, not evidence the runtime died.
+        let pongs_outstanding = self
+            .io
+            .pings_sent
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.pongs_received) as u32;
+        if pongs_outstanding >= self.sup.config.missed_pongs_to_kill {
+            self.sup.set_state(
+                State::Unresponsive,
+                format!("{} missed pongs — runtime wedged", pongs_outstanding),
+            );
+            fail_all(
+                &mut self.pending,
+                proto::RUNTIME_WEDGED,
+                "runtime stopped responding (possible native-code wedge)",
+            )
+            .await;
+            kill_and_reap(&mut self.io).await;
+            return ControlFlow::Break(ExitCause::Crashed(format!(
+                "wedged: {} missed pongs",
+                pongs_outstanding
+            )));
+        }
+        if pongs_outstanding > 0 {
+            // A ping went a full interval unanswered — a real miss.
+            self.sup.set_state(
+                State::Unresponsive,
+                format!("missed {} pong(s)", pongs_outstanding),
+            );
+        }
+        self.ping_seq += 1;
+        let body = proto::request(
+            self.sup.next_id.fetch_add(1, Ordering::Relaxed),
+            "ping",
+            serde_json::json!({"seq": self.ping_seq}),
+        );
+        // Liveness gets its own slot the writer drains ahead
+        // of data, never the shared control lane - a stalled
+        // writer holds at most one pending ping, so liveness
+        // cannot starve cancel/credit either.
+        if let Ok(bytes) = serde_json::to_vec(&body) {
+            if bytes.len() <= self.sup.config.max_frame {
+                *self.io.ping_slot.lock().unwrap() = Some(bytes);
+                self.io.ping_notify.notify_one();
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}

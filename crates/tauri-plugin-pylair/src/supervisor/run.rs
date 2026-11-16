@@ -881,40 +881,10 @@ impl Supervisor {
             }
                             // --- liveness ping ---
                             _ = ping_tick.tick() => {
-                                // Misses count only pings the writer actually put on
-                                // the wire: a ping still in the slot behind a full
-                                // pipe is backpressure, not evidence the runtime died.
-                                let pongs_outstanding = session.io.pings_sent
-                                    .load(Ordering::Relaxed)
-                                    .saturating_sub(session.pongs_received) as u32;
-                                if pongs_outstanding >= session.sup.config.missed_pongs_to_kill {
-                                    session.sup.set_state(State::Unresponsive,
-                                        format!("{} missed pongs — runtime wedged", pongs_outstanding));
-                                    fail_all(&mut session.pending, proto::RUNTIME_WEDGED,
-                                        "runtime stopped responding (possible native-code wedge)").await;
-                                    kill_and_reap(&mut session.io).await;
-                                    return ExitCause::Crashed(format!(
-                                        "wedged: {} missed pongs", pongs_outstanding));
+                                if let ControlFlow::Break(cause) = session.on_ping_tick().await {
+                                    return cause;
                                 }
-                                if pongs_outstanding > 0 {
-                                    // A ping went a full interval unanswered — a real miss.
-                                    session.sup.set_state(State::Unresponsive,
-                                        format!("missed {} pong(s)", pongs_outstanding));
-                                }
-                                session.ping_seq += 1;
-                                let body = proto::request(session.sup.next_id.fetch_add(1, Ordering::Relaxed),
-                                    "ping", serde_json::json!({"seq": session.ping_seq}));
-                                // Liveness gets its own slot the writer drains ahead
-                                // of data, never the shared control lane - a stalled
-                                // writer holds at most one pending ping, so liveness
-                                // cannot starve cancel/credit either.
-                                if let Ok(bytes) = serde_json::to_vec(&body) {
-                                    if bytes.len() <= session.sup.config.max_frame {
-                                        *session.io.ping_slot.lock().unwrap() = Some(bytes);
-                                        session.io.ping_notify.notify_one();
-                                    }
-                                }
-            }
+                            }
                             // --- dev restart trigger ---
                             _ = trigger_tick.tick(), if restart_trigger.is_some() => {
                                 let m = restart_trigger.as_deref().and_then(mtime);
