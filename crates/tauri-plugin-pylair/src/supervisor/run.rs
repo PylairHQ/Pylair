@@ -887,16 +887,10 @@ impl Supervisor {
                             }
                             // --- dev restart trigger ---
                             _ = trigger_tick.tick(), if restart_trigger.is_some() => {
-                                let m = restart_trigger.as_deref().and_then(mtime);
-                                if m != trigger_mtime {
-                                    let _ = session.sup.events.try_send(RuntimeEvent::Stderr(
-                                        "pylair: source changed — restarting python runtime".into()));
-                                    fail_all(&mut session.pending, proto::RUNTIME_RESTARTED,
-                                        "python restarted (source change)").await;
-                                    kill_and_reap(&mut session.io).await;
-                                    return ExitCause::DevRestart;
+                                if let ControlFlow::Break(cause) = session.on_trigger_tick(&restart_trigger, trigger_mtime).await {
+                                    return cause;
                                 }
-            }
+                            }
                             // --- child exit ---
                             status = &mut session.io.exited => {
                                 let detail = match status {

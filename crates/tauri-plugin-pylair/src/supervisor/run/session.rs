@@ -3,9 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
-use super::super::config::State;
+use super::super::config::{RuntimeEvent, State};
+use super::super::wire::mtime;
 use super::{fail_all, kill_and_reap, ChildIo, ExitCause, PendingKind, Supervisor, TaskMeta};
 use crate::protocol as proto;
 
@@ -96,6 +99,28 @@ impl Session<'_> {
                 *self.io.ping_slot.lock().unwrap() = Some(bytes);
                 self.io.ping_notify.notify_one();
             }
+        }
+        ControlFlow::Continue(())
+    }
+
+    pub(super) async fn on_trigger_tick(
+        &mut self,
+        restart_trigger: &Option<PathBuf>,
+        trigger_mtime: Option<SystemTime>,
+    ) -> ControlFlow<ExitCause> {
+        let m = restart_trigger.as_deref().and_then(mtime);
+        if m != trigger_mtime {
+            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
+                "pylair: source changed — restarting python runtime".into(),
+            ));
+            fail_all(
+                &mut self.pending,
+                proto::RUNTIME_RESTARTED,
+                "python restarted (source change)",
+            )
+            .await;
+            kill_and_reap(&mut self.io).await;
+            return ControlFlow::Break(ExitCause::DevRestart);
         }
         ControlFlow::Continue(())
     }
