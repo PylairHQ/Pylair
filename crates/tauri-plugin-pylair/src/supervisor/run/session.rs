@@ -311,6 +311,14 @@ impl Session<'_> {
                             }
                             self.task_of_call.remove(&call_id);
                             self.tasks.remove(&task);
+                            // The stream is over (its terminal was just
+                            // delivered): tombstone it like a finished task,
+                            // so a later cancel says `completed` and a credit
+                            // grant says "already finished", not `not_found`.
+                            if self.done_tasks.len() >= 1024 {
+                                self.done_tasks.clear();
+                            }
+                            self.done_tasks.insert(task);
                             let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
                             let (ack, _) = oneshot::channel();
                             if send_ctrl(
