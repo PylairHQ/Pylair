@@ -1135,6 +1135,57 @@ async fn grant_credit_on_an_abandoned_stream_says_already_finished() {
     stop(&h).await;
 }
 
+/// e: the runtime's late reply for an abandoned call changes nothing. The
+/// fake answers the supervisor's producer cancel with the original call's
+/// TASK_CANCELLED response; that reply must find nothing in `pending` or
+/// `task_of_call` (so no second tombstone, no resurrected task). An echo
+/// round-trip is the fence: the fake writes in order, so once the echo comes
+/// back the late reply has been read. A resurrected task would make the
+/// user's cancel go to the runtime as a second `cancel` frame instead of
+/// being answered locally.
+#[tokio::test]
+async fn late_reply_for_an_abandoned_stream_changes_nothing() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 50;
+    let (h, rec, _) = ready(json!({"log": true}), c).await;
+    let (task, items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    drop(items);
+    h.call("chunks", json!({"task": task, "n": 1}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr(&format!(
+        "task {task}: stream consumer went away; cancelling producer"
+    ))
+    .await;
+    rec.rx_until("the producer cancel", |rx| {
+        rx.iter()
+            .any(|f| f["method"] == "cancel" && f["task"] == task)
+    })
+    .await;
+    // Fence: everything the fake wrote before this echo reply (the cancel
+    // reply and the late TASK_CANCELLED for the original call) is read.
+    h.call("echo", json!("fence"), None, Some(false))
+        .await
+        .unwrap();
+    assert_eq!(
+        cancel_after(&h, task, "late reply").await,
+        CancelOutcome::Completed
+    );
+    let e = h.grant_credit(task, 1, None).await.unwrap_err();
+    assert_eq!(e.message, format!("task {task} already finished"));
+    let cancels = rec
+        .rx()
+        .iter()
+        .filter(|f| f["method"] == "cancel" && f["task"] == task)
+        .count();
+    assert_eq!(cancels, 1, "only the supervisor's own producer cancel");
+    stop(&h).await;
+}
+
 /// e: tombstones belong to one generation: after a crash and restart, the
 /// ids of a finished task and an abandoned stream from the old generation
 /// are `not_found` again ("no such task in this generation").
