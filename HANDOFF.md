@@ -3,49 +3,51 @@
 Last rewritten 2026-11-14, against `main` at `a458e05` (after PR 57).
 The previous contents were the rc.6 CI-fix handoff; that work landed long
 ago and the document had gone stale. What is kept here is what is still
-true: where the rc.17 train stands, the release order, and the standing
+true: where the rc.18 train stands, the release order, and the standing
 rules that AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
 
-rc.16 is published: the crate at `0.1.0-rc.12`, `pylair` `0.1.0rc10`,
-`pylair-ollama` `0.1.0rc3` and the npm trio at `0.1.0-rc.16`.
+rc.17 is published: the crate at `0.1.0-rc.13`, `pylair` `0.1.0rc10`,
+`pylair-ollama` `0.1.0rc3` and the npm trio at `0.1.0-rc.17`.
 
-rc.17 is in progress. Steps 1 and 3 are done: the crate `0.1.0-rc.13` is
-published on crates.io, and the pins PR has regenerated the template
-`Cargo.lock` against it. Next: pack-mode acceptance on the pins commit,
-then the npm trio at `0.1.0-rc.17`, then registry acceptance. Versions in
-the repo (checked in the files, not against the registries) and the state
-of each:
+rc.18 is in preparation. Versions in the repo (checked in the files, not
+against the registries) and the plan for each:
 
-| Package | Version in the repo | rc.17 state |
+| Package | Version in the repo | rc.18 plan |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.13` | published |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.14` | released as `0.1.0-rc.14` |
 | `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, not released |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, not released |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.17` | to publish after the pins PR merges |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.17` | released as `0.1.0-rc.18`; the bump lands in the pins PR |
 
-Scaffold pins for rc.17: `tauri-plugin-pylair = "=0.1.0-rc.13"`,
-`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.17`.
+Merged since rc.17 (d7daaaf):
 
-Merged since rc.16 (76ebcdc):
-
-- PR 62, R1: `supervisor.rs` split into `crates/tauri-plugin-pylair/src/supervisor/`
-  (pure move).
-- PR 63, R2: client self-test moved to `src/selftest.ts`, bridge plumbing
-  to `src/internal.ts` (pure move).
-- PR 64: `stream_credit` retry waits on runtime reads, not a timer (test only).
-- PR 65, R2b: the client loads the installed-webview self-test on demand.
-- PR 66, R3: CLI `build.ts` split into `src/build/` (pure move).
-- PR 67: the CLI resolves `--dir` to an absolute path for build, dev and
-  doctor.
-- PR 68, rc.17 version bump: crate `0.1.0-rc.13`; the reference app's
-  `uv.lock` refreshed (it still pinned its two local packages at `0.0.0`).
-- rc.17 pins: scaffold pins, template `Cargo.lock` against the published
-  crate, npm trio at `0.1.0-rc.17`, README and npm README install lines.
+- PR 70, R4: `lib.rs` split into modules (pure move).
+- PR 74: `run_child` carved into `run/` — handshake, `Session`, the
+  command handlers (pure move).
+- PR 75: kill and reap the runtime on reader EOF before reporting
+  Restarting.
+- PR 76: tombstone an abandoned stream so a late cancel reports
+  completed.
+- PR 79: a stale download completion can no longer touch the next
+  attempt's `.part`.
+- PR 81: `.part` cleanup and the progress sink can no longer throw
+  inside a download event handler.
+- PR 71, 72, 73, 78, 80: supervisor test hardening (run_child
+  characterisation and guards, deterministic kill ordering, orphan
+  failure names the survivor, startup-noise robustness).
+- PR 77: the lane-full limit values come from the channel capacities.
+- PR 69, rc.17 pins: scaffold pins, template `Cargo.lock`, npm trio at
+  `0.1.0-rc.17` — the tail of the rc.17 train, landed after the bump.
+- rc.18 version bump: crate `0.1.0-rc.14`; the reference app's `uv.lock`
+  needed no refresh (`uv lock --check` clean).
 
 `python/` and `integrations/` have not changed since rc.16, so step 2
-below is skipped for rc.17.
+below is skipped for rc.18. The pins PR (scaffold pins, template
+`Cargo.lock` against the published crate, npm trio at `0.1.0-rc.18`, the
+README and npm README install lines) follows the crate publish; the steps
+below still describe the order.
 
 ## Release order
 
