@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, statSync } from "node:fs";
+import fsModule from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -465,6 +466,106 @@ describe("downloadWithRetry", () => {
     assert.equal(lines.length, 1, "one line per retry");
     assert.match(lines[0], /^retrying \(2 of 4\) in \d+s: .*timed out/);
     rmSync(dir, { recursive: true });
+  });
+
+  test("a request error between 'finish' and 'close' does not let the stale close handler touch the next attempt's .part", async () => {
+    // Forces the interleaving without sleeps or load. The write stream
+    // closes its fd through fs.close, so holding that one callback keeps
+    // attempt 1 between 'finish' and 'close'. While it is held, the request
+    // errors (fail() settles attempt 1 with out === undefined, keeping the
+    // resumable .part) and attempt 2 starts, reopening the same .part. Then
+    // the held close is released: attempt 1's close handler must not rename
+    // attempt 2's in-progress .part into place, and attempt 2 must complete.
+    const { dir, to } = tmp();
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const realClose = fsModule.close;
+    let held; // () => the real fs.close of attempt 1's stream
+    fsModule.close = (fd, cb) => {
+      if (held === undefined) held = () => realClose(fd, cb);
+      else realClose(fd, cb);
+    };
+    let calls = 0;
+    let req1;
+    let gated;
+    let attempt2Started;
+    const attempt2 = new Promise((r) => (attempt2Started = r));
+    const get = rangeGet((u, h, cb, req) => {
+      calls++;
+      if (calls === 1) {
+        req1 = req;
+        return cb(full());
+      }
+      // Attempt 2 answers, then waits for the test to let its body flow.
+      gated = new Readable({ read() {} });
+      gated.statusCode = 200;
+      gated.headers = { "content-length": String(BODY.length) };
+      cb(gated);
+      attempt2Started();
+    });
+    const lines = [];
+    try {
+      const done = downloadWithRetry("https://x/a", to, opts(get, { timeoutMs: 60000, log: (l) => lines.push(l) }));
+      // Attempt 1 has finished writing and is waiting on the held close.
+      for (let i = 0; held === undefined; i++) {
+        assert.ok(i < 2000, "fs.close of attempt 1's stream was never reached");
+        await new Promise((r) => setImmediate(r));
+      }
+      // The request errors now: fail() runs between 'finish' and 'close'.
+      req1.emit("error", new Error("ECONNRESET"));
+      await attempt2; // attempt 2 has opened .part with "w" and is in flight
+      await new Promise((r) => setImmediate(r));
+      held(); // attempt 1's stale close handler runs now
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.ok(existsSync(`${to}.part`), "the stale handler must not take attempt 2's .part");
+      assert.ok(!existsSync(to), "nothing may reach the final path before attempt 2 completes");
+      gated.push(BODY);
+      gated.push(null);
+      await Promise.race([
+        done,
+        new Promise((_, rej) => setTimeout(() => rej(new Error("download never settled")), 5000)),
+      ]);
+      assert.deepEqual(uncaught.map(String), []);
+      assert.equal(calls, 2);
+      assert.deepEqual(readFileSync(to), BODY);
+      assert.ok(!existsSync(`${to}.part`));
+      assert.equal(lines.length, 1, "one retry line");
+    } finally {
+      fsModule.close = realClose;
+      process.removeListener("uncaughtException", onUncaught);
+      if (held) held = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a rename that fails rejects the download instead of throwing inside an event handler", async () => {
+    // `to` is a non-empty directory, so renaming the finished .part onto it
+    // fails (EISDIR / EPERM). That error must reach the caller as a
+    // rejection; thrown inside the stream's 'close' handler it would be an
+    // uncaught exception that kills the process.
+    const { dir, to } = tmp();
+    mkdirSync(to);
+    writeFileSync(join(to, "keep"), "x");
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      const get = rangeGet((u, h, cb) => cb(full()));
+      await assert.rejects(
+        Promise.race([
+          downloadWithRetry("https://x/a", to, opts(get)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("download never settled")), 5000)),
+        ]),
+        (e) => !/never settled/.test(e.message) && ["EISDIR", "EPERM", "EEXIST", "ENOTEMPTY"].includes(e.code),
+      );
+      assert.deepEqual(uncaught.map(String), []);
+      assert.ok(existsSync(join(to, "keep")), "the existing directory is untouched");
+    } finally {
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("resume: Range is sent and a 206 with a matching Content-Range appends", async () => {

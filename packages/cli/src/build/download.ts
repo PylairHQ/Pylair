@@ -242,6 +242,11 @@ export function download(
               if (settled) return;
               out = undefined;
               stream.once("close", () => {
+                // fail() may have settled this attempt between 'finish' and
+                // 'close' (the request timing out, say). A resumable retry
+                // can already own `part` by now, so a stale completion must
+                // not touch the filesystem at all.
+                if (settled) return;
                 if (!Number.isNaN(want) && got !== want)
                   return fail(
                     new DownloadError(
@@ -251,7 +256,14 @@ export function download(
                   );
                 settled = true;
                 stopTicker();
-                renameSync(part, to);
+                // An event handler must never throw: a failed rename rejects
+                // the promise (not retryable: it is not a network error).
+                try {
+                  renameSync(part, to);
+                } catch (e) {
+                  dropPart();
+                  return rej(e instanceof Error ? e : new Error(String(e)));
+                }
                 res();
               });
               stream.destroy();
