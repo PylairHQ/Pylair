@@ -1086,11 +1086,94 @@ async fn reader_eof_without_exit_status_reports_runtime_gone_after_5s() {
         "{waited:?}"
     );
     let (_, ev) = rec.state(0, State::Restarting, "runtime gone").await;
-    // Trace for the PR's "Noticed, not changed": this path returns
-    // without kill_and_reap, so the child may still exist here.
+    // The child is still alive when the supervisor gives up waiting (it
+    // sleeps 8s after closing stdout), so it must be killed and reaped
+    // before Restarting is reported: the next spawn must not overlap it.
     if let Ev::State { present, .. } = &ev {
         eprintln!("trace: reader-EOF Crashed reported with child pid {pid} present={present:?}");
     }
+    assert_reaped(&ev);
+    stop(&h).await;
+}
+
+/// f: reader EOF while the child is still ALIVE (it closed stdout and keeps
+/// running): pending callers are failed first (the child still exists when
+/// they hear it), then the child is killed and reaped, and only then is
+/// Restarting reported, so the next generation never overlaps it.
+#[tokio::test(flavor = "current_thread")]
+async fn reader_eof_with_a_live_child_fails_callers_then_kills_and_reaps() {
+    let _children = CHILDREN.write().await;
+    let (h, rec, _) = ready(json!({}), cfg()).await;
+    let pid = rec.pid().await;
+    let ct = h
+        .call_task(
+            "eof_then_exit",
+            json!({"after": 30, "code": 3}),
+            None,
+            Some(false),
+        )
+        .unwrap();
+    let watch = Watch::arm(pid, ct.result).await;
+    let err = watch
+        .result("callers heard RUNTIME_CRASHED")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, proto::RUNTIME_CRASHED);
+    assert_eq!(err.message, "runtime gone");
+    let (at, ev) = rec.state(0, State::Restarting, "runtime gone").await;
+    // The next generation comes up as a different process.
+    rec.state(at, State::Ready, "").await;
+    let next = rec.pid().await;
+    // Trace (shown with --nocapture): event order, and whether the OLD pid
+    // still existed when each event was received.
+    eprintln!("trace: old child pid {pid}, next generation pid {next}");
+    for (i, e) in rec.snapshot().iter().enumerate() {
+        if let Ev::State {
+            to,
+            detail,
+            present,
+            ..
+        } = e
+        {
+            eprintln!("trace:   #{i} {to:?} ({detail}) old child present={present:?}");
+        }
+    }
+    assert_reaped(&ev);
+    assert_ne!(next, pid);
+    stop(&h).await;
+}
+
+/// f: reader EOF where the child exits BY ITSELF inside the 5s wait: the
+/// reap fix must not change this path. The detail is the exit status, the
+/// child is gone when Restarting is reported, and the supervisor carries on
+/// into the next generation. NOT directly observable: "no kill was sent"
+/// (a kill after the child already exited is a no-op on the process). What
+/// this does catch is a `kill_and_reap` added to this path: it would poll
+/// the already-completed exit channel, panic the supervisor task, and the
+/// next generation would never come up.
+#[tokio::test]
+async fn reader_eof_with_a_self_exiting_child_is_unchanged() {
+    let _children = CHILDREN.read().await;
+    let (h, rec, _) = ready(json!({}), cfg()).await;
+    let pid = rec.pid().await;
+    let ct = h
+        .call_task(
+            "eof_then_exit",
+            json!({"after": 1.0, "code": 4}),
+            None,
+            Some(false),
+        )
+        .unwrap();
+    let err = result_of(ct.result).await.unwrap_err();
+    assert_eq!(err.code, proto::RUNTIME_CRASHED);
+    assert!(
+        err.message.starts_with("exited ") && err.message.contains('4'),
+        "{err:?}"
+    );
+    let (at, ev) = rec.state(0, State::Restarting, &err.message).await;
+    assert_reaped(&ev);
+    rec.state(at, State::Ready, "").await;
+    assert_ne!(rec.pid().await, pid);
     stop(&h).await;
 }
 
