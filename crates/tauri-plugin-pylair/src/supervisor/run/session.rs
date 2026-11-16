@@ -15,7 +15,7 @@ use tokio::sync::oneshot::error::RecvError;
 use tokio::time::timeout;
 
 use super::super::config::{RuntimeEvent, State};
-use super::super::handle::limit_err;
+use super::super::handle::{limit_err, Command, ShutdownOutcome};
 use super::super::stream::ChunkFail;
 use super::super::wire::{cancel_outcome, mtime, send_ctrl};
 use super::{
@@ -347,5 +347,62 @@ impl Session<'_> {
             }
         }
         ControlFlow::Continue(())
+    }
+
+    pub(super) async fn on_command(&mut self, cmd: Option<Command>) -> ControlFlow<ExitCause> {
+        let Some(cmd) = cmd else {
+            // all handles dropped — shut down
+            let outcome = if kill_and_reap(&mut self.io).await {
+                ShutdownOutcome::ForcedKill
+            } else {
+                ShutdownOutcome::Incomplete
+            };
+            self.sup.shutdown_outcome = Some(outcome);
+            return ControlFlow::Break(ExitCause::CleanShutdown);
+        };
+        match cmd {
+            Command::Call {
+                fn_name,
+                input,
+                stream,
+                respond,
+                task_out,
+                owner,
+            } => self.call(fn_name, input, stream, respond, task_out, owner),
+            Command::CallStream {
+                fn_name,
+                input,
+                stream,
+                items,
+                task_out,
+                owner,
+            } => self.call_stream(fn_name, input, stream, items, task_out, owner),
+            Command::Cancel {
+                task,
+                respond,
+                caller,
+            } => {
+                self.cancel(task, respond, caller);
+                ControlFlow::Continue(())
+            }
+            Command::GrantCredit {
+                task,
+                n,
+                respond,
+                caller,
+            } => {
+                self.grant_credit(task, n, respond, caller);
+                ControlFlow::Continue(())
+            }
+            Command::CancelOwned { owner, before } => {
+                self.cancel_owned(owner, before);
+                ControlFlow::Continue(())
+            }
+            Command::Retry => {
+                // Only meaningful from Failed — already serving.
+                ControlFlow::Continue(())
+            }
+            Command::Shutdown { ack } => self.shutdown(ack).await,
+        }
     }
 }

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,19 +19,17 @@ use super::config::{
     clamp_hello_timeout_ms, parse_hello_timeout_ms, RuntimeEvent, SpawnSpec, State,
     SupervisorConfig,
 };
-use super::handle::{limit_err, CancelOutcome, Command, Handle, ShutdownOutcome};
+use super::handle::{CancelOutcome, Command, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
 use super::platform_unix::PdeathAnchor;
 use super::spawn::spawn_child;
 use super::stream::StreamSink;
-use super::wire::{
-    cancel_outcome, jitter, mtime, owner_allows, send_ctrl, send_ctrl_flushed, send_frame, Ctrl,
-    SendFail,
-};
+use super::wire::{cancel_outcome, jitter, mtime, Ctrl};
 use crate::protocol::{self as proto, ErrorObj, InMsg};
 
 mod handshake;
 mod session;
+mod session_commands;
 
 use session::Session;
 
@@ -451,314 +449,37 @@ impl Supervisor {
         let mut trigger_tick = interval(Duration::from_millis(250));
         loop {
             tokio::select! {
-                            // --- incoming frame ---
-                            msg = session.io.msg_in.recv() => {
-                                if let ControlFlow::Break(cause) = session.on_frame(msg).await {
-                                    return cause;
-                                }
-                            }
-                            // --- app command ---
-                            cmd = session.sup.cmd_rx.recv() => {
-                                let Some(cmd) = cmd else {
-                                    // all handles dropped — shut down
-                                    let outcome = if kill_and_reap(&mut session.io).await {
-                                        ShutdownOutcome::ForcedKill
-                                    } else {
-                                        ShutdownOutcome::Incomplete
-                                    };
-                                    session.sup.shutdown_outcome = Some(outcome);
-                                    return ExitCause::CleanShutdown;
-                                };
-                                match cmd {
-                                    Command::Call { fn_name, input, stream, respond, task_out, owner } => {
-                                        let lim = &session.sup.config.limits;
-                                        if session.tasks.len() >= lim.max_concurrent_tasks {
-                                            let _ = respond.send(Err(limit_err(
-                                                "max_concurrent_tasks",
-                                                lim.max_concurrent_tasks as u64,
-                                                "too many in-flight tasks")));
-                                            continue;
-                                        }
-                                        let id = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                        let task = session.sup.next_task.fetch_add(1, Ordering::Relaxed);
-                                        let mut params = serde_json::json!({"fn": fn_name, "task": task,
-                                            "input": input});
-                                        if let Some(s) = stream {
-                                            params["stream"] = serde_json::json!(s);
-                                        }
-                                        let body = proto::request(id, "call", params);
-                                        match send_frame(&session.io, &body, session.sup.config.max_frame) {
-                                            Ok(()) => {
-                                                let _ = task_out.send(task);
-                                                session.pending.insert(id, PendingKind::Call(respond));
-                                                session.task_of_call.insert(id, task);
-                                                session.tasks.insert(task, TaskMeta {
-                                                    call_id: id, owner, is_stream: false, credit: 0,
-                                                });
-                                            }
-                                            Err(SendFail::Oversize(n)) => {
-                                                let _ = respond.send(Err(limit_err(
-                                                    "max_frame",
-                                                    session.sup.config.max_frame as u64,
-                                                    format!("call frame is {n} bytes — the runtime would reject it"))));
-                                            }
-                                            Err(SendFail::LaneFull) => {
-                                                let _ = respond.send(Err(limit_err(
-                                                    "frame_out_queue", 64,
-                                                    "runtime stdin queue full — not draining")));
-                                            }
-                                        }
-                                    }
-                                    Command::CallStream { fn_name, input, stream, items, task_out, owner } => {
-                                        // `None` = a pre-flag client: it could be
-                                        // either API, so the conservative accounting
-                                        // is "stream" — a slot is taken and the
-                                        // initial credit is granted exactly as before,
-                                        // but the wire field stays absent so the
-                                        // runtime applies no mismatch validation.
-                                        let is_stream = stream.unwrap_or(true);
-                                        let lim = &session.sup.config.limits;
-                                        if session.tasks.len() >= lim.max_concurrent_tasks {
-                                            reject_stream(items, task_out, limit_err(
-                                                "max_concurrent_tasks",
-                                                lim.max_concurrent_tasks as u64,
-                                                "too many in-flight tasks"));
-                                            continue;
-                                        }
-                                        if is_stream {
-                                            let streams = session.tasks.values().filter(|m| m.is_stream).count();
-                                            if streams >= lim.max_concurrent_streams {
-                                                reject_stream(items, task_out, limit_err(
-                                                    "max_concurrent_streams",
-                                                    lim.max_concurrent_streams as u64,
-                                                    "too many in-flight streams"));
-                                                continue;
-                                            }
-                                        }
-                                        let id = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                        let task = session.sup.next_task.fetch_add(1, Ordering::Relaxed);
-                                        let mut params = serde_json::json!({"fn": fn_name, "task": task,
-                                            "input": input});
-                                        if let Some(s) = stream {
-                                            params["stream"] = serde_json::json!(s);
-                                        }
-                                        let body = proto::request(id, "call", params);
-                                        if is_stream {
-                                            let credit = proto::notification("stream.credit",
-                                                serde_json::json!({"task": task, "n": session.sup.config.initial_stream_credit}));
-                                            // The initial grant is control traffic and goes
-                                            // FIRST: the runtime buffers credit for a task it
-                                            // has not registered yet (pending credit), so the
-                                            // grant cannot be starved or reordered behind
-                                            // data-lane traffic — and a failed send fails the
-                                            // stream BEFORE the call is committed instead of
-                                            // leaving it uncredited forever.
-                                            if !send_ctrl(&session.io, &credit, session.sup.config.max_frame) {
-                                                reject_stream(items, task_out, limit_err(
-                                                    "ctrl_queue", 16,
-                                                    "control queue full — credit not delivered"));
-                                                continue;
-                                            }
-                                        }
-                                        match send_frame(&session.io, &body, session.sup.config.max_frame) {
-                                            Ok(()) => {
-                                                let _ = task_out.send(Ok(task));
-                                                session.pending.insert(id, PendingKind::Stream(items));
-                                                session.task_of_call.insert(id, task);
-                                                session.tasks.insert(task, TaskMeta {
-                                                    call_id: id, owner, is_stream,
-                                                    credit: if is_stream {
-                                                        session.sup.config.initial_stream_credit
-                                                    } else {
-                                                        0
-                                                    },
-                                                });
-                                            }
-                                            Err(e) => {
-                                                // The grant was delivered but the call was
-                                                // not — best-effort cancel drops the
-                                                // stranded pending credit (bounded anyway).
-                                                let cid = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                                let _ = send_ctrl(&session.io, &proto::request(cid, "cancel",
-                                                    serde_json::json!({"task": task})),
-                                                    session.sup.config.max_frame);
-                                                let max = session.sup.config.max_frame as u64;
-                                                reject_stream(items, task_out, match e {
-                                                    SendFail::Oversize(n) => limit_err("max_frame", max,
-                                                        format!("call frame is {n} bytes — the runtime would reject it")),
-                                                    SendFail::LaneFull => limit_err("frame_out_queue", 64,
-                                                        "runtime stdin queue full — not draining"),
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Command::Cancel { task, respond, caller } => {
-                                        match session.tasks.get(&task) {
-                                            // Unknown to this generation: a completed
-                                            // tombstone means the cancel raced a finish;
-                                            // anything else is a stale or foreign id.
-                                            None => {
-                                                let _ = respond.send(if session.done_tasks.contains(&task) {
-                                                    CancelOutcome::Completed
-                                                } else {
-                                                    CancelOutcome::NotFound
-                                                });
-                                            }
-                                            Some(meta) if !owner_allows(&meta.owner, &caller) => {
-                                                let _ = respond.send(CancelOutcome::Rejected);
-                                            }
-                                            Some(_) => {
-                                                let id = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                                let body = proto::request(id, "cancel",
-                                                    serde_json::json!({"task": task}));
-                                                // Control lane: a data flood cannot starve
-                                                // this, and a failed try_send is a loud
-                                                // outcome — never a silent drop.
-                                                if send_ctrl(&session.io, &body, session.sup.config.max_frame) {
-                                                    session.pending.insert(id, PendingKind::Cancel { respond });
-                                                } else {
-                                                    let _ = respond.send(CancelOutcome::DeliveryFailed);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Command::GrantCredit { task, n, respond, caller } => {
-                                        match session.tasks.get_mut(&task) {
-                                            None => {
-                                                let _ = respond.send(Err(ErrorObj {
-                                                    code: proto::TASK_NOT_FOUND,
-                                                    message: if session.done_tasks.contains(&task) {
-                                                        format!("task {task} already finished")
-                                                    } else {
-                                                        format!("no such task in this generation: {task}")
-                                                    },
-                                                    data: None,
-                                                }));
-                                            }
-                                            Some(meta) if !owner_allows(&meta.owner, &caller) => {
-                                                let _ = respond.send(Err(ErrorObj {
-                                                    code: proto::INVALID_REQUEST,
-                                                    message: format!("task {task} belongs to a different webview"),
-                                                    data: None,
-                                                }));
-                                            }
-                                            Some(meta) => {
-                                                let lim = &session.sup.config.limits;
-                                                let would = meta.credit.checked_add(n);
-                                                match would {
-                                                    Some(total) if total <= lim.max_stream_credit => {
-                                                        let body = proto::notification("stream.credit",
-                                                            serde_json::json!({"task": task, "n": n}));
-                                                        let _ = respond.send(
-                                                            if send_ctrl(&session.io, &body, session.sup.config.max_frame) {
-                                                                meta.credit = total;
-                                                                Ok(())
-                                                            } else {
-                                                                Err(limit_err("ctrl_queue", 16,
-                                                                    "control queue full — credit not delivered"))
-                                                            });
-                                                    }
-                                                    _ => {
-                                                        let _ = respond.send(Err(limit_err(
-                                                            "max_stream_credit",
-                                                            lim.max_stream_credit,
-                                                            format!("grant of {n} exceeds the outstanding-credit cap"))));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Command::CancelOwned { owner, before } => {
-                                        // Window destroyed (before: None) or new
-                                        // document loading (Some watermark): cancel
-                                        // every task it owned / owned before the mark.
-                                        // Supervisor-initiated, so the owner check does
-                                        // not apply; delivery failures only lose a
-                                        // cancel the dead context could never observe.
-                                        for (&task, meta) in session.tasks.iter() {
-                                            if meta.owner.as_deref() == Some(owner.as_str())
-                                                && before.is_none_or(|b| task < b)
-                                            {
-                                                let id = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                                let body = proto::request(id, "cancel",
-                                                    serde_json::json!({"task": task}));
-                                                let (ack, _) = oneshot::channel();
-                                                if send_ctrl(&session.io, &body, session.sup.config.max_frame) {
-                                                    session.pending.insert(id, PendingKind::Cancel { respond: ack });
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Command::Retry => {
-                                        // Only meaningful from Failed — already serving.
-                                    }
-                                    Command::Shutdown { ack } => {
-                                        session.sup.shutdown_acks.push(ack);
-                                        let id = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                        // The runtime's drain budget must finish inside
-                                        // our kill timer: give it the grace minus ~1s
-                                        // for the ack, exit and reap, floored so a tiny
-                                        // configured grace still buys real drain time.
-                                        // grace_ms is ONE budget the runtime shares
-                                        // across every shutdown phase (protocol §7).
-                                        let grace_ms = session.sup
-                                            .config
-                                            .shutdown_grace
-                                            .saturating_sub(Duration::from_millis(1000))
-                                            .max(Duration::from_millis(500))
-                                            .as_millis() as u64;
-                                        let body = proto::request(
-                                            id,
-                                            "shutdown",
-                                            serde_json::json!({"grace_ms": grace_ms}),
-                                        );
-                                        // Flush ordering: calls committed to the data
-                                        // lane before this shutdown must be written
-                                        // first, so the drain can return their real
-                                        // terminal instead of a generic unavailable.
-                                        let _ = send_ctrl_flushed(&session.io, &body, session.sup.config.max_frame);
-                                        // Graceful exit within the grace window consumes
-                                        // `exited`; on timeout it is still pollable, so
-                                        // kill the tree and wait for the reap. Report
-                                        // what actually happened (RC.6C).
-                                        let outcome = if timeout(session.sup.config.shutdown_grace, &mut session.io.exited).await.is_ok() {
-                                            ShutdownOutcome::Terminated
-                                        } else if kill_and_reap(&mut session.io).await {
-                                            ShutdownOutcome::ForcedKill
-                                        } else {
-                                            ShutdownOutcome::Incomplete
-                                        };
-                                        session.sup.shutdown_outcome = Some(outcome);
-                                        // The runtime may have written final responses
-                                        // (TASK_CANCELLED, results) before exiting —
-                                        // deliver them so callers get what actually
-                                        // happened, then sweep the rest.
-                                        drain_exited_inbox(&mut session.io, &mut session.pending, &mut session.tasks,
-                                                           &mut session.task_of_call, &mut session.done_tasks).await;
-                                        fail_all(&mut session.pending, proto::RUNTIME_UNAVAILABLE, "shutdown").await;
-                                        return ExitCause::CleanShutdown;
-                                    }
-                                }
+                // --- incoming frame ---
+                msg = session.io.msg_in.recv() => {
+                    if let ControlFlow::Break(cause) = session.on_frame(msg).await {
+                        return cause;
+                    }
+                }
+                // --- app command ---
+                cmd = session.sup.cmd_rx.recv() => {
+                    if let ControlFlow::Break(cause) = session.on_command(cmd).await {
+                        return cause;
+                    }
+                }
+                // --- liveness ping ---
+                _ = ping_tick.tick() => {
+                    if let ControlFlow::Break(cause) = session.on_ping_tick().await {
+                        return cause;
+                    }
+                }
+                // --- dev restart trigger ---
+                _ = trigger_tick.tick(), if restart_trigger.is_some() => {
+                    if let ControlFlow::Break(cause) = session.on_trigger_tick(&restart_trigger, trigger_mtime).await {
+                        return cause;
+                    }
+                }
+                // --- child exit ---
+                status = &mut session.io.exited => {
+                    if let ControlFlow::Break(cause) = session.on_child_exit(status).await {
+                        return cause;
+                    }
+                }
             }
-                            // --- liveness ping ---
-                            _ = ping_tick.tick() => {
-                                if let ControlFlow::Break(cause) = session.on_ping_tick().await {
-                                    return cause;
-                                }
-                            }
-                            // --- dev restart trigger ---
-                            _ = trigger_tick.tick(), if restart_trigger.is_some() => {
-                                if let ControlFlow::Break(cause) = session.on_trigger_tick(&restart_trigger, trigger_mtime).await {
-                                    return cause;
-                                }
-                            }
-                            // --- child exit ---
-                            status = &mut session.io.exited => {
-                                if let ControlFlow::Break(cause) = session.on_child_exit(status).await {
-                                    return cause;
-                                }
-                            }
-                        }
         }
     }
 }
