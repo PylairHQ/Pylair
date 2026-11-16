@@ -533,6 +533,13 @@ async fn result_of(
 }
 
 /// Every item until the terminal: (chunk seqs, terminal).
+/// Cancel an abandoned task and print the outcome (shown with --nocapture).
+async fn cancel_after(h: &Handle, task: u64, cause: &str) -> CancelOutcome {
+    let out = h.cancel(task, None).await.unwrap();
+    eprintln!("trace: cancel after {cause} (task {task}): {out:?}");
+    out
+}
+
 async fn drain_stream(
     mut items: tauri_plugin_pylair::supervisor::StreamRx,
 ) -> (Vec<u64>, Result<Value, ErrorObj>) {
@@ -929,9 +936,9 @@ async fn chunk_for_unknown_task_is_ignored() {
 }
 
 /// e: a stalled consumer: the stream ends with a terminal that cannot be
-/// lost, the stderr note names the task, the task is removed (its slot is
-/// free, cancel no longer finds it) and a best-effort cancel reaches the
-/// runtime.
+/// lost, the stderr note names the task, the task is removed and
+/// tombstoned (its slot is free, a later cancel says completed) and a
+/// best-effort cancel reaches the runtime.
 #[tokio::test]
 async fn stalled_consumer_ends_stream_notes_removes_and_cancels() {
     let _children = CHILDREN.read().await;
@@ -956,11 +963,13 @@ async fn stalled_consumer_ends_stream_notes_removes_and_cancels() {
             .any(|f| f["method"] == "cancel" && f["task"] == task)
     })
     .await;
-    // Pins CURRENT behaviour: the abandoned task is removed from the
-    // registry without a tombstone, so a later cancel says NotFound.
-    // docs/cancellation.md says a finished task reports `completed`;
-    // the mismatch is listed in the PR, not changed here.
-    assert_eq!(h.cancel(task, None).await.unwrap(), CancelOutcome::NotFound);
+    // The abandoned task is over: it is removed from the registry AND
+    // tombstoned, so a later cancel reports `completed` (not `not_found`,
+    // which means "no such task in this generation").
+    assert_eq!(
+        cancel_after(&h, task, "stalled consumer").await,
+        CancelOutcome::Completed
+    );
     let (_t2, _items2) = h
         .call_stream("hold", json!({}), None, Some(true))
         .await
@@ -973,7 +982,8 @@ async fn stalled_consumer_ends_stream_notes_removes_and_cancels() {
     stop(&h).await;
 }
 
-/// e: a vanished consumer: the stderr note, the task removed, the cancel sent.
+/// e: a vanished consumer: the stderr note, the task removed and tombstoned
+/// (a later cancel says completed), the cancel sent.
 #[tokio::test]
 async fn vanished_consumer_ends_stream_notes_and_cancels() {
     let _children = CHILDREN.read().await;
@@ -997,11 +1007,277 @@ async fn vanished_consumer_ends_stream_notes_and_cancels() {
             .any(|f| f["method"] == "cancel" && f["task"] == task)
     })
     .await;
-    // Pins CURRENT behaviour: the abandoned task is removed from the
-    // registry without a tombstone, so a later cancel says NotFound.
-    // docs/cancellation.md says a finished task reports `completed`;
-    // the mismatch is listed in the PR, not changed here.
-    assert_eq!(h.cancel(task, None).await.unwrap(), CancelOutcome::NotFound);
+    // The abandoned task is over: it is removed from the registry AND
+    // tombstoned, so a later cancel reports `completed` (not `not_found`,
+    // which means "no such task in this generation").
+    assert_eq!(
+        cancel_after(&h, task, "vanished consumer").await,
+        CancelOutcome::Completed
+    );
+    stop(&h).await;
+}
+
+/// e: a stream over the per-stream byte cap is abandoned like a stalled
+/// one: terminal LIMIT_EXCEEDED, the stderr note, the producer cancel, and a
+/// later cancel reports `completed`. (1024 bytes is the smallest cap the
+/// supervisor accepts; 1200 small ints are about 3.7 KB.)
+#[tokio::test]
+async fn per_stream_byte_cap_abandons_and_tombstones_the_task() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 4000;
+    c.stream_buffer = 4000;
+    c.limits.stream_buffer_bytes = 1024;
+    let (h, rec, _) = ready(json!({"log": true}), c).await;
+    let (task, items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    h.call(
+        "chunks",
+        json!({"task": task, "n": 1200}),
+        None,
+        Some(false),
+    )
+    .await
+    .unwrap();
+    rec.stderr(&format!(
+        "task {task}: stream consumer over the byte cap; cancelling producer"
+    ))
+    .await;
+    rec.rx_until("the producer cancel", |rx| {
+        rx.iter()
+            .any(|f| f["method"] == "cancel" && f["task"] == task)
+    })
+    .await;
+    assert_eq!(
+        cancel_after(&h, task, "per-stream byte cap").await,
+        CancelOutcome::Completed
+    );
+    let (_, end) = drain_stream(items).await;
+    assert_limit(&end.unwrap_err(), "stream_buffer_bytes");
+    stop(&h).await;
+}
+
+/// e: the shared byte cap, tripped by a second stream while the first stays
+/// under its own cap: the SECOND stream is abandoned and tombstoned (a later
+/// cancel says completed); the first is untouched.
+#[tokio::test]
+async fn shared_byte_cap_abandons_and_tombstones_the_task() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 4000;
+    c.stream_buffer = 4000;
+    c.limits.stream_buffer_bytes = 1024;
+    c.limits.stream_buffer_bytes_total = 1500;
+    let (h, rec, _) = ready(json!({"log": true}), c).await;
+    let (t1, _items1) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    // 300 small ints are ~790 bytes: under the per-stream cap of 1024.
+    h.call("chunks", json!({"task": t1, "n": 300}), None, Some(false))
+        .await
+        .unwrap();
+    let (t2, items2) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    // Another ~790 bytes pushes the shared total past 1500 before this
+    // stream reaches its own cap.
+    h.call("chunks", json!({"task": t2, "n": 300}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr(&format!(
+        "task {t2}: stream consumer over the shared byte cap; cancelling producer"
+    ))
+    .await;
+    rec.rx_until("the producer cancel", |rx| {
+        rx.iter()
+            .any(|f| f["method"] == "cancel" && f["task"] == t2)
+    })
+    .await;
+    assert_eq!(
+        cancel_after(&h, t2, "shared byte cap").await,
+        CancelOutcome::Completed
+    );
+    let (_, end) = drain_stream(items2).await;
+    assert_limit(&end.unwrap_err(), "stream_buffer_bytes_total");
+    // The first stream was not abandoned: its task is still live.
+    let e = h.grant_credit(t1, 1, None).await;
+    assert!(e.is_ok(), "{e:?}");
+    stop(&h).await;
+}
+
+/// e: granting credit to an abandoned stream says "already finished", the
+/// same answer a normally finished task gets, not "no such task".
+#[tokio::test]
+async fn grant_credit_on_an_abandoned_stream_says_already_finished() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 50;
+    let (h, rec, _) = ready(json!({}), c).await;
+    let (task, items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    drop(items);
+    h.call("chunks", json!({"task": task, "n": 1}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr(&format!(
+        "task {task}: stream consumer went away; cancelling producer"
+    ))
+    .await;
+    let e = h.grant_credit(task, 1, None).await.unwrap_err();
+    assert_eq!(e.code, proto::TASK_NOT_FOUND);
+    assert_eq!(e.message, format!("task {task} already finished"));
+    stop(&h).await;
+}
+
+/// e: the runtime's late reply for an abandoned call changes nothing. The
+/// fake answers the supervisor's producer cancel with the original call's
+/// TASK_CANCELLED response; that reply must find nothing in `pending` or
+/// `task_of_call` (so no second tombstone, no resurrected task). An echo
+/// round-trip is the fence: the fake writes in order, so once the echo comes
+/// back the late reply has been read. A resurrected task would make the
+/// user's cancel go to the runtime as a second `cancel` frame instead of
+/// being answered locally.
+#[tokio::test]
+async fn late_reply_for_an_abandoned_stream_changes_nothing() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 50;
+    let (h, rec, _) = ready(json!({"log": true}), c).await;
+    let (task, items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    drop(items);
+    h.call("chunks", json!({"task": task, "n": 1}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr(&format!(
+        "task {task}: stream consumer went away; cancelling producer"
+    ))
+    .await;
+    rec.rx_until("the producer cancel", |rx| {
+        rx.iter()
+            .any(|f| f["method"] == "cancel" && f["task"] == task)
+    })
+    .await;
+    // Fence: everything the fake wrote before this echo reply (the cancel
+    // reply and the late TASK_CANCELLED for the original call) is read.
+    h.call("echo", json!("fence"), None, Some(false))
+        .await
+        .unwrap();
+    assert_eq!(
+        cancel_after(&h, task, "late reply").await,
+        CancelOutcome::Completed
+    );
+    let e = h.grant_credit(task, 1, None).await.unwrap_err();
+    assert_eq!(e.message, format!("task {task} already finished"));
+    let cancels = rec
+        .rx()
+        .iter()
+        .filter(|f| f["method"] == "cancel" && f["task"] == task)
+        .count();
+    assert_eq!(cancels, 1, "only the supervisor's own producer cancel");
+    stop(&h).await;
+}
+
+/// e: abandoned streams follow the same 1024 bound as finished tasks.
+/// Each iteration abandons one stream (consumer dropped, then a chunk) and
+/// the `chunks` call that delivered it finishes normally, so every iteration
+/// adds TWO tombstones, the abandoned stream's first. After 512 iterations
+/// the set holds 1024; the abandonment in iteration 513 hits the bound and
+/// must clear the set before inserting itself. (If that path skipped the
+/// clear, the finish of the same iteration's `chunks` call would clear the
+/// set instead and wipe the abandoned task's tombstone.)
+#[tokio::test]
+async fn abandoned_streams_are_tombstoned_and_the_set_clears_at_1024() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 4;
+    let (h, _rec, _) = ready(json!({}), c).await;
+    let mut first = 0;
+    let mut abandoned = 0;
+    for i in 0..513 {
+        let (task, items) = h
+            .call_stream("hold", json!({}), None, Some(true))
+            .await
+            .unwrap();
+        drop(items);
+        h.call("chunks", json!({"task": task, "n": 1}), None, Some(false))
+            .await
+            .unwrap();
+        if i == 0 {
+            first = task;
+        }
+        if i == 511 {
+            // 512 abandoned + 512 finished = 1024 tombstones, no clear yet.
+            assert_eq!(
+                h.cancel(first, None).await.unwrap(),
+                CancelOutcome::Completed,
+                "1024 tombstones must all still be held"
+            );
+        }
+        abandoned = task;
+    }
+    // Iteration 513's abandonment cleared the set before inserting itself.
+    assert_eq!(
+        h.cancel(first, None).await.unwrap(),
+        CancelOutcome::NotFound
+    );
+    assert_eq!(
+        h.cancel(abandoned, None).await.unwrap(),
+        CancelOutcome::Completed,
+        "the abandonment that hit the bound must keep its own tombstone"
+    );
+    stop(&h).await;
+}
+
+/// e: tombstones belong to one generation: after a crash and restart, the
+/// ids of a finished task and an abandoned stream from the old generation
+/// are `not_found` again ("no such task in this generation").
+#[tokio::test]
+async fn tombstones_do_not_leak_into_the_next_generation() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 50;
+    let (h, rec, _) = ready(json!({}), c).await;
+    let done = h.call_task("echo", json!(1), None, Some(false)).unwrap();
+    let t_done = done.task.await.unwrap();
+    done.result.await.unwrap().unwrap();
+    assert_eq!(
+        h.cancel(t_done, None).await.unwrap(),
+        CancelOutcome::Completed
+    );
+    let (t_gone, items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    drop(items);
+    h.call("chunks", json!({"task": t_gone, "n": 1}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr(&format!(
+        "task {t_gone}: stream consumer went away; cancelling producer"
+    ))
+    .await;
+    let _die = h
+        .call_task("die", json!({"finish": [], "code": 3}), None, Some(false))
+        .unwrap();
+    let (at, _) = rec.state(0, State::Restarting, "").await;
+    rec.state(at, State::Ready, "").await;
+    assert_eq!(
+        h.cancel(t_done, None).await.unwrap(),
+        CancelOutcome::NotFound
+    );
+    assert_eq!(
+        h.cancel(t_gone, None).await.unwrap(),
+        CancelOutcome::NotFound
+    );
     stop(&h).await;
 }
 

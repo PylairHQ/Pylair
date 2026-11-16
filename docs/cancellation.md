@@ -102,7 +102,9 @@ at `@expose` time, not at cancel time.
   truly finished (or an id the bounded pending set refused) answers
   `cancelled: false` → `completed`.
 - **Cancel an unknown/finished task:** `not_found` / `completed` —
-  distinct outcomes, never an error for the caller.
+  distinct outcomes, never an error for the caller. A stream the host
+  abandoned (consumer stalled, vanished, or over a byte cap) counts as
+  finished: a later cancel reports `completed`.
 - **Ownership is enforced, not advisory.** Only the webview that started
   a task can cancel it or grant it stream credit — the supervisor
   rejects other webviews, and the owner is always Tauri's window label,
