@@ -110,8 +110,18 @@ export function download(
       ticker = undefined;
     };
     // A resumable download keeps its partial file for the next attempt.
+    // Cleanup is best-effort and must never throw: it runs inside event
+    // handlers where a throw escapes uncaught or skips the rejection
+    // entirely, and the cleanup error must never replace the real one.
+    // A leftover .part is harmless — the next attempt opens it with "w"
+    // or resumes it.
     const dropPart = () => {
-      if (!resume) rmSync(part, { force: true });
+      if (!resume)
+        try {
+          rmSync(part, { force: true });
+        } catch {
+          /* best-effort cleanup: the download error wins */
+        }
     };
     const fail = (e: Error) => {
       if (settled) return;
@@ -210,10 +220,16 @@ export function download(
             // A slow link should look slow, not dead: one plain line on
             // stderr at most every 10s, nothing at all for a fast download.
             stopTicker();
-            ticker = setInterval(
-              () => (opts?.progress ?? console.error)(progressLine(offset + got, total)),
-              opts?.progressMs ?? DOWNLOAD_PROGRESS_MS,
-            );
+            // Progress is cosmetic: a throwing sink (a closed stderr can
+            // make even console.error throw) loses that tick, never the
+            // download — and it may recover, so the ticker keeps running.
+            ticker = setInterval(() => {
+              try {
+                (opts?.progress ?? console.error)(progressLine(offset + got, total));
+              } catch {
+                /* cosmetic: swallow and keep going */
+              }
+            }, opts?.progressMs ?? DOWNLOAD_PROGRESS_MS);
             ticker.unref();
             r.on("data", (c: Buffer) => {
               got += c.length;
@@ -321,7 +337,14 @@ export async function downloadWithRetry(
       if (!(e instanceof DownloadError && e.retryable)) throw e;
       if (attempt >= attempts) {
         const part = `${to}.part`;
-        const received = existsSync(part) ? statSync(part).size : 0;
+        // The .part can vanish between the failed attempt and this line —
+        // check-then-use would throw a bare ENOENT over the helpful error.
+        let received = 0;
+        try {
+          received = statSync(part).size;
+        } catch {
+          /* gone or unreadable: report 0 bytes received */
+        }
         const size = state.total === undefined ? "unknown" : `${state.total} bytes`;
         throw new DownloadError(
           `could not download ${url} after ${attempts} attempts: received ` +

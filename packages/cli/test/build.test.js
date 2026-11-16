@@ -398,6 +398,197 @@ describe("download", () => {
     assert.ok(!existsSync(`${to}.part`));
     rmSync(dir, { recursive: true });
   });
+
+  // The .part cleanup is best-effort: rmSync can fail (AV lock on Windows,
+  // permissions, a race with another process) and that failure must never
+  // replace the real download error or throw inside an event handler.
+  // A non-empty directory cannot be removed by rmSync without recursive on
+  // any OS, so it stands in for every one of those failure modes.
+  const unremovablePart = (to) => {
+    mkdirSync(`${to}.part`);
+    writeFileSync(join(`${to}.part`, "held"), "x");
+  };
+  const neverSettles = () =>
+    new Promise((_, rej) => setTimeout(() => rej(new Error("download never settled")), 5000));
+
+  test("an unremovable .part: the request error still rejects the promise", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-dl-"));
+    const to = join(dir, "asset.tar.gz");
+    unremovablePart(to);
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      // The request is never answered, so the idle timeout errors it:
+      // fail() runs dropPart inside a timer-driven 'error' emit — a throw
+      // there is an uncaught exception, and rej() never runs.
+      await assert.rejects(
+        Promise.race([
+          download("https://x/a", to, { get: fakeGet(() => {}), timeoutMs: 30 }),
+          neverSettles(),
+        ]),
+        /timed out/, // the real failure, not the cleanup error
+      );
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(uncaught.map(String), []);
+      assert.ok(existsSync(`${to}.part`), "an unremovable .part is left, not fatal");
+    } finally {
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unremovable .part: an early failure cannot leave the promise unsettled", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-dl-"));
+    const to = join(dir, "asset.tar.gz");
+    unremovablePart(to);
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      // A 404 calls fail() inside onResponse's try: a throwing dropPart is
+      // caught there, routed back into fail() — a no-op once settled — so
+      // nothing is left to settle the promise. Silent hang, no crash.
+      await assert.rejects(
+        Promise.race([
+          download("https://x/a", to, { get: fakeGet((u, cb) => cb(response([], { status: 404 }))) }),
+          neverSettles(),
+        ]),
+        /404/,
+      );
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(uncaught.map(String), []);
+    } finally {
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unremovable .part in the deferred close handler keeps the stream error", async () => {
+    // fail() with a live stream removes .part in the 'close' callback.
+    // Holding the stream's fs.close lets the test swap .part for a
+    // non-empty directory deterministically — same seam as the
+    // stale-close test above.
+    const dir = mkdtempSync(join(tmpdir(), "pylair-dl-"));
+    const to = join(dir, "asset.tar.gz");
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const realClose = fsModule.close;
+    let held;
+    fsModule.close = (fd, cb) => {
+      if (held === undefined) held = () => realClose(fd, cb);
+      else realClose(fd, cb);
+    };
+    try {
+      const dropped = Readable.from(
+        (async function* () {
+          yield Buffer.from("first-half");
+          throw new Error("connection reset");
+        })(),
+      );
+      dropped.statusCode = 200;
+      dropped.headers = { "content-length": "32" };
+      const done = download("https://x/a", to, {
+        get: fakeGet((u, cb) => cb(dropped)),
+      }).then(() => null, (e) => e);
+      for (let i = 0; held === undefined; i++) {
+        assert.ok(i < 2000, "fs.close of the stream was never reached");
+        await new Promise((r) => setImmediate(r));
+      }
+      // The fd is still open; .part is now a non-empty directory.
+      rmSync(`${to}.part`);
+      unremovablePart(to);
+      held();
+      const e = await Promise.race([done, neverSettles()]);
+      assert.match(String(e), /reset/, "the stream error must win over the cleanup failure");
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(uncaught.map(String), []);
+    } finally {
+      fsModule.close = realClose;
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unremovable .part in the rename-failure catch keeps the rename error", async () => {
+    // The last dropPart call site: renameSync fails, the catch cleans up,
+    // and a throwing cleanup must not escape the 'close' handler or
+    // replace the rename error that is being rejected.
+    const dir = mkdtempSync(join(tmpdir(), "pylair-dl-"));
+    const to = join(dir, "asset.tar.gz");
+    mkdirSync(to); // renaming the finished .part onto a non-empty dir fails
+    writeFileSync(join(to, "keep"), "x");
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const realClose = fsModule.close;
+    let held;
+    fsModule.close = (fd, cb) => {
+      if (held === undefined) held = () => realClose(fd, cb);
+      else realClose(fd, cb);
+    };
+    try {
+      const done = download("https://x/a", to, {
+        get: fakeGet((u, cb) => cb(response([Buffer.from("ok-body")]))),
+      }).then(() => null, (e) => e);
+      for (let i = 0; held === undefined; i++) {
+        assert.ok(i < 2000, "fs.close of the stream was never reached");
+        await new Promise((r) => setImmediate(r));
+      }
+      rmSync(`${to}.part`);
+      unremovablePart(to);
+      held();
+      const e = await Promise.race([done, neverSettles()]);
+      assert.ok(e instanceof Error);
+      assert.ok(
+        ["EISDIR", "EPERM", "EEXIST", "ENOTEMPTY"].includes(e.code),
+        `expected the rename error, got ${e}`,
+      );
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(uncaught.map(String), []);
+      assert.ok(existsSync(join(to, "keep")), "the existing directory is untouched");
+    } finally {
+      fsModule.close = realClose;
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a throwing progress sink cannot fail or kill the download", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-dl-"));
+    const to = join(dir, "asset.tar.gz");
+    const BODY = Buffer.from(Array.from({ length: 60 }, (_, i) => i));
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const body = new Readable({ read() {} });
+    body.statusCode = 200;
+    body.headers = { "content-length": String(BODY.length) };
+    let ticked = 0;
+    try {
+      const done = download("https://x/a", to, {
+        get: fakeGet((u, cb) => cb(body)),
+        progress: () => {
+          ticked++;
+          throw new Error("sink exploded");
+        },
+        progressMs: 10,
+      });
+      for (let i = 0; ticked === 0 && i < 100; i++)
+        await new Promise((r) => setTimeout(r, 5)); // wall clock: a 10ms tick needs turns, not immediates
+      assert.ok(ticked >= 1, "the progress tick never fired");
+      body.push(BODY);
+      body.push(null);
+      await Promise.race([done, neverSettles()]);
+      assert.deepEqual(readFileSync(to), BODY);
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(uncaught.map(String), []);
+    } finally {
+      process.removeListener("uncaughtException", onUncaught);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("downloadWithRetry", () => {
