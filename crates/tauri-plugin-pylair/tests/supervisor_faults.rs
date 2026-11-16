@@ -314,6 +314,8 @@ async fn pings_survive_data_lane_backpressure() {
     // command-queue or task-count limits first.
     cfg.limits.max_queued_commands = 4096;
     cfg.limits.max_concurrent_tasks = 4096;
+    // About backpressure, not the hello deadline (which has its own tests).
+    cfg.hello_timeout = Duration::from_secs(30);
     let h = spawn_h(spec(FAKE_SLOW_READER_PONGS), cfg, ev);
     wait_state(&h, State::Ready).await;
 
@@ -356,13 +358,19 @@ async fn pings_survive_data_lane_backpressure() {
         "data lane never filled - no backpressure"
     );
     let mut killed = false;
+    // Only events after the first Ready can be a kill under backpressure;
+    // anything before it belongs to starting the runtime.
+    let mut ready_seen = false;
     while let Ok(e) = rx.try_recv() {
         match e {
             RuntimeEvent::StateChanged {
+                to: State::Ready, ..
+            } => ready_seen = true,
+            RuntimeEvent::StateChanged {
                 to: State::Restarting | State::Failed,
                 ..
-            } => killed = true,
-            RuntimeEvent::Stderr(line) if line.contains("wedged") => killed = true,
+            } if ready_seen => killed = true,
+            RuntimeEvent::Stderr(line) if ready_seen && line.contains("wedged") => killed = true,
             _ => {}
         }
     }
@@ -928,6 +936,10 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
     // runner the reader can lag by scheduling alone. Give the transport check
     // a 3s dead-air budget so only a genuinely wedged transport kills.
     cfg.missed_pongs_to_kill = 30;
+    // This test is about a blocked loop, not the hello deadline (which has
+    // its own tests): a loaded machine must not turn a slow interpreter
+    // start into a "restart".
+    cfg.hello_timeout = Duration::from_secs(30);
     // loop_stall_kill stays None — the shipped default.
     let h = spawn_h(real_runtime_spec(), cfg, ev);
     wait_state(&h, State::Ready).await;
@@ -946,8 +958,15 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
     wait_state(&h, State::Ready).await;
     let mut saw_stall_diag = false;
     let mut saw_restart = false;
+    // Events of the START (the informational "still starting" Starting ->
+    // Starting, even a respawn after a missed hello) are not restarts on a
+    // blocked loop: only a state change after the first Ready counts.
+    let mut ready_seen = false;
     while let Ok(e) = rx.try_recv() {
         match e {
+            RuntimeEvent::StateChanged {
+                to: State::Ready, ..
+            } => ready_seen = true,
             RuntimeEvent::StateChanged {
                 to: State::Unresponsive,
                 detail,
@@ -956,7 +975,7 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
             RuntimeEvent::StateChanged {
                 to: State::Restarting | State::Starting | State::Failed,
                 ..
-            } => saw_restart = true,
+            } if ready_seen => saw_restart = true,
             _ => {}
         }
     }
