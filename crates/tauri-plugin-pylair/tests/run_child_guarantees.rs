@@ -1186,6 +1186,57 @@ async fn late_reply_for_an_abandoned_stream_changes_nothing() {
     stop(&h).await;
 }
 
+/// e: abandoned streams follow the same 1024 bound as finished tasks.
+/// Each iteration abandons one stream (consumer dropped, then a chunk) and
+/// the `chunks` call that delivered it finishes normally, so every iteration
+/// adds TWO tombstones, the abandoned stream's first. After 512 iterations
+/// the set holds 1024; the abandonment in iteration 513 hits the bound and
+/// must clear the set before inserting itself. (If that path skipped the
+/// clear, the finish of the same iteration's `chunks` call would clear the
+/// set instead and wipe the abandoned task's tombstone.)
+#[tokio::test]
+async fn abandoned_streams_are_tombstoned_and_the_set_clears_at_1024() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 4;
+    let (h, _rec, _) = ready(json!({}), c).await;
+    let mut first = 0;
+    let mut abandoned = 0;
+    for i in 0..513 {
+        let (task, items) = h
+            .call_stream("hold", json!({}), None, Some(true))
+            .await
+            .unwrap();
+        drop(items);
+        h.call("chunks", json!({"task": task, "n": 1}), None, Some(false))
+            .await
+            .unwrap();
+        if i == 0 {
+            first = task;
+        }
+        if i == 511 {
+            // 512 abandoned + 512 finished = 1024 tombstones, no clear yet.
+            assert_eq!(
+                h.cancel(first, None).await.unwrap(),
+                CancelOutcome::Completed,
+                "1024 tombstones must all still be held"
+            );
+        }
+        abandoned = task;
+    }
+    // Iteration 513's abandonment cleared the set before inserting itself.
+    assert_eq!(
+        h.cancel(first, None).await.unwrap(),
+        CancelOutcome::NotFound
+    );
+    assert_eq!(
+        h.cancel(abandoned, None).await.unwrap(),
+        CancelOutcome::Completed,
+        "the abandonment that hit the bound must keep its own tombstone"
+    );
+    stop(&h).await;
+}
+
 /// e: tombstones belong to one generation: after a crash and restart, the
 /// ids of a finished task and an abandoned stream from the old generation
 /// are `not_found` again ("no such task in this generation").
