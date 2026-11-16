@@ -338,11 +338,19 @@ impl Session<'_> {
             }
             None => {
                 // reader hit EOF: runtime is gone; monitor should confirm
-                let detail = match timeout(Duration::from_secs(5), &mut self.io.exited).await {
+                let waited = timeout(Duration::from_secs(5), &mut self.io.exited).await;
+                let detail = match &waited {
                     Ok(Ok(Ok(status))) => format!("exited {status}"),
                     _ => "runtime gone".into(),
                 };
                 fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
+                // No status within the wait: the runtime closed stdout but may
+                // still be running. Kill and reap it so the next spawn cannot
+                // overlap it (the exit channel is still pending only in this
+                // case; once it has completed it must not be awaited again).
+                if waited.is_err() {
+                    kill_and_reap(&mut self.io).await;
+                }
                 return ControlFlow::Break(ExitCause::Crashed(detail));
             }
         }
