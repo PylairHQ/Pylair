@@ -23,7 +23,7 @@ use super::handle::{limit_err, CancelOutcome, Command, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
 use super::platform_unix::PdeathAnchor;
 use super::spawn::spawn_child;
-use super::stream::{ChunkFail, StreamSink};
+use super::stream::StreamSink;
 use super::wire::{
     cancel_outcome, jitter, mtime, owner_allows, send_ctrl, send_ctrl_flushed, send_frame, Ctrl,
     SendFail,
@@ -453,149 +453,10 @@ impl Supervisor {
             tokio::select! {
                             // --- incoming frame ---
                             msg = session.io.msg_in.recv() => {
-                                match msg {
-                                    Some(Ok(InMsg::Response { id, result, error })) => {
-                                        let out = match (result, error) {
-                                            (_, Some(e)) => Err(e),
-                                            (r, None) => Ok(r.unwrap_or(Value::Null)),
-                                        };
-                                        if let Some(kind) = session.pending.remove(&id) {
-                                            match kind {
-                                                PendingKind::Call(tx) => { let _ = tx.send(out); }
-                                                PendingKind::Stream(sink) => sink.finish(out),
-                                                PendingKind::Cancel { respond } => {
-                                                    let _ = respond.send(cancel_outcome(&out));
-                                                }
-                                            }
-                                        }
-                                        if let Some(task) = session.task_of_call.remove(&id) {
-                                            session.tasks.remove(&task);
-                                            if session.done_tasks.len() >= 1024 {
-                                                session.done_tasks.clear();
-                                            }
-                                            session.done_tasks.insert(task);
-                                        }
-                                    }
-                                    Some(Ok(InMsg::Notification { method, params })) => {
-                                        let p = params.unwrap_or(Value::Null);
-                                        match method.as_str() {
-                                            "pong" => {
-                                                session.pongs_received += 1;
-                                                // Transport is alive. Is the loop SERVING?
-                                                let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
-                                                match classify_pong(stale, session.sup.config.loop_stall_kill) {
-                                                    PongVerdict::StallKill => {
-                                                        session.sup.set_state(State::Unresponsive,
-                                                            format!("event loop blocked for {stale:?}"));
-                                                        fail_all(&mut session.pending, proto::RUNTIME_WEDGED,
-                                                            &format!("the runtime's event loop has been blocked for {stale:?} \
-                                                                      (blocking code inside an async def?)")).await;
-                                                        kill_and_reap(&mut session.io).await;
-                                                        return ExitCause::Crashed(format!("event loop blocked for {stale:?}"));
-                                                    }
-                                                    // Diagnostic only (P1-7): the loop
-                                                    // cannot serve calls right now, but a
-                                                    // long stall is not proof of a wedge.
-                                                    PongVerdict::StallWarn => session.sup.set_state(State::Unresponsive,
-                                                        format!("event loop blocked for {stale:?} (diagnostic)")),
-                                                    PongVerdict::Ready => session.sup.set_state(State::Ready, "pong received"),
-                                                }
-                                            }
-                                            "stream.chunk" => {
-                                                let task = p["task"].as_u64().unwrap_or(0);
-                                                let seq = p["seq"].as_u64().unwrap_or(0);
-                                                let value = p["value"].clone();
-                                                // A chunk with no outstanding credit is
-                                                // a protocol violation (protocol-v1 §3.1):
-                                                // a runtime that cannot count credit
-                                                // cannot be trusted to honour a per-task
-                                                // abort either — same treatment as a
-                                                // malformed frame. Chunks for a task the
-                                                // generation no longer knows are still
-                                                // ignored: they are a plausible race with
-                                                // the producer draining after a finish.
-                                                if session.tasks.get(&task).is_some_and(|m| m.credit == 0) {
-                                                    fail_all(&mut session.pending,
-                                                        proto::PROTOCOL_VIOLATION,
-                                                        "runtime sent stream.chunk with no outstanding credit").await;
-                                                    kill_and_reap(&mut session.io).await;
-                                                    return ExitCause::Crashed(
-                                                        format!("protocol violation: task {task} sent an uncredited stream.chunk"));
-                                                }
-                                                let mut abandoned = None;
-                                                if let Some(meta) = session.tasks.get_mut(&task) {
-                                                    // Each delivered chunk consumed one
-                                                    // credit (RC.8A accounting).
-                                                    meta.credit -= 1;
-                                                    if let Some(PendingKind::Stream(sink)) = session.pending.get(&meta.call_id) {
-                                                        if let Err(why) = sink.chunk(seq, value) {
-                                                            abandoned = Some((meta.call_id, why));
-                                                        }
-                                                    }
-                                                }
-                                                if let Some((call_id, why)) = abandoned {
-                                                    // The consumer stalled or vanished, or a
-                                                    // byte cap tripped. End the stream with a
-                                                    // terminal that cannot be lost, and STOP
-                                                    // the producer instead of leaving it
-                                                    // running unobserved.
-                                                    let (err, note) = match why {
-                                                        ChunkFail::Stalled => (ErrorObj {
-                                                            code: proto::INTERNAL,
-                                                            message: "stream consumer stalled".into(),
-                                                            data: None,
-                                                        }, "stalled"),
-                                                        ChunkFail::Gone => (ErrorObj {
-                                                            code: proto::INTERNAL,
-                                                            message: "stream consumer went away".into(),
-                                                            data: None,
-                                                        }, "went away"),
-                                                        ChunkFail::StreamBytes => (limit_err(
-                                                            "stream_buffer_bytes",
-                                                            session.sup.config.limits.stream_buffer_bytes as u64,
-                                                            "stream consumer buffered past the per-stream byte cap"),
-                                                            "over the byte cap"),
-                                                        ChunkFail::TotalBytes => (limit_err(
-                                                            "stream_buffer_bytes_total",
-                                                            session.sup.config.limits.stream_buffer_bytes_total as u64,
-                                                            "all streams exceeded the shared byte cap"),
-                                                            "over the shared byte cap"),
-                                                    };
-                                                    let _ = session.sup.events.try_send(RuntimeEvent::Stderr(
-                                                        format!("task {task}: stream consumer {note}; cancelling producer")));
-                                                    if let Some(PendingKind::Stream(sink)) = session.pending.remove(&call_id) {
-                                                        sink.finish(Err(err));
-                                                    }
-                                                    session.task_of_call.remove(&call_id);
-                                                    session.tasks.remove(&task);
-                                                    let cid = session.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                                                    let (ack, _) = oneshot::channel();
-                                                    if send_ctrl(&session.io, &proto::request(cid, "cancel",
-                                                        serde_json::json!({"task": task})),
-                                                        session.sup.config.max_frame) {
-                                                        session.pending.insert(cid, PendingKind::Cancel { respond: ack });
-                                                    }
-                                                }
-                                            }
-                                            _ => {} // unknown notifications are ignored (spec §8)
-                                        }
-                                    }
-                                    Some(Err(e)) => {
-                                        fail_all(&mut session.pending, proto::PROTOCOL_VIOLATION, "runtime sent a malformed frame").await;
-                                        kill_and_reap(&mut session.io).await;
-                                        return ExitCause::Crashed(format!("protocol violation: {e}"));
-                                    }
-                                    None => {
-                                        // reader hit EOF: runtime is gone; monitor should confirm
-                                        let detail = match timeout(Duration::from_secs(5), &mut session.io.exited).await {
-                                            Ok(Ok(Ok(status))) => format!("exited {status}"),
-                                            _ => "runtime gone".into(),
-                                        };
-                                        fail_all(&mut session.pending, proto::RUNTIME_CRASHED, &detail).await;
-                                        return ExitCause::Crashed(detail);
-                                    }
+                                if let ControlFlow::Break(cause) = session.on_frame(msg).await {
+                                    return cause;
                                 }
-            }
+                            }
                             // --- app command ---
                             cmd = session.sup.cmd_rx.recv() => {
                                 let Some(cmd) = cmd else {

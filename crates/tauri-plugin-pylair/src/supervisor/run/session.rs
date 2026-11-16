@@ -7,17 +7,22 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::atomic::Ordering;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use serde_json::Value;
+use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::RecvError;
+use tokio::time::timeout;
 
 use super::super::config::{RuntimeEvent, State};
-use super::super::wire::mtime;
+use super::super::handle::limit_err;
+use super::super::stream::ChunkFail;
+use super::super::wire::{cancel_outcome, mtime, send_ctrl};
 use super::{
-    drain_exited_inbox, fail_all, kill_and_reap, ChildIo, ExitCause, PendingKind, Supervisor,
-    TaskMeta,
+    classify_pong, drain_exited_inbox, fail_all, kill_and_reap, ChildIo, ChildReadErr, ExitCause,
+    PendingKind, PongVerdict, Supervisor, TaskMeta,
 };
-use crate::protocol as proto;
+use crate::protocol::{self as proto, ErrorObj, InMsg};
 
 /// The steady-state bookkeeping of one runtime generation (everything
 /// `run_child` used to keep in locals), plus the supervisor and child IO it
@@ -153,5 +158,194 @@ impl Session<'_> {
         .await;
         fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
         ControlFlow::Break(ExitCause::Crashed(detail))
+    }
+
+    pub(super) async fn on_frame(
+        &mut self,
+        msg: Option<Result<InMsg, ChildReadErr>>,
+    ) -> ControlFlow<ExitCause> {
+        match msg {
+            Some(Ok(InMsg::Response { id, result, error })) => {
+                let out = match (result, error) {
+                    (_, Some(e)) => Err(e),
+                    (r, None) => Ok(r.unwrap_or(Value::Null)),
+                };
+                if let Some(kind) = self.pending.remove(&id) {
+                    match kind {
+                        PendingKind::Call(tx) => {
+                            let _ = tx.send(out);
+                        }
+                        PendingKind::Stream(sink) => sink.finish(out),
+                        PendingKind::Cancel { respond } => {
+                            let _ = respond.send(cancel_outcome(&out));
+                        }
+                    }
+                }
+                if let Some(task) = self.task_of_call.remove(&id) {
+                    self.tasks.remove(&task);
+                    if self.done_tasks.len() >= 1024 {
+                        self.done_tasks.clear();
+                    }
+                    self.done_tasks.insert(task);
+                }
+            }
+            Some(Ok(InMsg::Notification { method, params })) => {
+                let p = params.unwrap_or(Value::Null);
+                match method.as_str() {
+                    "pong" => {
+                        self.pongs_received += 1;
+                        // Transport is alive. Is the loop SERVING?
+                        let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
+                        match classify_pong(stale, self.sup.config.loop_stall_kill) {
+                            PongVerdict::StallKill => {
+                                self.sup.set_state(
+                                    State::Unresponsive,
+                                    format!("event loop blocked for {stale:?}"),
+                                );
+                                fail_all(
+                                    &mut self.pending,
+                                    proto::RUNTIME_WEDGED,
+                                    &format!(
+                                        "the runtime's event loop has been blocked for {stale:?} \
+                                                          (blocking code inside an async def?)"
+                                    ),
+                                )
+                                .await;
+                                kill_and_reap(&mut self.io).await;
+                                return ControlFlow::Break(ExitCause::Crashed(format!(
+                                    "event loop blocked for {stale:?}"
+                                )));
+                            }
+                            // Diagnostic only (P1-7): the loop
+                            // cannot serve calls right now, but a
+                            // long stall is not proof of a wedge.
+                            PongVerdict::StallWarn => self.sup.set_state(
+                                State::Unresponsive,
+                                format!("event loop blocked for {stale:?} (diagnostic)"),
+                            ),
+                            PongVerdict::Ready => self.sup.set_state(State::Ready, "pong received"),
+                        }
+                    }
+                    "stream.chunk" => {
+                        let task = p["task"].as_u64().unwrap_or(0);
+                        let seq = p["seq"].as_u64().unwrap_or(0);
+                        let value = p["value"].clone();
+                        // A chunk with no outstanding credit is
+                        // a protocol violation (protocol-v1 §3.1):
+                        // a runtime that cannot count credit
+                        // cannot be trusted to honour a per-task
+                        // abort either — same treatment as a
+                        // malformed frame. Chunks for a task the
+                        // generation no longer knows are still
+                        // ignored: they are a plausible race with
+                        // the producer draining after a finish.
+                        if self.tasks.get(&task).is_some_and(|m| m.credit == 0) {
+                            fail_all(
+                                &mut self.pending,
+                                proto::PROTOCOL_VIOLATION,
+                                "runtime sent stream.chunk with no outstanding credit",
+                            )
+                            .await;
+                            kill_and_reap(&mut self.io).await;
+                            return ControlFlow::Break(ExitCause::Crashed(format!(
+                                "protocol violation: task {task} sent an uncredited stream.chunk"
+                            )));
+                        }
+                        let mut abandoned = None;
+                        if let Some(meta) = self.tasks.get_mut(&task) {
+                            // Each delivered chunk consumed one
+                            // credit (RC.8A accounting).
+                            meta.credit -= 1;
+                            if let Some(PendingKind::Stream(sink)) = self.pending.get(&meta.call_id)
+                            {
+                                if let Err(why) = sink.chunk(seq, value) {
+                                    abandoned = Some((meta.call_id, why));
+                                }
+                            }
+                        }
+                        if let Some((call_id, why)) = abandoned {
+                            // The consumer stalled or vanished, or a
+                            // byte cap tripped. End the stream with a
+                            // terminal that cannot be lost, and STOP
+                            // the producer instead of leaving it
+                            // running unobserved.
+                            let (err, note) = match why {
+                                ChunkFail::Stalled => (
+                                    ErrorObj {
+                                        code: proto::INTERNAL,
+                                        message: "stream consumer stalled".into(),
+                                        data: None,
+                                    },
+                                    "stalled",
+                                ),
+                                ChunkFail::Gone => (
+                                    ErrorObj {
+                                        code: proto::INTERNAL,
+                                        message: "stream consumer went away".into(),
+                                        data: None,
+                                    },
+                                    "went away",
+                                ),
+                                ChunkFail::StreamBytes => (
+                                    limit_err(
+                                        "stream_buffer_bytes",
+                                        self.sup.config.limits.stream_buffer_bytes as u64,
+                                        "stream consumer buffered past the per-stream byte cap",
+                                    ),
+                                    "over the byte cap",
+                                ),
+                                ChunkFail::TotalBytes => (
+                                    limit_err(
+                                        "stream_buffer_bytes_total",
+                                        self.sup.config.limits.stream_buffer_bytes_total as u64,
+                                        "all streams exceeded the shared byte cap",
+                                    ),
+                                    "over the shared byte cap",
+                                ),
+                            };
+                            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                                "task {task}: stream consumer {note}; cancelling producer"
+                            )));
+                            if let Some(PendingKind::Stream(sink)) = self.pending.remove(&call_id) {
+                                sink.finish(Err(err));
+                            }
+                            self.task_of_call.remove(&call_id);
+                            self.tasks.remove(&task);
+                            let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
+                            let (ack, _) = oneshot::channel();
+                            if send_ctrl(
+                                &self.io,
+                                &proto::request(cid, "cancel", serde_json::json!({"task": task})),
+                                self.sup.config.max_frame,
+                            ) {
+                                self.pending
+                                    .insert(cid, PendingKind::Cancel { respond: ack });
+                            }
+                        }
+                    }
+                    _ => {} // unknown notifications are ignored (spec §8)
+                }
+            }
+            Some(Err(e)) => {
+                fail_all(
+                    &mut self.pending,
+                    proto::PROTOCOL_VIOLATION,
+                    "runtime sent a malformed frame",
+                )
+                .await;
+                kill_and_reap(&mut self.io).await;
+                return ControlFlow::Break(ExitCause::Crashed(format!("protocol violation: {e}")));
+            }
+            None => {
+                // reader hit EOF: runtime is gone; monitor should confirm
+                let detail = match timeout(Duration::from_secs(5), &mut self.io.exited).await {
+                    Ok(Ok(Ok(status))) => format!("exited {status}"),
+                    _ => "runtime gone".into(),
+                };
+                fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
+                return ControlFlow::Break(ExitCause::Crashed(detail));
+            }
+        }
+        ControlFlow::Continue(())
     }
 }
