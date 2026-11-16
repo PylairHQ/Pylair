@@ -1751,6 +1751,122 @@ async fn call_stream_field_is_sent_only_when_declared() {
     stop(&h).await;
 }
 
+/// The `max` a limit error reports.
+fn limit_max(e: &ErrorObj) -> u64 {
+    e.data
+        .as_ref()
+        .and_then(|d| d["max"].as_u64())
+        .unwrap_or_else(|| panic!("no max in {e:?}"))
+}
+
+/// h: the `max` of `frame_out_queue` is the real data-lane capacity. With
+/// the runtime not reading and the writer stuck holding a 1 MB frame, the
+/// lane is empty; the number of calls it then accepts before the first limit
+/// error is its capacity, and every site that reports the limit (a plain
+/// call, a stream call whose credit already went out) says that same number.
+#[tokio::test]
+async fn frame_out_queue_limit_reports_the_real_data_lane_capacity() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.limits.max_concurrent_tasks = 512;
+    c.limits.max_queued_commands = 512;
+    let (h, _rec, _) = ready(json!({}), c).await;
+    h.call("stop_reading", json!(8.0), None, Some(false))
+        .await
+        .unwrap();
+    let _blocker = h
+        .call_task(
+            "echo",
+            json!({"pad": "x".repeat(1 << 20)}),
+            None,
+            Some(false),
+        )
+        .unwrap();
+    sleep(Duration::from_millis(500)).await;
+    let mut calls: Vec<_> = (0..100)
+        .map(|i| h.call_task("echo", json!(i), None, Some(false)).unwrap())
+        .collect();
+    sleep(Duration::from_millis(500)).await;
+    let mut accepted = 0u64;
+    let mut reported = None;
+    for ct in calls.iter_mut() {
+        match ct.result.try_recv() {
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => accepted += 1,
+            Ok(Err(e)) => {
+                assert_limit(&e, "frame_out_queue");
+                reported = Some(limit_max(&e));
+            }
+            other => panic!("unexpected call outcome: {other:?}"),
+        }
+    }
+    eprintln!("trace: data lane accepted {accepted} calls, reported max {reported:?}");
+    assert_eq!(
+        reported,
+        Some(accepted),
+        "the reported max must equal what the lane really accepted"
+    );
+    let e = match h.call_stream("hold", json!({}), None, Some(true)).await {
+        Ok(_) => panic!("a stream call on a full data lane was accepted"),
+        Err(e) => e,
+    };
+    assert_limit(&e, "frame_out_queue");
+    assert_eq!(limit_max(&e), accepted);
+    stop(&h).await;
+}
+
+/// h: the `max` of `ctrl_queue` is the real control-lane capacity. With the
+/// writer stuck mid-frame the control lane cannot drain; the grants it
+/// accepts before the first limit error are its capacity, and both sites
+/// that report the limit (a credit grant, a stream call's initial credit)
+/// say that same number.
+#[tokio::test]
+async fn ctrl_queue_limit_reports_the_real_control_lane_capacity() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.initial_stream_credit = 1;
+    c.limits.max_stream_credit = 200;
+    let (h, _rec, _) = ready(json!({}), c).await;
+    let (task, _items) = h
+        .call_stream("hold", json!({}), None, Some(true))
+        .await
+        .unwrap();
+    h.call("stop_reading", json!(5.0), None, Some(false))
+        .await
+        .unwrap();
+    let big = json!({"pad": "x".repeat(1 << 20)});
+    let _flood: Vec<_> = (0..3)
+        .map(|_| h.call_task("echo", big.clone(), None, Some(false)).unwrap())
+        .collect();
+    sleep(Duration::from_millis(500)).await;
+    let mut delivered = 0u64;
+    let full = loop {
+        match h.grant_credit(task, 1, None).await {
+            Ok(()) => {
+                delivered += 1;
+                assert!(delivered <= 64, "the control lane never filled");
+            }
+            Err(e) => break e,
+        }
+    };
+    assert_limit(&full, "ctrl_queue");
+    eprintln!(
+        "trace: control lane accepted {delivered} grants, reported max {}",
+        limit_max(&full)
+    );
+    assert_eq!(
+        limit_max(&full),
+        delivered,
+        "the reported max must equal what the lane really accepted"
+    );
+    let e = match h.call_stream("hold", json!({}), None, Some(true)).await {
+        Ok(_) => panic!("a stream call on a full control lane was accepted"),
+        Err(e) => e,
+    };
+    assert_limit(&e, "ctrl_queue");
+    assert_eq!(limit_max(&e), delivered);
+    stop(&h).await;
+}
+
 /// h: a stream call whose credit went out but whose call frame finds the
 /// data lane full: a frame_out_queue limit error, and the cleanup cancel
 /// for the stranded credit.
