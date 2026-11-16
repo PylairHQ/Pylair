@@ -893,18 +893,10 @@ impl Supervisor {
                             }
                             // --- child exit ---
                             status = &mut session.io.exited => {
-                                let detail = match status {
-                                    Ok(Ok(s)) => format!("exited {s}"),
-                                    Ok(Err(e)) => format!("wait error: {e}"),
-                                    Err(_) => "monitor dropped".into(),
-                                };
-                                // Same last-words delivery as the shutdown path: a dying
-                                // runtime's queued responses resolve their own calls.
-                                drain_exited_inbox(&mut session.io, &mut session.pending, &mut session.tasks,
-                                                   &mut session.task_of_call, &mut session.done_tasks).await;
-                                fail_all(&mut session.pending, proto::RUNTIME_CRASHED, &detail).await;
-                                return ExitCause::Crashed(detail);
-            }
+                                if let ControlFlow::Break(cause) = session.on_child_exit(status).await {
+                                    return cause;
+                                }
+                            }
                         }
         }
     }

@@ -2,14 +2,21 @@
 //! bookkeeping and the methods the `select!` arms call.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
+use tokio::sync::oneshot::error::RecvError;
+
 use super::super::config::{RuntimeEvent, State};
 use super::super::wire::mtime;
-use super::{fail_all, kill_and_reap, ChildIo, ExitCause, PendingKind, Supervisor, TaskMeta};
+use super::{
+    drain_exited_inbox, fail_all, kill_and_reap, ChildIo, ExitCause, PendingKind, Supervisor,
+    TaskMeta,
+};
 use crate::protocol as proto;
 
 /// The steady-state bookkeeping of one runtime generation (everything
@@ -123,5 +130,28 @@ impl Session<'_> {
             return ControlFlow::Break(ExitCause::DevRestart);
         }
         ControlFlow::Continue(())
+    }
+
+    pub(super) async fn on_child_exit(
+        &mut self,
+        status: Result<io::Result<ExitStatus>, RecvError>,
+    ) -> ControlFlow<ExitCause> {
+        let detail = match status {
+            Ok(Ok(s)) => format!("exited {s}"),
+            Ok(Err(e)) => format!("wait error: {e}"),
+            Err(_) => "monitor dropped".into(),
+        };
+        // Same last-words delivery as the shutdown path: a dying
+        // runtime's queued responses resolve their own calls.
+        drain_exited_inbox(
+            &mut self.io,
+            &mut self.pending,
+            &mut self.tasks,
+            &mut self.task_of_call,
+            &mut self.done_tasks,
+        )
+        .await;
+        fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
+        ControlFlow::Break(ExitCause::Crashed(detail))
     }
 }
