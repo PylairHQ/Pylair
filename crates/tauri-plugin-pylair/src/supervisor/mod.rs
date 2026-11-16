@@ -14,7 +14,10 @@
 //! |---|---|
 //! | `config.rs` | `State`, `RuntimeEvent`, `SpawnSpec`, `Limits`, `SupervisorConfig`, the `PYLAIR_*` env knobs, hello-timeout parse and clamp |
 //! | `handle.rs` | `Handle`, the public API (`call`, `call_stream`, `cancel`, `grant_credit`, `shutdown`, ...), the `Command`s it sends, `CallTask`, `CancelOutcome`, `ShutdownOutcome` |
-//! | `run.rs` | `spawn()`, the `Supervisor` actor (`run`, `run_loop`, restart backoff, `park_failed`), `run_child` (one runtime generation), `fail_all`, `drain_exited_inbox`, `kill_and_reap` |
+//! | `run.rs` | `spawn()`, the `Supervisor` actor (`run`, `run_loop`, restart backoff, `park_failed`), `run_child` (one runtime generation: the `select!` loop; its phases live in `run/`), `fail_all`, `drain_exited_inbox`, `kill_and_reap` |
+//! | `run/handshake.rs` | `Supervisor::handshake`: spawn to Ready (hello within the deadline, protocol version check) |
+//! | `run/session.rs` | `Session`, the per-generation bookkeeping, and the `select!` arm handlers `on_frame`, `on_command`, `on_ping_tick`, `on_trigger_tick`, `on_child_exit` |
+//! | `run/session_commands.rs` | the `Command` handlers: `call`, `call_stream`, `cancel`, `grant_credit`, `cancel_owned`, `shutdown` |
 //! | `spawn.rs` | `spawn_child`: the platform spawn path, the stdin writer (control lane first, single ping slot), the stdout reader, the stderr drain |
 //! | `wire.rs` | data-lane and control-lane send helpers (`send_frame`, `send_ctrl`, `send_ctrl_flushed`, `Ctrl`), `owner_allows`, `cancel_outcome`, `jitter`, `mtime` |
 //! | `stream.rs` | `StreamItem`, `StreamRx`, the byte-leased `StreamSink` and `stream_pair` |
@@ -27,7 +30,8 @@
 //!
 //! - Credit lane (pull-based stream flow control, the initial grant sent
 //!   ahead of the call): docs/protocol-v1.md section 3.1. Code: `handle.rs`
-//!   (`grant_credit`), `run.rs` (credit accounting in `run_child`),
+//!   (`grant_credit`), `run/session.rs` and `run/session_commands.rs`
+//!   (credit accounting in `Session::on_frame` and `Session::grant_credit`),
 //!   `stream.rs`.
 //! - Control lane (cancel, credit and shutdown frames overtake data; the
 //!   single-slot ping): docs/protocol-v1.md section 5.1 ("Control frames
@@ -36,10 +40,10 @@
 //! - Cancel outcomes: docs/protocol-v1.md section 3.2 and
 //!   docs/cancellation.md. Code: `handle.rs`, `wire.rs` (`cancel_outcome`).
 //! - Hello timeout: docs/protocol-v1.md section 4, item 3. Code: `config.rs`,
-//!   the handshake phase of `run_child`.
+//!   `run/handshake.rs`.
 //! - Shutdown (completes before it is acknowledged, one shared `grace_ms`
 //!   budget, committed data flushed ahead of `shutdown`): docs/protocol-v1.md
-//!   sections 6 and 7. Code: the `Command::Shutdown` arm of `run_child`,
+//!   sections 6 and 7. Code: `Session::shutdown` (`run/session_commands.rs`),
 //!   `wire.rs` (`send_ctrl_flushed`).
 //! - Job Object and suspended spawn: docs/protocol-v1.md section 6,
 //!   docs/security.md section 7, docs/design/windows-job-object-race.md.
