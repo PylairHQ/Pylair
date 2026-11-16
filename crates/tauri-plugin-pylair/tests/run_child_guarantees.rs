@@ -1848,3 +1848,103 @@ async fn crash_waits_out_the_backoff_before_respawning() {
     );
     stop(&h).await;
 }
+
+/// Canary for the scheduler assumption `Watch` relies on: tasks woken, in
+/// order, within ONE poll of one task are run in that order on a
+/// current_thread runtime (one FIFO local queue). `Watch`'s ordering proof
+/// (see its doc comment) depends on this holding in tokio 1.54.1, the
+/// version this was written against. If this fails after a tokio upgrade,
+/// the five ordering tests no longer prove "callers failed before the kill";
+/// re-derive the proof from runtime/scheduler/current_thread/mod.rs before
+/// touching anything else.
+#[tokio::test(flavor = "current_thread")]
+async fn canary_current_thread_runs_tasks_in_wake_order() {
+    let _children = CHILDREN.read().await;
+    for round in 0..50 {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel::<()>();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel::<()>();
+        let (armed_tx, mut armed_rx) = mpsc::unbounded_channel::<()>();
+        let a = {
+            let (order, armed) = (order.clone(), armed_tx.clone());
+            tokio::spawn(async move {
+                let _ = armed.send(());
+                let _ = rx_a.await;
+                order.lock().unwrap().push('A');
+            })
+        };
+        let b = {
+            let (order, armed) = (order.clone(), armed_tx.clone());
+            tokio::spawn(async move {
+                let _ = armed.send(());
+                let _ = rx_b.await;
+                order.lock().unwrap().push('B');
+            })
+        };
+        armed_rx.recv().await.unwrap();
+        armed_rx.recv().await.unwrap();
+        // Wake A then B inside one poll of one task, as fail_all then
+        // kill_and_reap do inside one poll of the actor.
+        tokio::spawn(async move {
+            let _ = tx_a.send(());
+            let _ = tx_b.send(());
+        })
+        .await
+        .unwrap();
+        a.await.unwrap();
+        b.await.unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!['A', 'B'],
+            "round {round}: tasks woken A then B within one poll did not run A then B. \
+             Watch's ordering proof (the five kill-ordering tests) depends on this \
+             scheduler behaviour, verified against tokio 1.54.1; it no longer holds, so \
+             those tests no longer prove callers are failed before the kill"
+        );
+    }
+}
+
+/// Meta-test: every #[tokio::test] in this file must take `CHILDREN` (read
+/// or write) as its first statement. A test that skips it can leave a child
+/// exiting while an ordering test runs, which on macOS (SIGCHLD-driven
+/// reaper) can wake the monitor ahead of the watcher.
+#[test]
+fn every_tokio_test_takes_the_children_lock() {
+    let src = include_str!("run_child_guarantees.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut checked = 0;
+    let mut bad = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if !l.starts_with("#[tokio::test") {
+            continue;
+        }
+        checked += 1;
+        let name = lines[i + 1..]
+            .iter()
+            .find(|l| l.starts_with("async fn "))
+            .copied()
+            .unwrap_or("?");
+        // The first statement of the body is the line after `async fn`.
+        let fn_at = lines[i + 1..]
+            .iter()
+            .position(|l| l.starts_with("async fn "))
+            .map(|p| i + 1 + p);
+        let first = fn_at.and_then(|f| lines.get(f + 1)).map(|l| l.trim());
+        let ok = matches!(
+            first,
+            Some("let _children = CHILDREN.read().await;")
+                | Some("let _children = CHILDREN.write().await;")
+        );
+        if !ok {
+            bad.push(name.to_string());
+        }
+    }
+    assert!(
+        checked >= 38,
+        "found only {checked} #[tokio::test] attributes"
+    );
+    assert!(
+        bad.is_empty(),
+        "these #[tokio::test]s do not start with `let _children = CHILDREN.read()/write().await;`: {bad:?}"
+    );
+}
