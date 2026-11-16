@@ -511,6 +511,31 @@ fn describe_survivor(pid: u32, start: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Failure message of the isolated-worker orphan test: which of the two
+/// watched processes is still alive (runtime, worker, or both), with each
+/// pid and its final liveness. Only called once the test is already failing.
+fn orphan_report(rt: &(u32, String), wk: &(u32, String)) -> String {
+    let (rt_alive, wk_alive) = (alive_since(rt.0, &rt.1), alive_since(wk.0, &wk.1));
+    let who = match (rt_alive, wk_alive) {
+        (true, true) => "BOTH the runtime and the worker survived",
+        (true, false) => "the RUNTIME survived (the worker is gone)",
+        (false, true) => "the WORKER survived (the runtime is gone)",
+        (false, false) => "neither survived (both exited just after the deadline check)",
+    };
+    let line = |name: &str, p: &(u32, String), alive: bool| {
+        if alive {
+            format!("{name}: {}", describe_survivor(p.0, &p.1))
+        } else {
+            format!("{name}: pid {} gone", p.0)
+        }
+    };
+    format!(
+        "after the host's abrupt kill, still not cleaned up at the 15s deadline: {who}; {}; {}",
+        line("runtime", rt, rt_alive),
+        line("worker", wk, wk_alive)
+    )
+}
+
 /// Abrupt host kill — SIGKILL on unix, taskkill /F on Windows. Deliberately
 /// NOT /T on Windows: if we killed the tree ourselves the Job Object test
 /// would prove nothing — the kernel must clean up the descendants.
@@ -731,8 +756,8 @@ async fn host_sigkill_does_not_orphan_isolated_worker() {
     while alive_since(rt.0, &rt.1) || alive_since(wk.0, &wk.1) {
         assert!(
             std::time::Instant::now() < deadline,
-            "worker {worker_pid} survived after runtime {runtime_pid} exited — \
-             an unreaped isolated worker is an orphan"
+            "{}",
+            orphan_report(&rt, &wk)
         );
         std::thread::sleep(Duration::from_millis(200));
     }
