@@ -37,6 +37,7 @@ wrap options:
                         port Pylair picks. Everything after --cmd is the command.
   --source <dir>        Directory holding the app (default: the entry's, else app)
   --dir <path>          Project directory (default: cwd)
+  --local <repo>        Scaffold from a Pylair checkout (needed until wrap ships)
   Needs a dependency manifest (pyproject.toml, ideally with uv.lock). A bare
   app.py gets an error that offers \`uv init\`; imports are never guessed.
 
