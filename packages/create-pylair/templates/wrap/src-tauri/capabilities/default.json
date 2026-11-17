@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The local starting and restarting pages. No `remote` urls: the wrapped web page, a remote origin, is granted no IPC at all.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "pylair:default",
+    "pylair:allow-python-retry",
+    "core:event:deny-emit",
+    "core:event:deny-emit-to"
+  ]
+}

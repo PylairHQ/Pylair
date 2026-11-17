@@ -45,6 +45,15 @@ import { fetchPython, stageEnv } from "./build/python.js";
 import { adHocSign } from "./build/sign.js";
 import { stageSource } from "./build/source.js";
 import { isWin, run } from "./build/util.js";
+import { wrapWarnings } from "./wrapconfig.js";
+import {
+  ROOT_SOURCE_EXCLUDES,
+  STAGED_APP,
+  runSmokeImports,
+  smokeImports,
+  sourceIsRoot,
+  writeRuntimeFile,
+} from "./wrapbuild.js";
 
 export { compileBytecode, PYC_INVALIDATION_MODE } from "./build/bytecode.js";
 export {
@@ -66,6 +75,11 @@ export interface BuildOptions {
   tauriArgs?: string[];
   /** Skip the interpreter fetch (reuse staged resources/python). */
   skipFetch?: boolean;
+  /** Stage and verify everything (interpreter, locked env, source, prune,
+   * bytecode, the import check) but stop before `tauri build`: no installer,
+   * no signing. What CI and `pylair build --stage-only` use to prove a
+   * project builds without paying for a native bundle. */
+  stageOnly?: boolean;
 }
 
 export async function build(opts: BuildOptions): Promise<void> {
@@ -75,6 +89,8 @@ export async function build(opts: BuildOptions): Promise<void> {
   const tconf = loadTauriConfig(appDir);
 
   const cfg = loadConfig(appDir);
+  const wrap = cfg.mode === "wrap" ? cfg.wrap! : undefined;
+  if (wrap) for (const w of wrapWarnings(wrap)) console.warn(`warning: ${w}`);
 
   // Capability scopes are checked first: a bad `allow: []` or a half-scoped
   // window is a configuration error, not worth a Python download to find out.
@@ -96,10 +112,23 @@ export async function build(opts: BuildOptions): Promise<void> {
   stageNotices(resources, fileURLToPath(new URL("..", import.meta.url)));
 
   // Stage app source so resources/ mirrors the installed layout.
+  // Wrap mode stages the app as `app/` whatever the source dir is called, so
+  // tauri.conf.json's resource mapping never changes with `source`.
+  const staged = wrap ? STAGED_APP : cfg.source;
   const srcDir = join(appDir, cfg.source);
   if (!existsSync(srcDir)) throw new Error(`source dir ${srcDir} missing`);
-  rmSync(join(resources, cfg.source), { recursive: true, force: true });
-  stageSource(srcDir, join(resources, cfg.source), cfg.include);
+  if (wrap?.entry && !existsSync(join(srcDir, wrap.entry)))
+    throw new Error(`[tool.pylair.wrap] entry ${wrap.entry} not found under ${srcDir}`);
+  rmSync(join(resources, staged), { recursive: true, force: true });
+  stageSource(
+    srcDir,
+    join(resources, staged),
+    cfg.include,
+    console.warn,
+    wrap && sourceIsRoot(appDir, cfg.source) ? ROOT_SOURCE_EXCLUDES : [],
+  );
+  // What the plugin reads at startup: the launcher command and the window options.
+  if (wrap) writeRuntimeFile(join(resources, "pylair-wrap.json"), cfg, STAGED_APP);
 
   const res = prune(resources, [...DEFAULT_PRUNE, ...cfg.prune]);
   const mib = (res.bytesFreed / 2 ** 20).toFixed(1);
@@ -107,40 +136,62 @@ export async function build(opts: BuildOptions): Promise<void> {
 
   // Precompile what survives the prune — read-only installs cannot
   // write pycs at launch, so the bundle ships them ready-made.
-  compileBytecode(resources, bundled, ["site-packages", cfg.source]);
+  compileBytecode(resources, bundled, ["site-packages", staged]);
 
   // Over-pruning must fail at build time, not on the user's machine:
-  // import the app module with the staged tree exactly as the bundle sees it.
+  // import the app (bridge) or the framework (wrap) with the staged tree
+  // exactly as the bundle sees it.
   const sep = isWin ? ";" : ":";
-  // The import root is the PARENT of the staged source dir ("backend.app"
-  // resolves from resources/, not resources/backend/). Run from an unrelated
-  // cwd so the project checkout can't satisfy the import by accident.
-  // PYTHONDONTWRITEBYTECODE: the check exercises the compiled pycs rather
-  // than writing a second, non-deterministic set into the staged tree.
-  const check = spawnSync(
-    bundled,
-    ["-c", `import ${cfg.appModule}; print("staged import ok")`],
-    {
-      encoding: "utf-8",
-      cwd: tmpdir(),
-      env: {
-        ...process.env,
-        PYTHONPATH: `${importRoot(resources, cfg.source)}${sep}${join(resources, "site-packages")}`,
+  if (wrap) {
+    // The server runs in the staged app dir; the framework (gradio,
+    // streamlit, or the `-m` module of a command) must import with the
+    // bundled interpreter after the prune.
+    const failure = runSmokeImports(
+      bundled,
+      smokeImports(wrap),
+      {
+        PYTHONPATH: `${join(resources, STAGED_APP)}${sep}${join(resources, "site-packages")}`,
         PYTHONNOUSERSITE: "1",
         PYTHONDONTWRITEBYTECODE: "1",
       },
-    },
-  );
-  if (check.status !== 0)
-    throw new Error(
-      `staged bundle failed the import check (${cfg.appModule}) — ` +
-        `pruning or missing deps? ${check.stderr?.trim()}`,
+      tmpdir(),
     );
+    if (failure)
+      throw new Error(
+        `staged bundle failed the framework import check (${smokeImports(wrap).join(", ")}): ` +
+          `pruning or missing deps? ${failure}`,
+      );
+  } else {
+    // The import root is the PARENT of the staged source dir ("backend.app"
+    // resolves from resources/, not resources/backend/). Run from an unrelated
+    // cwd so the project checkout can't satisfy the import by accident.
+    // PYTHONDONTWRITEBYTECODE: the check exercises the compiled pycs rather
+    // than writing a second, non-deterministic set into the staged tree.
+    const check = spawnSync(
+      bundled,
+      ["-c", `import ${cfg.appModule}; print("staged import ok")`],
+      {
+        encoding: "utf-8",
+        cwd: tmpdir(),
+        env: {
+          ...process.env,
+          PYTHONPATH: `${importRoot(resources, cfg.source)}${sep}${join(resources, "site-packages")}`,
+          PYTHONNOUSERSITE: "1",
+          PYTHONDONTWRITEBYTECODE: "1",
+        },
+      },
+    );
+    if (check.status !== 0)
+      throw new Error(
+        `staged bundle failed the import check (${cfg.appModule}): ` +
+          `pruning or missing deps? ${check.stderr?.trim()}`,
+      );
+  }
 
   // With the app importable, ask it which functions it exposes and warn
   // about scope patterns that match none. Best effort: a failure here only
   // skips the warning, it never fails the build.
-  const caps = loadCapabilities(appDir).capabilities;
+  const caps = wrap ? [] : loadCapabilities(appDir).capabilities;
   if (caps.length) {
     try {
       const m = loadManifest({
@@ -160,6 +211,11 @@ export async function build(opts: BuildOptions): Promise<void> {
         `note: skipped the capability pattern check (could not list exposed functions: ${(e as Error).message.split("\n")[0]})`,
       );
     }
+  }
+
+  if (opts.stageOnly) {
+    console.log("stage-only: resources staged and verified; tauri build skipped");
+    return;
   }
 
   // ── tauri build ────────────────────────────────────────────────────

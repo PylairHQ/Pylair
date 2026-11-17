@@ -37,6 +37,7 @@ export const DEFAULT_PRUNE = [
   "site-packages/**/*.dist-info/RECORD.jws",
   // stray caches anywhere
   "backend/**/__pycache__",
+  "app/**/__pycache__", // wrap mode stages the app as app/
 ];
 
 export interface PruneResult {

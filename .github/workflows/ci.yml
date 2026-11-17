@@ -66,6 +66,11 @@ jobs:
           # cli codegen tests spawn `python -m pylair.codegen`;
           # pylair needs 3.12+ (PEP 695 syntax)
           python-version: "3.12"
+      # `pylair build --stage-only` on a scaffolded wrap app (cli tests) locks
+      # with uv and stages the bundled interpreter; it skips itself without uv.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm typecheck

@@ -12,6 +12,15 @@
     "access": "public"
   },
   "type": "module",
+  "main": "./dist/scaffold.js",
+  "types": "./dist/scaffold.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/scaffold.d.ts",
+      "import": "./dist/scaffold.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "create-pylair": "dist/index.js"
   },
