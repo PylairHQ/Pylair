@@ -72,7 +72,7 @@ wheels = [
 
 [[package]]
 name = "pylair"
-version = "0.1.0rc10"
+version = "0.1.0rc11"
 source = { directory = "../../python/pylair" }
 
 [package.metadata]
@@ -81,6 +81,10 @@ source = { directory = "../../python/pylair" }
 dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.8" },
+]
+wrap = [
+    { name = "gradio", specifier = ">=5,<6" },
+    { name = "streamlit", specifier = ">=1,<2" },
 ]
 
 [[package]]

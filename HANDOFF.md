@@ -1,10 +1,9 @@
 # Handoff
 
-Last rewritten 2026-11-17, against `main` at `9ffffab` (after PR 89).
-The previous contents were the rc.6 CI-fix handoff; that work landed long
-ago and the document had gone stale. What is kept here is what is still
-true: where the rc.20 train stands, the release order, and the standing
-rules that AGENTS.md points at. Anything not listed here is in git history.
+Last rewritten 2026-11-17, updated for the rc.21 train against `main`
+at `db4a123` (after PR 97). What is kept here is what is still true:
+where each train stands, the release order, and the standing rules that
+AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
 
@@ -18,30 +17,30 @@ rc.19 is published: npm trio at `0.1.0-rc.19` (npm-only; the crate and
 PyPI were unchanged). It shipped the bundled-CPython bump from PR 84:
 python-build-standalone `20261110`, CPython `3.12.16` / `3.13.18`.
 
-rc.20 train is in progress: the crate `0.1.0-rc.15` is published on
-crates.io (PR 89 bumped it), and this pins PR moves everything else. It
-is a full train (same shape as PRs 82/83), changing the crate for
-per-function permissions (PR 88): the crate gains `fn_scope` (command
-scopes on `python_call` and `python_call_stream`, `PERMISSION_DENIED`
-`-32050`); `@pylair/client` gains `PermissionDeniedError` and the
-self-test's `fn-permission` check; `@pylair/cli` gains the capability
-checks in `pylair build` and `pylair doctor`. Versions in the repo
-(checked in the files, not against the registries) and the state of each:
+rc.20 is published: the crate `0.1.0-rc.15` on crates.io and the npm
+trio at `0.1.0-rc.20` (`pylair` and `pylair-ollama` unchanged on PyPI).
+It shipped per-function permissions (PR 88): `fn_scope` command scopes,
+`PermissionDeniedError`, and the `build`/`doctor` capability checks.
 
-| Package | Version in the repo | rc.20 state |
+rc.21 train is in progress, the wrap-mode release (W1 to W4, PRs 92 to
+96). This PR bumps only the things that must publish first: the crate
+to `0.1.0-rc.16` and `pylair` to `0.1.0-rc.11` (dashed in pyproject,
+the form `release.yml` expects; `pylair-ollama` is unchanged at
+`0.1.0-rc.3`). The pins PR follows: npm trio `0.1.0-rc.21`, scaffold
+pins, the default template `Cargo.lock` regenerated against the
+published crate, a `Cargo.lock` for the wrap template, and
+`WRAP_IN_PUBLISHED_VERSIONS` flipped to true.
+
+| Package | Version in the repo | rc.21 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.15` | published |
-| `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, skipped (Python unchanged) |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.16` | next to publish |
+| `pylair` (PyPI) | `0.1.0-rc.11` | next to publish |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.20` | next to publish |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.20` | pins PR bumps to `0.1.0-rc.21` |
 
-Scaffold pins for rc.20: `tauri-plugin-pylair = "=0.1.0-rc.15"`,
-`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.20`;
-the template `Cargo.lock` carries the crates.io checksum for rc.15 (the
-plugin entry is the only line that moved). Remaining order: pack-mode
-acceptance green on the pins commit, then the npm trio under `--tag
-next`, then registry acceptance with `source=registry`. PyPI (step 2
-below) is skipped for rc.20.
+Remaining order for rc.21: crate then PyPI `pylair` publishes, then the
+pins PR, pack-mode acceptance green on it, the npm trio under `--tag
+next`, then registry acceptance with `source=registry`.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
@@ -126,9 +125,10 @@ Before the 0.1.0 train can ship wrap mode:
 
 - `create-pylair --mode wrap` and `pylair wrap` refuse to run without
   `--local` until `WRAP_IN_PUBLISHED_VERSIONS` in
-  `packages/create-pylair/src/scaffold.ts` is flipped to true, because the
-  published crate (rc.15) and `pylair` (rc10) have no wrap mode. Flip it in
-  the same commit that bumps the pins.
+  `packages/create-pylair/src/scaffold.ts` is flipped to true: every
+  published version before rc.21 lacks wrap mode. The rc.21 publishes
+  give the scaffolded packages wrap; flip it in the pins-PR commit that
+  bumps the pins.
 - The crate gained a dependency (`rfd`, Save As dialog), so the default
   template's `Cargo.lock` regenerates in the usual post-publish step, and the
   wrap template ships no `Cargo.lock` yet: generate and commit one after the
