@@ -40,6 +40,16 @@ def note(line):  # stderr is drained and forwarded by the supervisor
     sys.stderr.flush()
 
 
+def append_file(env_var, line):
+    """Automation hook: write `line` to the file named by env_var, if set.
+    The headless driver can't see a GUI app's stderr on Windows, so the
+    READY url and the child pids go to files instead."""
+    path = os.environ.get(env_var)
+    if path:
+        with open(path, "a") as fh:
+            fh.write(line + "\n")
+
+
 def free_port():
     for _ in range(5):
         s = socket.socket()
@@ -107,9 +117,13 @@ def main():
         proc = subprocess.Popen(cmd, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     url = f"http://127.0.0.1:{port}"
     note(f"launcher: spawning {' '.join(cmd)} on {url}")
+    append_file("W0_PID_FILE", f"launcher {os.getpid()}")
+    append_file("W0_PID_FILE", f"server {proc.pid}")
 
     ready = wait_ready(url + "/", proc)
     note(("READY " if ready else "READY-FAIL ") + url)
+    if ready:
+        append_file("W0_READY_FILE", url)
     if not ready:
         kill_tree(proc)
         sys.exit(3)

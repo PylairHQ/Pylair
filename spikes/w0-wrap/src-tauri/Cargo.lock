@@ -3313,9 +3313,10 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.0.0"
+version = "0.1.0-rc.15"
 dependencies = [
  "async-trait",
+ "dunce",
  "libc",
  "serde",
  "serde_json",

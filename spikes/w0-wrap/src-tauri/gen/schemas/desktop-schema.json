@@ -2253,6 +2253,12 @@
           "markdownDescription": "Enables the python_retry command without any pre-configured scope."
         },
         {
+          "description": "Enables the python_selftest_b_report command without any pre-configured scope.",
+          "type": "string",
+          "const": "pylair:allow-python-selftest-b-report",
+          "markdownDescription": "Enables the python_selftest_b_report command without any pre-configured scope."
+        },
+        {
           "description": "Enables the python_selftest_report command without any pre-configured scope.",
           "type": "string",
           "const": "pylair:allow-python-selftest-report",
@@ -2299,6 +2305,12 @@
           "type": "string",
           "const": "pylair:deny-python-retry",
           "markdownDescription": "Denies the python_retry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_selftest_b_report command without any pre-configured scope.",
+          "type": "string",
+          "const": "pylair:deny-python-selftest-b-report",
+          "markdownDescription": "Denies the python_selftest_b_report command without any pre-configured scope."
         },
         {
           "description": "Denies the python_selftest_report command without any pre-configured scope.",
