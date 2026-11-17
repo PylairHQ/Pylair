@@ -15,12 +15,15 @@ ORPHAN_FILE = os.environ.get(
 
 
 def spawn_orphan():
-    # Grandchild: ignores SIGTERM, lives forever, writes a heartbeat file
-    # so the test can prove it survived (or didn't).
+    # Grandchild: ignores SIGTERM (no-op on Windows — TerminateProcess
+    # cannot be ignored, which is exactly what a Job Object uses), lives
+    # forever, writes a heartbeat file whose first line names its pid so
+    # the test can check the same process is gone, not just stopped.
     code = (
         "import signal,time,os\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"f=open({ORPHAN_FILE!r},'w')\n"
+        "f.write(f'pid={os.getpid()}\\n'); f.flush()\n"
         "while True: f.write('x'); f.flush(); time.sleep(0.5)\n"
     )
     subprocess.Popen([sys.executable, "-c", code])

@@ -6,12 +6,15 @@ download, an SSE stream, and an external link.
 
 import json
 import os
+import tempfile
 
 from fastapi import FastAPI, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 app = FastAPI()
 MARKER = "W0-WRAP-MARKER"
+IPC_FILE = os.path.join(tempfile.gettempdir(), "w0-ipc.json")
+DOWNLOAD_FILE = os.path.join(tempfile.gettempdir(), "w0-download.txt")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -62,7 +65,7 @@ es.onmessage = (e) => document.getElementById("log").textContent += e.data + " "
 def ipc_probe(p: dict):
     # Lands in stderr → forwarded by the supervisor → visible in app logs.
     print("IPC-PROBE " + json.dumps(p), flush=True)
-    with open("/tmp/w0-ipc.json", "w") as fh:
+    with open(IPC_FILE, "w") as fh:
         json.dump(p, fh, indent=2)
     return {"ok": True}
 
@@ -75,10 +78,9 @@ async def upload(f: UploadFile):
 
 @app.get("/download")
 def download():
-    p = "/tmp/w0-download.txt"
-    with open(p, "w") as fh:
+    with open(DOWNLOAD_FILE, "w") as fh:
         fh.write(MARKER)
-    return FileResponse(p, filename="w0-download.txt")
+    return FileResponse(DOWNLOAD_FILE, filename="w0-download.txt")
 
 
 @app.get("/stream")
