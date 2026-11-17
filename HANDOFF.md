@@ -3,7 +3,7 @@
 Last rewritten 2026-11-14, against `main` at `a458e05` (after PR 57).
 The previous contents were the rc.6 CI-fix handoff; that work landed long
 ago and the document had gone stale. What is kept here is what is still
-true: where the rc.18 train stands, the release order, and the standing
+true: where the rc.19 train stands, the release order, and the standing
 rules that AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
@@ -11,22 +11,26 @@ rules that AGENTS.md points at. Anything not listed here is in git history.
 rc.17 is published: the crate at `0.1.0-rc.13`, `pylair` `0.1.0rc10`,
 `pylair-ollama` `0.1.0rc3` and the npm trio at `0.1.0-rc.17`.
 
-rc.18 is in progress. Steps 1 and 3 are done: the crate `0.1.0-rc.14` is
-published on crates.io, and the pins PR has regenerated the template
-`Cargo.lock` against it. Next: pack-mode acceptance on the pins commit,
-then the npm trio at `0.1.0-rc.18`, then registry acceptance. Versions in
-the repo (checked in the files, not against the registries) and the state
-of each:
+rc.18 is published: the crate `0.1.0-rc.14` on crates.io and the npm
+trio at `0.1.0-rc.18`.
 
-| Package | Version in the repo | rc.18 state |
+rc.19 is in progress and is npm-only. The crate `0.1.0-rc.14` and the
+PyPI packages are unchanged, so there is no crate publish, no PyPI
+publish and no template `Cargo.lock` regeneration; steps 1 to 3 below
+are skipped for rc.19. rc.19 exists to ship the bundled-CPython bump
+from PR 84: python-build-standalone `20261110`, CPython `3.12.16` /
+`3.13.18`. Versions in the repo (checked in the files, not against the
+registries) and the state of each:
+
+| Package | Version in the repo | rc.19 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.14` | published |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.14` | published, unchanged |
 | `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, not released |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, not released |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.18` | to publish after the pins PR merges |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.19` | to publish |
 
-Scaffold pins for rc.18: `tauri-plugin-pylair = "=0.1.0-rc.14"`,
-`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.18`.
+Scaffold pins for rc.19: `tauri-plugin-pylair = "=0.1.0-rc.14"`,
+`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.19`.
 
 Merged since rc.17 (d7daaaf):
 
@@ -49,12 +53,15 @@ Merged since rc.17 (d7daaaf):
   `0.1.0-rc.17` — the tail of the rc.17 train, landed after the bump.
 - PR 82, rc.18 version bump: crate `0.1.0-rc.14`; the reference app's
   `uv.lock` needed no refresh (`uv lock --check` clean).
-- rc.18 pins: scaffold pins, template `Cargo.lock` against the published
-  crate (plugin entry only), npm trio at `0.1.0-rc.18`, README and npm
-  README install lines.
+- PR 83, rc.18 pins: scaffold pins, template `Cargo.lock` against the
+  published crate (plugin entry only), npm trio at `0.1.0-rc.18`, README
+  and npm README install lines.
+- PR 84: bundled CPython bump to python-build-standalone `20261110`
+  (`3.12.16` / `3.13.18`); RUSTSEC-2024-0370 disclosed in
+  `docs/security.md`; release checklist now checks the PBS pin.
 
 `python/` and `integrations/` have not changed since rc.16, so step 2
-below is skipped for rc.18.
+below is skipped for rc.19.
 
 ## Release order
 
