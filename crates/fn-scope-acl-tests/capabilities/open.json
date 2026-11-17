@@ -1,0 +1,10 @@
+{
+  "identifier": "open",
+  "description": "no scope entries at all",
+  "windows": [
+    "open"
+  ],
+  "permissions": [
+    "pylair:default"
+  ]
+}

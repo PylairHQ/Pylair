@@ -1,0 +1,17 @@
+{
+  "identifier": "deny",
+  "description": "set-level deny entry: both call commands share one scope",
+  "windows": [
+    "deny"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:default",
+      "deny": [
+        {
+          "name": "sp*"
+        }
+      ]
+    }
+  ]
+}

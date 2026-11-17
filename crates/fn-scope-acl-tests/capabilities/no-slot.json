@@ -1,0 +1,21 @@
+{
+  "identifier": "no-slot",
+  "description": "denied calls take no slot (window no-slot); window other is the control",
+  "windows": [
+    "no-slot",
+    "other"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:default",
+      "deny": [
+        {
+          "name": "sp*"
+        },
+        {
+          "name": "counter"
+        }
+      ]
+    }
+  ]
+}

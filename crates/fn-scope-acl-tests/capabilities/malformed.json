@@ -1,0 +1,17 @@
+{
+  "identifier": "malformed",
+  "description": "a typo in a scope entry key must fail closed",
+  "windows": [
+    "malformed"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:default",
+      "deny": [
+        {
+          "nmae": "add"
+        }
+      ]
+    }
+  ]
+}

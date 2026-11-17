@@ -1,0 +1,22 @@
+{
+  "identifier": "deny-wins",
+  "description": "allow sp*, deny spy: deny wins",
+  "windows": [
+    "deny-wins"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:default",
+      "allow": [
+        {
+          "name": "sp*"
+        }
+      ],
+      "deny": [
+        {
+          "name": "spy"
+        }
+      ]
+    }
+  ]
+}

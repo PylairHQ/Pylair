@@ -1,0 +1,26 @@
+{
+  "identifier": "win-x",
+  "description": "window win-x: allow add",
+  "windows": [
+    "win-x"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    },
+    "pylair:allow-python-state"
+  ]
+}
