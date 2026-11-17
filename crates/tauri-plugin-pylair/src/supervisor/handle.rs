@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
-use super::config::{Limits, State};
+use super::config::{Limits, RuntimeKind, State};
 use super::stream::{stream_pair, StreamRx, StreamSink};
 use crate::protocol::{self as proto, ErrorObj};
 
@@ -120,6 +120,8 @@ pub struct CallTask {
 pub struct Handle {
     pub(super) cmd: mpsc::Sender<Command>,
     pub(super) state: watch::Receiver<State>,
+    pub(super) ready_url: watch::Receiver<Option<String>>,
+    pub(super) kind: RuntimeKind,
     pub(super) stream_buffer: usize,
     pub(super) cancel_timeout: Duration,
     /// Shared with the actor: total stream bytes buffered for ALL
@@ -143,6 +145,24 @@ impl Handle {
 
     pub fn state(&self) -> State {
         *self.state.borrow()
+    }
+
+    /// What the supervised child is (`Bridge` unless configured `Web`).
+    pub fn kind(&self) -> RuntimeKind {
+        self.kind
+    }
+
+    /// The validated url the wrapped web server answers at, while the
+    /// current generation is `Ready` or `Unresponsive` (`Web` kind only;
+    /// always `None` for the bridge kind). Cleared the moment the
+    /// generation ends: a restart is a new port, so never cache it.
+    pub fn ready_url(&self) -> Option<String> {
+        self.ready_url.borrow().clone()
+    }
+
+    /// Subscribe to changes of [`Handle::ready_url`].
+    pub fn subscribe_ready_url(&self) -> watch::Receiver<Option<String>> {
+        self.ready_url.clone()
     }
 
     /// Subscribe to state changes (UI lifecycle events).

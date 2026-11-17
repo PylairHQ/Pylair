@@ -21,6 +21,17 @@ pub enum State {
     Stopped,
 }
 
+/// What the supervised child is (docs/protocol-v1.md section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeKind {
+    /// The bridge runtime: `python -m pylair <app>`. Ready on `hello`.
+    #[default]
+    Bridge,
+    /// Wrap mode: `python -m pylair.wrap`, which supervises a web server.
+    /// Ready on `ready {url}`, not on `hello`.
+    Web,
+}
+
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     StateChanged {
@@ -150,6 +161,27 @@ pub(super) fn clamp_hello_timeout_ms(ms: u64) -> (u64, Option<String>) {
     }
 }
 
+/// `ready_timeout` default and supported window. A web server that loads a
+/// model at import time can take minutes before it answers a request.
+const READY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
+const READY_TIMEOUT_MIN_MS: u64 = 1_000;
+const READY_TIMEOUT_MAX_MS: u64 = 3_600_000;
+
+/// Clamp a ready timeout into the supported window; the warning names both
+/// the bad value and the range it was clamped into.
+pub(super) fn clamp_ready_timeout_ms(ms: u64) -> (u64, Option<String>) {
+    if (READY_TIMEOUT_MIN_MS..=READY_TIMEOUT_MAX_MS).contains(&ms) {
+        (ms, None)
+    } else {
+        (
+            ms.clamp(READY_TIMEOUT_MIN_MS, READY_TIMEOUT_MAX_MS),
+            Some(format!(
+                "ready_timeout={ms}ms outside {READY_TIMEOUT_MIN_MS}..={READY_TIMEOUT_MAX_MS} - clamped"
+            )),
+        )
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -266,8 +298,15 @@ impl Limits {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SupervisorConfig {
+    /// What the child is. `Bridge` (default) is ready on `hello`; `Web` is
+    /// ready on `ready {url}` (protocol-v1 section 4.1).
+    pub kind: RuntimeKind,
     /// Deadline for the runtime's `hello` after spawn.
     pub hello_timeout: Duration,
+    /// `Web` only: deadline for `ready {url}` after `hello`. Default 120s,
+    /// clamped to 1s..=1h at spawn. Separate from `hello_timeout` because a
+    /// server that loads a model at import time legitimately takes minutes.
+    pub ready_timeout: Duration,
     /// How often we ping while Ready.
     pub ping_interval: Duration,
     /// Pongs outstanding before we declare the runtime wedged and kill it.
@@ -309,6 +348,8 @@ pub struct SupervisorConfig {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
+            kind: RuntimeKind::Bridge,
+            ready_timeout: READY_TIMEOUT_DEFAULT,
             hello_timeout: Duration::from_millis(
                 parse_hello_timeout_ms(std::env::var("PYLAIR_HELLO_TIMEOUT_MS").ok()).0,
             ),

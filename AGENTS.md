@@ -21,7 +21,7 @@ Naming lives in `product.json` — read it in tooling, never hard-code.
 | Path | What |
 |---|---|
 | `crates/tauri-plugin-pylair` | Rust plugin: supervisor, stdio protocol, Tauri commands + permissions |
-| `python/pylair` | `pylair` PyPI package: `@expose`, protocol server, task runner, workers |
+| `python/pylair` | `pylair` PyPI package: `@expose`, protocol server, task runner, workers, and the wrap-mode launcher (`pylair.wrap`) |
 | `packages/client` | `@pylair/client` — typed TS calls, `AsyncIterable` streams, cancel |
 | `packages/cli` | `pylair` CLI — dev, build, doctor, codegen |
 | `packages/create-pylair` | scaffolder (`create-pylair`) + `templates/` |
