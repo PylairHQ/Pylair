@@ -215,9 +215,14 @@ def probe(port: int, path: str, timeout: float) -> bool:
 # ---- process tree ---------------------------------------------------------
 
 
-def _snapshot() -> list[tuple[int, int, int, str]]:
-    """(pid, ppid, pgid, state) for every process we can see (POSIX)."""
-    rows: list[tuple[int, int, int, str]] = []
+def _snapshot() -> list[tuple[int, int, int, str, str]]:
+    """(pid, ppid, pgid, state, start) for every process we can see (POSIX).
+
+    `start` is the process start time as a string (Linux: clock ticks since
+    boot; elsewhere `ps lstart`). Paired with the pid it identifies a
+    process, so a recycled pid is never mistaken for one we signalled.
+    """
+    rows: list[tuple[int, int, int, str, str]] = []
     if os.path.isdir("/proc/self"):
         for name in os.listdir("/proc"):
             if not name.isdigit():
@@ -226,16 +231,25 @@ def _snapshot() -> list[tuple[int, int, int, str]]:
                 with open(f"/proc/{name}/stat", "rb") as f:
                     data = f.read()
                 # comm may contain spaces and parens: fields start after
-                # the LAST ')'.
+                # the LAST ')'. rest[0] is field 3 (state), so field 22
+                # (starttime) is rest[19].
                 rest = data[data.rindex(b")") + 2 :].split()
-                rows.append((int(name), int(rest[1]), int(rest[2]), rest[0].decode()))
+                rows.append(
+                    (
+                        int(name),
+                        int(rest[1]),
+                        int(rest[2]),
+                        rest[0].decode(),
+                        rest[19].decode(),
+                    )
+                )
             except (OSError, ValueError, IndexError):
                 continue
         return rows
     try:
         out = subprocess.run(
             check=False,
-            args=["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
+            args=["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
             capture_output=True,
             text=True,
             timeout=5,
@@ -244,27 +258,37 @@ def _snapshot() -> list[tuple[int, int, int, str]]:
         return rows
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 4:
+        if len(parts) >= 5:
             try:
-                rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+                rows.append(
+                    (
+                        int(parts[0]),
+                        int(parts[1]),
+                        int(parts[2]),
+                        parts[3],
+                        " ".join(parts[4:]),
+                    )
+                )
             except ValueError:
                 continue
     return rows
 
 
-def tree_members() -> list[int]:
-    """Live processes that belong to this launcher (POSIX), excluding it.
+def _scan(known: dict[int, str]) -> tuple[dict[int, str], list[int]]:
+    """One snapshot, two answers: the tree's current members and which of
+    `known` (pid -> start) are still alive.
 
-    When the launcher leads its own process group (the supervisor spawns it
-    that way and `killpg`s it) every group member counts, plus any
-    descendant that left the group. When it does not lead a group (run by
-    hand), only descendants count: signalling a group we merely belong to
-    would hit the shell or test runner that started us.
+    Members are the launcher's descendants and, when it leads its own
+    process group (the supervisor spawns it that way and `killpg`s it),
+    every group member too. A launcher that does not lead a group (run by
+    hand) must not count the group: signalling a group it merely belongs to
+    would hit the shell or test runner that started it.
     """
     me = os.getpid()
     rows = [r for r in _snapshot() if r[3][:1] not in ("Z", "X")]
+    start_of = {pid: start for pid, _, _, _, start in rows}
     kids: dict[int, list[int]] = {}
-    for pid, ppid, _, _ in rows:
+    for pid, ppid, _, _, _ in rows:
         kids.setdefault(ppid, []).append(pid)
     found: set[int] = set()
     stack = list(kids.get(me, []))
@@ -274,19 +298,30 @@ def tree_members() -> list[int]:
             found.add(pid)
             stack.extend(kids.get(pid, []))
     if os.getpgrp() == me:
-        found.update(pid for pid, _, pgid, _ in rows if pgid == me)
+        found.update(pid for pid, _, pgid, _, _ in rows if pgid == me)
     found.discard(me)
-    return sorted(found)
+    members = {pid: start_of[pid] for pid in found}
+    live = [pid for pid, start in known.items() if start_of.get(pid) == start]
+    return members, live
+
+
+def tree_members() -> list[int]:
+    """Live processes that belong to this launcher (POSIX), excluding it."""
+    return sorted(_scan({})[0])
 
 
 def kill_tree(proc: subprocess.Popen, grace: float = KILL_GRACE) -> None:
     """Stop the server and everything it started.
 
     POSIX: SIGTERM every member, wait `grace`, then SIGKILL survivors. The
-    survivors step enumerates members instead of trusting the leader: a
-    leader that exits on SIGTERM must not shield a grandchild that ignores
-    it. Windows: `taskkill /T` for the tree; the supervisor's Job Object
-    is the backstop for anything it cannot reach.
+    set of members is remembered from the first look and escalated on, not
+    re-derived from the tree each time: a server that exits on SIGTERM
+    leaves a SIGTERM-ignoring grandchild reparented to init (or a
+    subreaper), out of every descendant walk, and only the remembered
+    identity (pid plus start time) still names it. Members that appear
+    later (a server that forks while shutting down) are added. Windows:
+    `taskkill /T` for the tree; the supervisor's Job Object is the backstop
+    for anything it cannot reach.
     """
     if os.name == "nt":
         subprocess.run(
@@ -306,15 +341,23 @@ def kill_tree(proc: subprocess.Popen, grace: float = KILL_GRACE) -> None:
             signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
             pass
-    for pid in tree_members():
+    known, _ = _scan({})
+    for pid in known:
         _signal(pid, signal.SIGTERM)
     deadline = time.monotonic() + grace
+    live: list[int] = list(known)
     while time.monotonic() < deadline:
         proc.poll()  # reap the leader so it never reads as a live member
-        if not tree_members():
+        members, live = _scan(known)
+        for pid, start in members.items():
+            if pid not in known:  # a late fork: it gets the same treatment
+                known[pid] = start
+                live.append(pid)
+                _signal(pid, signal.SIGTERM)
+        if not live:
             return
         time.sleep(0.05)
-    for pid in tree_members():
+    for pid in live:
         _signal(pid, signal.SIGKILL)
     proc.poll()
 

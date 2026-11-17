@@ -567,3 +567,26 @@ def test_orphaned_grandchild_dies_when_the_server_exits(tmp_path):
         gpid = read_pid(gpid_file)
         assert w.wait() == L.EXIT_SERVER_EXITED
         assert wait_dead(gpid), "reparented grandchild leaked"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal escalation")
+def test_kill_tree_escalates_on_a_grandchild_orphaned_by_the_servers_exit(tmp_path):
+    """The server exits on SIGTERM, reparenting its SIGTERM-ignoring
+    grandchild out of every descendant walk. `kill_tree` must still SIGKILL
+    it, because it escalates on the members it saw before signalling. The
+    probe forces that ordering (it waits for the server's exit before the
+    escalation scan) instead of hoping for a timing."""
+    r = subprocess.run(
+        [sys.executable, str(HERE / "wrap_kill_probe.py"), str(tmp_path / "g.pid")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        start_new_session=False,
+    )
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["orphan_invisible_to_a_descendant_walk"], (
+        "precondition: the grandchild must be invisible to a descendant walk"
+    )
+    assert wait_dead(out["gpid"]), "grandchild survived kill_tree"
