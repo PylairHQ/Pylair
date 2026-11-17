@@ -80,10 +80,6 @@ pub fn decide_navigation(
     app_url: Option<&tauri::Url>,
     local: &LocalOrigin,
 ) -> NavDecision {
-    // DELIBERATELY BROKEN (proof commit, reverted next): allow every origin.
-    if true {
-        return NavDecision::Allow;
-    }
     if local.contains(target) {
         return NavDecision::Allow;
     }
