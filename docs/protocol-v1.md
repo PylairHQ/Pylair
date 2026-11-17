@@ -142,6 +142,7 @@ a `type` string (the Python exception class) for diagnostics.
 | `stream.credit` | host→runtime | `{task, n}` | consumer grants the producer n chunks of credit |
 | `pong` | runtime→host | `{seq}` | liveness reply to `ping` |
 | `log` | runtime→host | `{level, msg}` | structured log line (also goes to stderr) |
+| `ready` | runtime→host | `{url}` | **optional, web runtimes only**: the wrapped server answers HTTP at `url`; see §4.1. Bridge runtimes never send it, and a bridge-mode host ignores it like any unknown notification |
 
 ### 3.1 Calls and streaming
 
@@ -255,6 +256,67 @@ logs. Clients must not match on its wording; the state machine is
      on it arriving.
 4. `protocol` mismatch → `failed` immediately (no restart — retrying
    can't fix a version skew). Error message names both versions.
+
+### 4.1 Web runtimes (wrap mode)
+
+Wrap mode (`docs/wrap-mode-brief.md`, `docs/decisions/0003-wrap-mode.md`)
+shows a Python web framework's own UI in the window. Its runtime is the
+launcher `python -m pylair.wrap`, which speaks this same protocol and
+supervises one web server. The host is configured for it with the `Web`
+runtime kind (`SupervisorConfig::kind`, `Builder::runtime_kind`). The
+default is the bridge kind, and nothing below applies to it.
+
+- **`hello` still comes first** and is checked exactly as in §4 (same
+  `protocol` rule, same `hello_timeout`). The launcher's `exposes` is `[]`
+  and `kind` is `"web"`. `kind` is informational: the host's own
+  configuration decides how it treats the runtime. A `call` to a web
+  runtime answers `FUNCTION_NOT_FOUND` (nothing is exposed) and `cancel`
+  answers `{cancelled: false, reason: "task_not_found"}`.
+- **`ready {url}` is what makes a web runtime `ready`, not `hello`.** After
+  `hello` the host stays in `starting` and waits for `ready` for at most
+  `READY_TIMEOUT` (default **120s**, `SupervisorConfig::ready_timeout` or
+  `Builder::ready_timeout`, clamped to 1s..=3600s with the clamp logged on
+  `pylair://stderr`). A server that loads a model at import time
+  legitimately takes minutes to answer, so this is separate from
+  `hello_timeout`, which only covers the `hello`. No `ready` in time means
+  kill, `crashed`, backoff, `restarting`, with a detail naming the knob. A
+  shutdown requested while waiting is honoured at once, and calls issued
+  while waiting fail fast with `RUNTIME_UNAVAILABLE` (a web runtime has
+  nothing to queue them for).
+- **The url is validated before it is trusted.** It must parse as `http`
+  with the host exactly `127.0.0.1` and an explicit port, carry no
+  credentials, and share its origin with `http://127.0.0.1:<port>`
+  (`same_origin`, parse-based). `localhost`, `[::1]`, `https`, a missing
+  port, `user@host` forms and `127.0.0.1.evil.com` are all rejected. A
+  missing, non-string or failing url is a **protocol violation**, handled
+  like a malformed frame: kill, `crashed`, restart policy. The url is the
+  address the window should navigate to. The host never connects to it
+  itself.
+- **The current url is host state.** `Handle::ready_url()` (and a watch
+  channel) holds it while the web runtime is `ready` or `unresponsive`,
+  and it is cleared the moment the generation ends. `python_state`
+  returns it for the web kind (the bridge kind still returns the bare
+  state string), and every `pylair://state` payload carries `url` while
+  one is set. A restart is a new process on a new port, so it is a new
+  url: consumers navigate again and never cache one.
+- **Health is the launcher's job, not the host's.** The host's liveness is
+  the §5 ping, answered by the launcher's reader thread. It proves the
+  process and the pipe, not the server. The launcher probes the server
+  over HTTP (TCP connect, then `GET <ready-path>` expecting non-5xx) every
+  10s starting one interval after `ready`, tolerates slow answers while
+  the app hydrates, and exits **non-zero** only after 3 consecutive misses
+  (exit code 5). Any server exit makes the launcher exit non-zero (code
+  4), and a failed spawn or no free loopback port is code 3. The host sees
+  an ordinary child exit: `crashed`, the §7 backoff and crash-loop
+  breaker.
+- **The server's stdout never reaches the frame channel.** The launcher
+  performs the §1 hygiene on itself and starts the server with stdin
+  closed and stdout and stderr both on the log stream, so the app's
+  `print()`s and native writes to fd 1 become `pylair://stderr` lines.
+- **Process tree.** On POSIX the server shares the launcher's process
+  group (no `setsid`), so the host's group kill, and its group reap when
+  the launcher exits on its own, reach it and anything it spawned. On
+  Windows it stays inside the launcher's Job Object (§6).
 
 ## 5. Liveness
 
