@@ -25,6 +25,20 @@ pub(crate) fn validate_ready_url(params: Option<&serde_json::Value>) -> Result<S
         .and_then(|p| p.get("url"))
         .and_then(|u| u.as_str())
         .ok_or("`ready` needs a string `url`")?;
+    // A control character, whitespace or backslash never belongs in the url
+    // the launcher sends. The url parser silently drops CR, LF and TAB and
+    // reads a backslash as a slash, so a trailing CR that was JSON-escaped
+    // and never decoded (backslash, then `r`, as the W0 spike hit on
+    // Windows) would navigate to `/r`. Refuse it at the source instead of
+    // normalising it.
+    if raw
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return Err(format!(
+            "url {raw:?} contains a control character, whitespace or backslash"
+        ));
+    }
     // The parser would normalise `http://127.1:80` or `http://0x7f.1:80`
     // to the loopback address; the wire contract is the exact spelling.
     if !raw.starts_with("http://127.0.0.1:") {
@@ -176,6 +190,12 @@ mod tests {
             "",
             "http://127.0.0.1:99999/",
             "javascript:alert(1)",
+            // The W0 Windows bug: a CR on the end of the url.
+            "http://127.0.0.1:5000\r",
+            "http://127.0.0.1:5000/\r\n",
+            "http://127.0.0.1:5000\t/",
+            "http://127.0.0.1:5000\\r",
+            "http://127.0.0.1:5000\\",
         ] {
             assert!(check(json!(bad)).is_err(), "{bad:?} must be rejected");
         }

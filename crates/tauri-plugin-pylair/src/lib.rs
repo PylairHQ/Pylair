@@ -16,6 +16,7 @@ mod registry;
 mod selftest;
 mod spec;
 mod util;
+pub mod wrap;
 
 pub use builder::{Builder, StderrDelivery};
 pub use commands::{forward_stream, python_call_stream_impl, StreamAck};

@@ -2,6 +2,7 @@ use crate::commands;
 use crate::registry::handle_emit_failure;
 use crate::selftest::attach_parent_console;
 use crate::util::state_payload;
+use crate::wrap;
 use crate::{
     events, spawn_supervisor, PyRuntime, Registry, RuntimeEvent, RuntimeKind, SpawnSpec,
     SpawnSpecError, SupervisorConfig,
@@ -40,6 +41,9 @@ pub struct Builder<R: Runtime = tauri::Wry> {
     lazy: Option<SpecFn<R>>,
     config: SupervisorConfig,
     stderr: StderrDelivery,
+    /// Wrap mode: the spec, kind, ready timeout and the whole window come
+    /// from `pylair-wrap.json` at setup (see `wrap`).
+    wrap: bool,
 }
 
 impl<R: Runtime> Builder<R> {
@@ -49,7 +53,21 @@ impl<R: Runtime> Builder<R> {
             lazy: None,
             config: SupervisorConfig::default(),
             stderr: StderrDelivery::default(),
+            wrap: false,
         }
+    }
+
+    /// Wrap mode: show an existing Python web UI in the window. Everything
+    /// else comes from the config `pylair dev` / `pylair build` wrote
+    /// (`pylair-wrap.json`): the launcher command, the ready timeout and the
+    /// download behaviour. The app's own window must be declared in
+    /// `tauri.conf.json` with `"create": false`, so the plugin can build it
+    /// with the navigation, download and new-window hooks. See `wrap`.
+    pub fn wrap() -> Self {
+        let mut b = Self::new(SpawnSpec::default());
+        b.wrap = true;
+        b.config.kind = RuntimeKind::Web;
+        b
     }
 
     /// Spec computed at plugin setup — receives the AppHandle so it can
@@ -63,6 +81,7 @@ impl<R: Runtime> Builder<R> {
             lazy: Some(Box::new(f)),
             config: SupervisorConfig::default(),
             stderr: StderrDelivery::default(),
+            wrap: false,
         }
     }
 
@@ -123,25 +142,64 @@ impl<R: Runtime> Builder<R> {
             attach_parent_console();
             plugin = plugin.js_init_script("window.__PYLAIR_SELF_TEST__ = true;".to_string());
         }
+        // Wrap mode only: the IPC probe the installed self-test injects into
+        // every page, and the navigation lock for the app's window.
+        if self.wrap {
+            if let Some(js) = wrap::ipc_probe_script() {
+                plugin = plugin.js_init_script(js);
+            }
+            plugin = plugin.on_navigation(|webview, url| {
+                webview
+                    .try_state::<wrap::WrapState<R>>()
+                    .map(|s| s.0.navigation_allowed(webview.label(), url))
+                    .unwrap_or(true)
+            });
+        }
         plugin
             .setup(move |app, _api| {
-                let spec = match self.lazy.as_ref() {
-                    Some(f) => f(app)?,
-                    None => self.spec.clone(),
+                let wrap_rt = if self.wrap {
+                    Some(wrap::WrapRuntime::load(app)?)
+                } else {
+                    None
+                };
+                let mut config = self.config.clone();
+                let spec = match (&wrap_rt, self.lazy.as_ref()) {
+                    (Some(rt), _) => {
+                        config.ready_timeout =
+                            std::time::Duration::from_secs(rt.ready_timeout_secs);
+                        rt.spawn_spec(app)?
+                    }
+                    (None, Some(f)) => f(app)?,
+                    (None, None) => self.spec.clone(),
                 };
                 let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<RuntimeEvent>(256);
                 // setup runs on the main thread with no reactor entered —
                 // spawn the actor via tauri's runtime, not bare tokio::spawn.
-                let (handle, actor) = spawn_supervisor(spec, self.config.clone(), ev_tx);
+                let (handle, actor) = spawn_supervisor(spec, config, ev_tx);
                 tauri::async_runtime::spawn(actor);
                 let url_source = handle.clone();
                 app.manage(PyRuntime(handle));
                 app.manage(Registry::new(Default::default()));
+                let wrap_ui = match &wrap_rt {
+                    Some(rt) => {
+                        let ui = wrap::Ui::new(app, url_source.clone(), rt);
+                        app.manage(wrap::WrapState(ui.clone()));
+                        wrap::install_setup(app);
+                        Some(ui)
+                    }
+                    None => None,
+                };
 
                 let app_handle = app.clone();
                 let stderr = self.stderr.clone();
                 tauri::async_runtime::spawn(async move {
                     while let Some(ev) = ev_rx.recv().await {
+                        // Wrap mode: record the event and drive the window
+                        // BEFORE delivery, so a local page that loads next
+                        // can be given what it missed.
+                        if let Some(ui) = &wrap_ui {
+                            ui.on_event(&ev);
+                        }
                         let payload = match ev {
                             // A web runtime's url is read at emit time, so a lagging
                             // consumer attaches the CURRENT url, never a stale one.
@@ -163,6 +221,11 @@ impl<R: Runtime> Builder<R> {
                             _ => reg.lock().unwrap().broadcast_targets(),
                         };
                         for label in labels {
+                            // A wrapped page is remote content: it gets no
+                            // lifecycle or log events, only local pages do.
+                            if wrap_ui.as_ref().is_some_and(|ui| !ui.may_emit_to(&label)) {
+                                continue;
+                            }
                             if app_handle.emit_to(&label, event, payload.clone()).is_err() {
                                 handle_emit_failure(&app_handle, &reg, &label);
                             }
@@ -180,7 +243,18 @@ impl<R: Runtime> Builder<R> {
                 // the event loop starts) AND must run off the main thread:
                 // create_window dispatches to the loop and blocks on the
                 // ack, which deadlocks inside an event callback.
+                // Wrap mode: the window is built here, once the loop is running
+                // (see wrap::install_window), never in `setup`.
                 if let tauri::RunEvent::Ready = event {
+                    if let Some(st) = app.try_state::<wrap::WrapState<R>>() {
+                        let (app, ui) = (app.clone(), st.0.clone());
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = wrap::install_window(&app, &ui) {
+                                eprintln!("pylair: wrap mode could not build the window: {e}");
+                                app.exit(1);
+                            }
+                        });
+                    }
                     if std::env::var_os("PYLAIR_SELF_TEST_WEBVIEW").is_some() {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
@@ -245,6 +319,21 @@ impl<R: Runtime> Builder<R> {
                 // allocated BEFORE this navigation are reaped; a call the
                 // new document races in registers an id >= the mark and
                 // survives. The client-side pagehide hook stays as belt.
+                if let Some(st) = webview.try_state::<wrap::WrapState<R>>() {
+                    if webview.label() == wrap::WINDOW {
+                        match payload.event() {
+                            tauri::webview::PageLoadEvent::Started => {
+                                st.0.page_started(payload.url())
+                            }
+                            tauri::webview::PageLoadEvent::Finished
+                                if st.0.is_local(payload.url()) =>
+                            {
+                                st.0.local_page_loaded()
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 if payload.event() == tauri::webview::PageLoadEvent::Started {
                     if let Some(rt) = webview.try_state::<PyRuntime>() {
                         let h = rt.0.clone();
