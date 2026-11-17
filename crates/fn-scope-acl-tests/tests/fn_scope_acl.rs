@@ -353,8 +353,15 @@ fn two_windows_see_only_their_own_capability() {
     let fx = fixture(&["win-x", "win-y"]);
     let (x, y) = (fx.win("win-x"), fx.win("win-y"));
     for cmd in [CALL, STREAM] {
-        assert!(via(x, cmd, "add").reached_supervisor(), "{cmd}: x allows add");
-        assert_eq!(via(x, cmd, "counter"), Out::Denied, "{cmd}: x denies counter");
+        assert!(
+            via(x, cmd, "add").reached_supervisor(),
+            "{cmd}: x allows add"
+        );
+        assert_eq!(
+            via(x, cmd, "counter"),
+            Out::Denied,
+            "{cmd}: x denies counter"
+        );
         assert!(
             via(y, cmd, "counter").reached_supervisor(),
             "{cmd}: y allows counter"
@@ -376,7 +383,11 @@ fn a_window_no_capability_covers_is_rejected_by_the_acl() {
             "{cmd}: an uncovered window never reaches the handler, got {out:?}"
         );
     }
-    assert_eq!(rt.0.task_watermark(), watermark, "nothing may reach the supervisor");
+    assert_eq!(
+        rt.0.task_watermark(),
+        watermark,
+        "nothing may reach the supervisor"
+    );
 }
 
 // ---- malformed entries ---------------------------------------------------
@@ -394,7 +405,11 @@ fn a_malformed_scope_entry_fails_closed_instead_of_becoming_no_entry() {
             "{cmd}: a scope entry that does not parse must refuse the call, got {out:?}"
         );
     }
-    assert_eq!(rt.0.task_watermark(), watermark, "nothing may reach the supervisor");
+    assert_eq!(
+        rt.0.task_watermark(),
+        watermark,
+        "nothing may reach the supervisor"
+    );
 }
 
 // ---- a denial touches no state ------------------------------------------
@@ -474,7 +489,10 @@ fn a_denied_call_takes_no_slot_subscribes_nothing_and_sends_nothing() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     while fx.channel.lock().unwrap().len() <= sent {
-        assert!(Instant::now() < deadline, "the allowed call never delivered");
+        assert!(
+            Instant::now() < deadline,
+            "the allowed call never delivered"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     let (label, body) = fx.channel.lock().unwrap()[sent].clone();
@@ -492,7 +510,10 @@ fn a_scoped_allow_narrows_the_unscoped_default_grant() {
     let fx = fixture(&["narrow"]);
     let w = fx.win("narrow");
     for cmd in [CALL, STREAM] {
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: on the allow list");
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: on the allow list"
+        );
         assert_eq!(
             via(w, cmd, "counter"),
             Out::Denied,
