@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { platform, arch } from "node:os";
+import { checkCapabilities, formatFinding, loadCapabilities } from "./capabilities.js";
 import { loadConfig, loadTauriConfig } from "./config.js";
 import { venvPython } from "./dev.js";
 import { hostTriple } from "./build.js";
@@ -78,6 +79,19 @@ export async function doctor(appDir: string): Promise<number> {
       add("tauri.conf.json", false, (e as Error).message);
     }
     add("venv", existsSync(venvPython(appDir)), venvPython(appDir));
+
+    // Per-function permission scopes (static; exposed names are not loaded
+    // here, so unmatched-pattern warnings are left to `pylair build`).
+    const loaded = loadCapabilities(appDir);
+    const found = [...loaded.findings, ...checkCapabilities(loaded.capabilities)];
+    const bad = found.filter((f) => f.level === "error");
+    add(
+      "capability scopes",
+      bad.length === 0,
+      found.length === 0
+        ? `${loaded.capabilities.length} capability file(s) ok`
+        : found.map(formatFinding).join("\n    "),
+    );
   } else {
     add("app dir", false, `${appDir} has no pyproject.toml`);
   }

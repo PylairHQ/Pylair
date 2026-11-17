@@ -90,3 +90,11 @@ def log_stderr(msg: str) -> None:
     # The two-window self-test writes a marker line and asserts it reaches
     # only the owner window's pylair://stderr subscription.
     print(msg, file=sys.stderr)
+
+
+@expose
+def fn_permissions_fixture() -> None:
+    # Presence tells the two-window self-test that this build enforces
+    # per-function permissions, so selftest-winb.json's deny entry for win-b
+    # must be honoured (CI appends the same function to scaffolded apps).
+    return None

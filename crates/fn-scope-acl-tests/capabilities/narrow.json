@@ -1,0 +1,26 @@
+{
+  "identifier": "narrow",
+  "description": "a scoped allow narrows the unscoped default grant",
+  "windows": [
+    "narrow"
+  ],
+  "permissions": [
+    "pylair:default",
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    }
+  ]
+}

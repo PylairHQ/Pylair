@@ -8,6 +8,7 @@ import {
   setBridge,
   PythonError,
   LimitExceededError,
+  PermissionDeniedError,
   _resetForTests,
 } from "../dist/index.js";
 
@@ -437,6 +438,73 @@ test("stream terminal LIMIT_EXCEEDED throws LimitExceededError with .limit", asy
       e instanceof LimitExceededError &&
       e.limit === "stream_buffer_bytes" &&
       e.code === -32040,
+  );
+});
+
+const DENIED = {
+  code: -32050,
+  message: 'function "admin_wipe" is not permitted for window "win-b"',
+  data: { fn: "admin_wipe", window: "win-b" },
+};
+
+test("invoke rejection with PERMISSION_DENIED surfaces PermissionDeniedError", async () => {
+  const b = fakeBridge();
+  const realChannel = b.invokeChannel.bind(b);
+  b.invokeChannel = async (cmd, args, onEvent) => {
+    if (cmd === "plugin:pylair|python_call_stream") throw DENIED;
+    return realChannel(cmd, args, onEvent);
+  };
+  setBridge(b);
+  await assert.rejects(
+    call("admin_wipe"),
+    (e) =>
+      e instanceof PermissionDeniedError &&
+      e instanceof PythonError &&
+      e.name === "PermissionDeniedError" &&
+      e.code === -32050 &&
+      e.fn === "admin_wipe" &&
+      e.window === "win-b" &&
+      e.message === DENIED.message,
+  );
+});
+
+test("stream() rejection with PERMISSION_DENIED surfaces PermissionDeniedError", async () => {
+  const b = fakeBridge();
+  const realChannel = b.invokeChannel.bind(b);
+  b.invokeChannel = async (cmd, args, onEvent) => {
+    if (cmd === "plugin:pylair|python_call_stream") throw DENIED;
+    return realChannel(cmd, args, onEvent);
+  };
+  setBridge(b);
+  await assert.rejects(
+    stream("admin_wipe").next(),
+    (e) => e instanceof PermissionDeniedError && e.fn === "admin_wipe" && e.window === "win-b",
+  );
+});
+
+test("a PERMISSION_DENIED terminal event throws PermissionDeniedError", async () => {
+  const b = fakeBridge();
+  setBridge(b);
+  const first = stream("admin_wipe").next();
+  await tick();
+  b.emitTask(100, { task: 100, done: true, error: DENIED });
+  await assert.rejects(
+    first,
+    (e) => e instanceof PermissionDeniedError && e.fn === "admin_wipe" && e.code === -32050,
+  );
+});
+
+test("PermissionDeniedError tolerates a denial without data", async () => {
+  const b = fakeBridge();
+  const realChannel = b.invokeChannel.bind(b);
+  b.invokeChannel = async (cmd, args, onEvent) => {
+    if (cmd === "plugin:pylair|python_call_stream") throw { code: -32050, message: "denied" };
+    return realChannel(cmd, args, onEvent);
+  };
+  setBridge(b);
+  await assert.rejects(
+    call("x"),
+    (e) => e instanceof PermissionDeniedError && e.fn === "" && e.window === "",
   );
 });
 

@@ -33,6 +33,10 @@ pub const PROTOCOL_VIOLATION: i64 = -32032;
 pub const RUNTIME_RESTARTED: i64 = -32033;
 /// A configured limit was hit — `data.limit` names it (RC.8A).
 pub const LIMIT_EXCEEDED: i64 = -32040;
+/// The invoking window's capability scope does not permit this function
+/// (docs/security.md, per-function permissions). Raised host-side before the
+/// supervisor is touched; `data` carries `fn` and `window`.
+pub const PERMISSION_DENIED: i64 = -32050;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorObj {

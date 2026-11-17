@@ -86,7 +86,9 @@ test("flag set, chunk missing: reports a failing verdict and rejects", { timeout
  * TASK_CANCELLED once cancelled, add answers a+b, and the intruder's
  * report arrives clean on pylair://selftest-b.
  */
-function runtimeBridge() {
+const DENIED = { denied: true, code: -32050, fn: "add", window: "win-b" };
+
+function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture = true) {
   const calls = [];
   const cancelHooks = new Map();
   let nextTask = 1;
@@ -108,6 +110,11 @@ function runtimeBridge() {
       later(() => {
         if (fnName === "log_stderr") {
           onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+        } else if (fnName === "fn_permissions_fixture") {
+          // Present only when the resolved plugin supports per-function
+          // permissions (CI appends it); absent means FUNCTION_NOT_FOUND.
+          if (fixture) onEvent({ task, done: true, result: null });
+          else onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -134,6 +141,7 @@ function runtimeBridge() {
             seenSample: [],
             sawStderr: 0,
             sawStderrAny: 0,
+            ...(denyProbe ? { denyProbe } : {}),
           }),
         );
       return () => {};
@@ -161,7 +169,47 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "call",
     "cancel",
     "event-scoping",
+    "fn-permission",
   ]);
   assert.equal(ok, true, JSON.stringify(checks));
   assert.match(checks["stderr-delivery"], /^skipped: /);
+  assert.equal(checks["fn-permission"], "ok");
+});
+
+/** Run the owner against a runtime whose win-b report carries `probe`. */
+async function ownerVerdict(probe, fixture = true) {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge(probe, fixture);
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  return b.calls.find((c) => c.cmd === REPORT).args.result;
+}
+
+test("flag set: a win-b report with no deny probe fails the verdict", { timeout: 20_000 }, async () => {
+  const { ok, checks } = await ownerVerdict(null);
+  assert.equal(ok, false);
+  assert.match(checks["fn-permission"], /^FAIL: .*no deny probe/);
+});
+
+test("flag set: no fixture means an older plugin: fn-permission is skipped, not failed", { timeout: 20_000 }, async () => {
+  const through = { viaCall: { denied: false }, viaRaw: { denied: false } };
+  const { ok, checks } = await ownerVerdict(through, false);
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.equal(
+    checks["fn-permission"],
+    "skipped: resolved plugin predates per-function permissions",
+  );
+});
+
+test("flag set: win-b getting through to the denied function fails the verdict", { timeout: 20_000 }, async () => {
+  const through = { denied: false };
+  const { ok, checks } = await ownerVerdict({ viaCall: through, viaRaw: DENIED });
+  assert.equal(ok, false);
+  assert.match(checks["fn-permission"], /^FAIL: .*not denied/);
 });

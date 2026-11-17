@@ -481,6 +481,7 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 | -32032 | PROTOCOL_VIOLATION | garbage on frame fd / bad hello / credit overrun |
 | -32033 | RUNTIME_RESTARTED | in-flight call killed by a dev-mode hot reload |
 | -32040 | LIMIT_EXCEEDED | a configured resource limit was hit |
+| -32050 | PERMISSION_DENIED | host-side: the window's capability does not permit `fn` (never reaches Python) |
 
 `LIMIT_EXCEEDED` errors carry `data: {"limit": "<name>", "max": <n>}`
 naming which cap fired — e.g. `"max_concurrent_tasks"`,
@@ -490,6 +491,16 @@ surface it as `LimitExceededError` with `.limit`/`.max`. Limits are
 enforced per runtime (not per window) on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the
 effective set is logged at startup.
+
+`PERMISSION_DENIED` is raised by the host's `python_call` and
+`python_call_stream` commands when the calling window's capability scope
+(`docs/security.md`, "Restricting functions per window") does not permit
+`fn`. The message names the function and window and the error carries
+`data: {"fn": "<name>", "window": "<label>"}`. The check runs before the
+window is subscribed, a task id is allocated, credit is taken or anything
+is sent on the call's channel, so a denied call consumes no task id and
+produces no frames to Python; the host-to-Python wire is unchanged.
+Clients surface it as `PermissionDeniedError` with `.fn`/`.window`.
 
 ## 9. Concurrency and ordering
 

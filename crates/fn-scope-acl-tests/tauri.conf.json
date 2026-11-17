@@ -1,0 +1,8 @@
+{
+  "productName": "fn-scope-acl-tests",
+  "version": "0.0.0",
+  "identifier": "com.pylair.fnscopeacltests",
+  "build": { "frontendDist": "./frontend" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false }
+}

@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "selftest-winb",
-  "description": "Second webview created only under PYLAIR_SELF_TEST_WEBVIEW. Grants emit/emitTo on purpose so the two-window event-scoping self-test proves stream/result delivery is bound to the invoking webview — not merely protected by the deny-emit stopgap. win-b never exists in a normal run.",
+  "description": "Second webview created only under PYLAIR_SELF_TEST_WEBVIEW. Grants emit/emitTo on purpose so the two-window event-scoping self-test proves stream/result delivery is bound to the invoking webview, not merely protected by the deny-emit stopgap. Also denies the add function for this window only, so the self-test proves per-function permissions are enforced per window (win-b must get PERMISSION_DENIED while main still succeeds). win-b never exists in a normal run.",
   "windows": ["win-b"],
   "permissions": [
     "core:default",
-    "pylair:default",
+    { "identifier": "pylair:default", "deny": [{ "name": "add" }] },
     "pylair:allow-python-selftest-b-report",
     "core:event:allow-emit",
     "core:event:allow-emit-to"

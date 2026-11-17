@@ -366,6 +366,14 @@ jobs:
           @expose
           def log_stderr(msg: str) -> None:
               print(msg, file=sys.stderr)
+
+
+          # This job builds the crate from this checkout, which enforces
+          # per-function permissions: the self-test's fn-permission check
+          # is mandatory here (the fixture's presence is what arms it).
+          @expose
+          def fn_permissions_fixture() -> None:
+              return None
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a

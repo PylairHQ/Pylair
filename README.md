@@ -47,23 +47,26 @@ integration → `M6` reference app + RC.
 
 ## Known limitations
 
-- **Invocation is capability-level; task control is owner-scoped.** A
-  webview can only call `python_call` if a capability grants it
-  `pylair:*` permissions — the template grants them to
-  `windows: ["main"]` only, and remote origins get no IPC access unless
-  a capability adds `remote.urls`. Within a granted capability, every
-  covered webview can *invoke* every `@expose`d function — Pylair adds
-  no per-window or per-function ACL on invocation. But once a task
-  exists, only its owning webview (the Tauri window label — never a
+- **Invocation is capability-level by default; per-function scopes are
+  opt-in; task control is owner-scoped.** A webview can only call
+  `python_call` if a capability grants it `pylair:*` permissions: the
+  template grants them to `windows: ["main"]` only, and remote origins
+  get no IPC access unless a capability adds `remote.urls`. Within a
+  granted capability, every covered webview can invoke every `@expose`d
+  function **unless** you scope the permission with `allow`/`deny`
+  entries (`docs/security.md`, "Restricting functions per window"); the
+  template stays open. Scopes stop calls, not discovery: function names
+  remain visible to every window via `pylair://exposes`. Once a task
+  exists, only its owning webview (the Tauri window label, never a
   JS-supplied id) can cancel it or grant it stream credit, a task id
   from a dead runtime generation controls nothing, and closing the
   owner window cancels its tasks. Call/stream delivery is bound to the
   invoking webview via a per-call IPC channel; broadcast lifecycle
   events (state/exposes) remain readable by any webview, and stderr
-  delivery is opt-in per window (see Known limitations); invocation
-  scoping beyond capabilities is planned with wrap mode. The exposure exists only if
-  you widen a capability (more windows, `remote.urls`) or load untrusted
-  content in a privileged window.
+  delivery is opt-in per window (see Known limitations). The exposure
+  exists only if you widen a capability (more windows, `remote.urls`),
+  leave a shared window unscoped, or load untrusted content in a
+  privileged window.
 - **Inline sync functions can't be interrupted.** A non-isolated sync
   `def` keeps running after cancel — `cancel()` reports
   `requested_may_continue`, the caller gets `TASK_CANCELLED` immediately

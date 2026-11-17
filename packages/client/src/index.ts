@@ -75,11 +75,33 @@ export class LimitExceededError extends PythonError {
   }
 }
 
+/** Protocol code for per-function permission denials (docs/protocol-v1.md §8). */
+export const PERMISSION_DENIED = -32050;
+
+/**
+ * The host refused the call before it reached Python: the window's
+ * capability does not permit this function (docs/security.md, "Restricting
+ * functions per window"). `.fn` is the function name and `.window` the
+ * window label, both from the error's data; empty if the host sent none.
+ * The call never ran and consumed no task.
+ */
+export class PermissionDeniedError extends PythonError {
+  readonly fn: string;
+  readonly window: string;
+  constructor(message: string, data?: unknown) {
+    super(PERMISSION_DENIED, message, data);
+    this.name = "PermissionDeniedError";
+    const d = (data ?? {}) as { fn?: unknown; window?: unknown };
+    this.fn = typeof d.fn === "string" ? d.fn : "";
+    this.window = typeof d.window === "string" ? d.window : "";
+  }
+}
+
 /** Build the typed error for a wire code. */
 function mkError(code: number, message: string, data?: unknown): PythonError {
-  return code === LIMIT_EXCEEDED
-    ? new LimitExceededError(message, data)
-    : new PythonError(code, message, data);
+  if (code === LIMIT_EXCEEDED) return new LimitExceededError(message, data);
+  if (code === PERMISSION_DENIED) return new PermissionDeniedError(message, data);
+  return new PythonError(code, message, data);
 }
 
 /**

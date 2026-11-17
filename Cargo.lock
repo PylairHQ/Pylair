@@ -801,6 +801,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fn-scope-acl-tests"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-pylair",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

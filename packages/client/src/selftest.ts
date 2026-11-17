@@ -9,7 +9,7 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, onStderr, PythonError, stream } from "./index.js";
+import { call, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
 import { CMD, ipc } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
@@ -34,7 +34,7 @@ export async function maybeSelfTest(
   if (!(globalThis as { __PYLAIR_SELF_TEST__?: boolean }).__PYLAIR_SELF_TEST__) return;
   // Under the flag the plugin also opens a second webview, "win-b". It
   // runs the intruder role; every other label runs the owner role.
-  if ((await selfTestLabel()) === "win-b") return selfTestIntruder();
+  if ((await selfTestLabel()) === "win-b") return selfTestIntruder(spec);
   return selfTestOwner(spec);
 }
 
@@ -48,6 +48,61 @@ async function selfTestLabel(): Promise<string> {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The fn-permission check's overall verdict. `supported` says whether the
+ * resolved plugin enforces per-function permissions (the CI fixture function
+ * exists only then). Unsupported is a skip with its reason, never a failure;
+ * supported stays mandatory, so a stale capability file or a plugin that
+ * stopped enforcing still fails.
+ */
+export function judgeFnPermission(
+  supported: boolean,
+  probe: Partial<DenyProbe> | undefined,
+  fn: string,
+  mainCallOk: boolean,
+): { ok: boolean; check: string } {
+  if (!supported)
+    return { ok: true, check: "skipped: resolved plugin predates per-function permissions" };
+  const why =
+    judgeDenyProbe(probe, fn) ?? (mainCallOk ? null : `main could not call ${fn} (the "call" check failed)`);
+  return why ? { ok: false, check: `FAIL: ${why}` } : { ok: true, check: "ok" };
+}
+
+/** What win-b saw when it tried a function its capability denies. */
+interface DenyOutcome {
+  denied: boolean;
+  code?: number;
+  fn?: string;
+  window?: string;
+  error?: string;
+}
+interface DenyProbe {
+  viaCall: DenyOutcome;
+  viaRaw: DenyOutcome;
+}
+
+/**
+ * The owner's verdict on win-b's deny probe: null when both call commands
+ * answered PERMISSION_DENIED naming `fn` and win-b, otherwise why not.
+ * A missing report is a failure, never a pass.
+ */
+export function judgeDenyProbe(probe: Partial<DenyProbe> | undefined, fn: string): string | null {
+  if (!probe || !probe.viaCall || !probe.viaRaw)
+    return "win-b reported no deny probe (is selftest-winb.json missing its deny entry?)";
+  for (const [label, o] of [
+    ["call() (python_call_stream)", probe.viaCall],
+    ["python_call", probe.viaRaw],
+  ] as const) {
+    if (!o.denied)
+      return `${label} was not denied for win-b (code ${String(o.code)}, ${o.error ?? "call succeeded"})`;
+    if (o.code !== PERMISSION_DENIED)
+      return `${label} was denied with code ${String(o.code)}, expected ${PERMISSION_DENIED}`;
+    if (o.fn !== fn || o.window !== "win-b")
+      return `${label} denial named fn=${String(o.fn)} window=${String(o.window)}, expected fn=${fn} window=win-b`;
+  }
+  return null;
+}
 
 /**
  * Owner role ("main"): run a real stream and a plain call to completion,
@@ -81,6 +136,7 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     seenSample?: unknown[];
     sawStderr?: number;
     sawStderrAny?: number;
+    denyProbe?: DenyProbe;
   }>((res) => {
     void ipc().then((b) => b.listen("pylair://selftest-b", res));
   });
@@ -168,6 +224,31 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     if (stderrProbeRan && b.sawStderr !== 0)
       throw new Error(`win-b received ${b.sawStderr} stderr line(s) not addressed to it`);
   });
+  // Per-function permissions: win-b's capability denies `spec.add`. The
+  // owner (main) just called it successfully (the "call" check above), so a
+  // pass here means the denial is per window, not global. The fixture exists
+  // only when CI found a plugin that enforces scopes (the same pattern as
+  // log_stderr); without it the check is skipped with its reason. It runs
+  // last so its task id cannot disturb the ids the intruder targets.
+  {
+    let supported = true;
+    try {
+      await within(call("fn_permissions_fixture", {}), 30_000, "fn_permissions_fixture");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) supported = false;
+      else {
+        ok = false;
+        checks["fn-permission"] = `FAIL: ${e instanceof Error ? e.message : String(e)}`;
+        supported = true;
+      }
+    }
+    if (checks["fn-permission"] === undefined) {
+      const b = await within(bReport, 30_000, "win-b report").catch(() => undefined);
+      const v = judgeFnPermission(supported, b?.denyProbe, spec.add, checks["call"] === "ok");
+      checks["fn-permission"] = v.check;
+      if (!v.ok) ok = false;
+    }
+  }
   await (await ipc()).invoke(CMD.selftestReport, { result: { ok, checks } });
 }
 
@@ -177,7 +258,7 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
  * stopgap — protects the owner's stream. Reports findings back on
  * `pylair://selftest-b`; it cannot exit the app itself.
  */
-async function selfTestIntruder(): Promise<void> {
+async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { emit, emitTo, listen } = await import("@tauri-apps/api/event");
 
@@ -256,11 +337,36 @@ async function selfTestIntruder(): Promise<void> {
     await sleep(400);
   }
 
+  // Per-function permissions: selftest-winb.json denies `spec.add` for this
+  // window, on the set-level `pylair:default`. Try it through both call
+  // commands. Denials consume no task id, so the owner's id assumptions hold.
+  const outcome = (e: unknown): DenyOutcome => {
+    if (e instanceof PermissionDeniedError)
+      return { denied: true, code: e.code, fn: e.fn, window: e.window };
+    const o = e as { code?: unknown; message?: unknown; data?: { fn?: unknown; window?: unknown } };
+    return {
+      denied: o?.code === PERMISSION_DENIED,
+      code: typeof o?.code === "number" ? o.code : undefined,
+      fn: typeof o?.data?.fn === "string" ? o.data.fn : undefined,
+      window: typeof o?.data?.window === "string" ? o.data.window : undefined,
+      error: typeof o?.message === "string" ? o.message : String(e),
+    };
+  };
+  const viaCall = await call(spec.add, { a: 1, b: 2 }).then(
+    () => ({ denied: false }) as DenyOutcome,
+    outcome,
+  );
+  const viaRaw = await invoke("plugin:pylair|python_call", {
+    fnName: spec.add,
+    input: { a: 1, b: 2 },
+  }).then(() => ({ denied: false }) as DenyOutcome, outcome);
+  const denyProbe: DenyProbe = { viaCall, viaRaw };
+
   // The report cannot ride emit/emitTo: a `core:event:deny-emit(-to)` entry
   // (as the default template ships) denies those commands origin-wide —
   // Tauri ignores window scoping for denials — so win-b relays through an
   // ACL-checked command whose Rust side emits for it.
   await invoke("plugin:pylair|python_selftest_b_report", {
-    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny },
+    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe },
   }).catch(() => {});
 }

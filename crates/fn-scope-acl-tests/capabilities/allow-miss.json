@@ -1,0 +1,32 @@
+{
+  "identifier": "allow-miss",
+  "description": "allow list on both call commands",
+  "windows": [
+    "allow-miss"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "count*"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "count*"
+        }
+      ]
+    },
+    "pylair:allow-python-state"
+  ]
+}

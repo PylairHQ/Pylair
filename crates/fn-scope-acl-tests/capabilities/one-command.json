@@ -1,0 +1,18 @@
+{
+  "identifier": "one-command",
+  "description": "scope on python-call only: python-call-stream stays open (the CLI flags this)",
+  "windows": [
+    "one-command"
+  ],
+  "permissions": [
+    "pylair:default",
+    {
+      "identifier": "pylair:allow-python-call",
+      "deny": [
+        {
+          "name": "spy"
+        }
+      ]
+    }
+  ]
+}

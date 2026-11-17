@@ -35,6 +35,8 @@ import {
   tauriCliEntry,
   windowsSigningConfigured,
 } from "./config.js";
+import { assertCapabilities, checkPatterns, formatFinding, loadCapabilities } from "./capabilities.js";
+import { loadManifest } from "./manifest.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
 import { compileBytecode } from "./build/bytecode.js";
 import { stageNotices } from "./build/notices.js";
@@ -73,6 +75,10 @@ export async function build(opts: BuildOptions): Promise<void> {
   const tconf = loadTauriConfig(appDir);
 
   const cfg = loadConfig(appDir);
+
+  // Capability scopes are checked first: a bad `allow: []` or a half-scoped
+  // window is a configuration error, not worth a Python download to find out.
+  for (const w of assertCapabilities(appDir)) console.warn(formatFinding(w));
 
   const targetTriple = hostTriple(); // cross-compile refused by construction
   console.log(
@@ -130,6 +136,31 @@ export async function build(opts: BuildOptions): Promise<void> {
       `staged bundle failed the import check (${cfg.appModule}) — ` +
         `pruning or missing deps? ${check.stderr?.trim()}`,
     );
+
+  // With the app importable, ask it which functions it exposes and warn
+  // about scope patterns that match none. Best effort: a failure here only
+  // skips the warning, it never fails the build.
+  const caps = loadCapabilities(appDir).capabilities;
+  if (caps.length) {
+    try {
+      const m = loadManifest({
+        python: bundled,
+        module: cfg.appModule,
+        cwd: tmpdir(),
+        env: {
+          PYTHONPATH: `${importRoot(resources, cfg.source)}${sep}${join(resources, "site-packages")}`,
+          PYTHONNOUSERSITE: "1",
+          PYTHONDONTWRITEBYTECODE: "1",
+        },
+      });
+      const names = (m.functions ?? []).map((f) => f.name);
+      for (const w of checkPatterns(caps, names)) console.warn(formatFinding(w));
+    } catch (e) {
+      console.log(
+        `note: skipped the capability pattern check (could not list exposed functions: ${(e as Error).message.split("\n")[0]})`,
+      );
+    }
+  }
 
   // ── tauri build ────────────────────────────────────────────────────
   // Signing is per-platform: only macOS creds (env OR tauri.conf
