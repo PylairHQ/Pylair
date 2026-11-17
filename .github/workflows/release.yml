@@ -1,4 +1,7 @@
 name: Publish to PyPI
+# Tooling sets dispatch_id to correlate this dispatch with the run it
+# produced; the bracketed suffix only renders when the id is present.
+run-name: "Publish to PyPI${{ inputs.dispatch_id && format(' [{0}]', inputs.dispatch_id) || '' }}"
 
 # Manual dispatch only. No long-lived tokens: each job uses OIDC trusted
 # publishing through a protected environment.
@@ -24,6 +27,11 @@ on:
         description: "Build + check only, do not upload"
         type: boolean
         default: true
+      dispatch_id:
+        description: "Optional correlation id echoed in the run name (set by release tooling, never required)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write # tag after a successful upload — never commits to main

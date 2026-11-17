@@ -1,4 +1,7 @@
 name: SBOM
+# Tooling sets dispatch_id to correlate this dispatch with the run it
+# produced; the bracketed suffix only renders when the id is present.
+run-name: "SBOM${{ inputs.dispatch_id && format(' [{0}]', inputs.dispatch_id) || '' }}"
 
 # CycloneDX SBOMs for all shipped ecosystems, attached to an EXISTING
 # GitHub release. Dispatched by a human after the release is created —
@@ -9,6 +12,11 @@ on:
       tag:
         description: "Existing release tag to attach SBOMs to (e.g. npm-v0.1.0-rc.8)"
         required: true
+      dispatch_id:
+        description: "Optional correlation id echoed in the run name (set by release tooling, never required)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write # upload release assets — nothing else needs write

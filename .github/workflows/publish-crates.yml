@@ -1,4 +1,7 @@
 name: Publish crates
+# Tooling sets dispatch_id to correlate this dispatch with the run it
+# produced; the bracketed suffix only renders when the id is present.
+run-name: "Publish crates${{ inputs.dispatch_id && format(' [{0}]', inputs.dispatch_id) || '' }}"
 
 # Manual dispatch only: publishing is a deliberate act. Auth is OIDC
 # trusted publishing — the job's id-token is exchanged for a short-lived
@@ -16,6 +19,11 @@ on:
         description: "Package + verify only, do not upload"
         type: boolean
         default: true
+      dispatch_id:
+        description: "Optional correlation id echoed in the run name (set by release tooling, never required)"
+        type: string
+        required: false
+        default: ""
 
 jobs:
   publish:
