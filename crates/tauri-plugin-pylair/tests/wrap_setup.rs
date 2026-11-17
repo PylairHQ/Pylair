@@ -123,7 +123,7 @@ fn the_runtime_file_becomes_the_launcher_spawn_spec() {
     assert!(spec
         .env
         .iter()
-        .any(|(k, v)| k == "PYTHONPATH" && PathBuf::from(v) == src));
+        .any(|(k, v)| k == "PYTHONPATH" && std::path::Path::new(v) == src.as_path()));
     std::env::remove_var("PYLAIR_WRAP_CONFIG");
     std::env::remove_var("PYLAIR_PYTHON");
 }

@@ -49,9 +49,24 @@ impl LocalOrigin {
         self.0.join(page).expect("a relative page name joins")
     }
 
+    /// The local origin rooted at `base` (tests; `new` is the real one).
+    pub fn from_base(base: tauri::Url) -> Self {
+        Self(base)
+    }
+
     /// Is `url` one of the app's own local pages?
+    ///
+    /// Compared as scheme, host and port rather than with [`same_origin`]:
+    /// `tauri://localhost` is a custom scheme, whose origin is opaque, and
+    /// two opaque origins are never equal, so `same_origin` would call the
+    /// app's own page foreign on macOS and Linux (and send it to the
+    /// browser). `http://tauri.localhost` and a dev server are ordinary
+    /// origins, for which this is the same rule.
     pub fn contains(&self, url: &tauri::Url) -> bool {
-        same_origin(url.as_str(), self.0.as_str())
+        url.scheme() == self.0.scheme()
+            && url.host_str() == self.0.host_str()
+            && url.port_or_known_default() == self.0.port_or_known_default()
+            && url.username().is_empty()
     }
 }
 
@@ -335,6 +350,44 @@ mod tests {
         // A look-alike of the local origin is not local.
         assert!(!l.contains(&u("http://tauri.localhost.evil.com/")));
         assert!(!l.contains(&u("tauri://localhost.evil.com/")));
+    }
+
+    #[test]
+    fn the_custom_scheme_origin_of_macos_and_linux_is_local_too() {
+        // tauri://localhost has an opaque origin: same_origin() says two of
+        // them differ. The local rule must not (found by the Linux CI leg).
+        let l = LocalOrigin::from_base(u("tauri://localhost/"));
+        assert!(!same_origin("tauri://localhost/", "tauri://localhost/"));
+        assert!(l.contains(&l.page("restarting.html")));
+        assert!(l.contains(&u("tauri://localhost/index.html?x=1#y")));
+        assert_eq!(
+            l.page("restarting.html"),
+            u("tauri://localhost/restarting.html")
+        );
+        for foreign in [
+            "tauri://localhost.evil.com/",
+            "tauri://evil/",
+            "tauri://user@localhost/",
+            "http://localhost/",
+            "https://tauri.localhost/",
+            "http://tauri.localhost/",
+        ] {
+            assert!(!l.contains(&u(foreign)), "{foreign}");
+        }
+        let app = u(APP);
+        assert_eq!(
+            decide_navigation(&l.page("restarting.html"), Some(&app), &l),
+            NavDecision::Allow
+        );
+        assert_eq!(
+            decide_navigation(&u("http://tauri.localhost/"), Some(&app), &l),
+            NavDecision::External
+        );
+        // And the Windows shape.
+        let w = LocalOrigin::from_base(u("http://tauri.localhost/"));
+        assert!(w.contains(&u("http://tauri.localhost/restarting.html")));
+        assert!(!w.contains(&u("tauri://localhost/")));
+        assert!(!w.contains(&u("https://tauri.localhost/")));
     }
 
     #[test]

@@ -295,7 +295,10 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
             .download_dir()
             .map_err(|e| (11, format!("no Downloads folder: {e}")))?;
         *ui.last_download.lock().unwrap() = None;
-        w.eval(format!("location.href = {}", serde_json::to_string(path).unwrap()))
+        w.eval(format!(
+            "location.href = {}",
+            serde_json::to_string(path).unwrap()
+        ))
         .map_err(|e| (11, e.to_string()))?;
         // The webview reports the download finished, with where it went.
         let (saved, ok) = until("the download to finish", Duration::from_secs(60), || {
