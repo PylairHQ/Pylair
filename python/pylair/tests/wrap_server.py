@@ -15,6 +15,8 @@ supervisor's wrap tests): one file, many ways to misbehave.
 --exit-after S --exit-code C  exit by itself after S seconds
 --never-listen                never bind (a server that never becomes ready)
 --pidfile PATH                write this server's own pid
+--fail-starts N --state-file F  the first N starts exit 98 at once (a lost
+                              bind race); F counts starts across restarts
 """
 
 from __future__ import annotations
@@ -51,8 +53,22 @@ def main() -> None:
     ap.add_argument("--exit-code", type=int, default=7)
     ap.add_argument("--never-listen", action="store_true")
     ap.add_argument("--pidfile")
+    ap.add_argument("--fail-starts", type=int, default=0)
+    ap.add_argument("--state-file")
     args = ap.parse_args()
 
+    if args.fail_starts:
+        starts = 0
+        try:
+            with open(args.state_file) as f:
+                starts = int(f.read() or 0)
+        except (OSError, ValueError):
+            pass
+        with open(args.state_file, "w") as f:
+            f.write(str(starts + 1))
+        if starts < args.fail_starts:
+            print("server: address already in use (injected)", file=sys.stderr, flush=True)
+            os._exit(98)
     if args.pidfile:
         with open(args.pidfile, "w") as f:
             f.write(str(os.getpid()))

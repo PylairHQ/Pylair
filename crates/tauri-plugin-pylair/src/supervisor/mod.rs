@@ -15,7 +15,7 @@
 //! | `config.rs` | `State`, `RuntimeEvent`, `SpawnSpec`, `Limits`, `SupervisorConfig`, the `PYLAIR_*` env knobs, hello-timeout parse and clamp |
 //! | `handle.rs` | `Handle`, the public API (`call`, `call_stream`, `cancel`, `grant_credit`, `shutdown`, ...), the `Command`s it sends, `CallTask`, `CancelOutcome`, `ShutdownOutcome` |
 //! | `run.rs` | `spawn()`, the `Supervisor` actor (`run`, `run_loop`, restart backoff, `park_failed`), `run_child` (one runtime generation: the `select!` loop; its phases live in `run/`), `fail_all`, `drain_exited_inbox`, `kill_and_reap` |
-//! | `run/handshake.rs` | `Supervisor::handshake`: spawn to Ready (hello within the deadline, protocol version check) |
+//! | `run/handshake.rs` | `Supervisor::handshake`: spawn to Ready (hello within the deadline, protocol version check; for the `Web` kind also `ready {url}` within `ready_timeout`, url validation) |
 //! | `run/session.rs` | `Session`, the per-generation bookkeeping, and the `select!` arm handlers `on_frame`, `on_command`, `on_ping_tick`, `on_trigger_tick`, `on_child_exit` |
 //! | `run/session_commands.rs` | the `Command` handlers: `call`, `call_stream`, `cancel`, `grant_credit`, `cancel_owned`, `shutdown` |
 //! | `spawn.rs` | `spawn_child`: the platform spawn path, the stdin writer (control lane first, single ping slot), the stdout reader, the stderr drain |
@@ -41,6 +41,10 @@
 //!   docs/cancellation.md. Code: `handle.rs`, `wire.rs` (`cancel_outcome`).
 //! - Hello timeout: docs/protocol-v1.md section 4, item 3. Code: `config.rs`,
 //!   `run/handshake.rs`.
+//! - Web runtime kind (wrap mode: ready on `ready {url}`, ready timeout,
+//!   url validation, the current url as state): docs/protocol-v1.md
+//!   section 4.1. Code: `config.rs` (`RuntimeKind`), `run/handshake.rs`,
+//!   `handle.rs` (`ready_url`), `util.rs` (`validate_ready_url`).
 //! - Shutdown (completes before it is acknowledged, one shared `grace_ms`
 //!   budget, committed data flushed ahead of `shutdown`): docs/protocol-v1.md
 //!   sections 6 and 7. Code: `Session::shutdown` (`run/session_commands.rs`),
@@ -70,7 +74,7 @@ mod stream;
 mod tests;
 mod wire;
 
-pub use config::{Limits, RuntimeEvent, SpawnSpec, State, SupervisorConfig};
+pub use config::{Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, SupervisorConfig};
 pub use handle::{CallTask, CancelOutcome, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
 pub use platform_unix::pdeath_anchor_threads;

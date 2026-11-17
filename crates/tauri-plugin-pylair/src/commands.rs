@@ -1,6 +1,6 @@
 use crate::fn_scope::{self, FnScope};
 use crate::registry::subscribed;
-use crate::util::fmt_state;
+use crate::util::state_reply;
 use crate::{protocol, supervisor, ErrorObj, Handle, PyRuntime, Registry, StreamItem};
 use serde_json::{json, Value};
 use tauri::ipc::CommandScope;
@@ -218,14 +218,18 @@ async fn python_retry<R: Runtime>(
     rt.0.retry().await
 }
 
+/// The lifecycle state. The bridge kind answers the bare state string, as it
+/// always has. A web runtime (wrap mode) answers `{state, url}` instead,
+/// where `url` is the validated address the window should show (`null`
+/// until the web server is ready; protocol-v1 section 4.1).
 #[tauri::command]
 fn python_state<R: Runtime>(
     window: tauri::WebviewWindow<R>,
     reg: tauri::State<'_, Registry>,
     rt: tauri::State<'_, PyRuntime>,
-) -> &'static str {
+) -> Value {
     subscribed(&window, &reg);
-    fmt_state(rt.0.state())
+    state_reply(rt.0.kind(), rt.0.state(), rt.0.ready_url())
 }
 
 #[tauri::command]

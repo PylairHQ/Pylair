@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, timeout};
 
 use super::config::{
-    clamp_hello_timeout_ms, parse_hello_timeout_ms, RuntimeEvent, SpawnSpec, State,
-    SupervisorConfig,
+    clamp_hello_timeout_ms, clamp_ready_timeout_ms, parse_hello_timeout_ms, RuntimeEvent,
+    SpawnSpec, State, SupervisorConfig,
 };
 use super::handle::{CancelOutcome, Command, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
@@ -105,6 +105,13 @@ pub fn spawn(
     if let Some(w) = warn {
         let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair config: {w}")));
     }
+    // ready_timeout only matters for the Web kind, but a bad value is
+    // clamped (and reported) whichever kind is configured.
+    let (ready_ms, warn) = clamp_ready_timeout_ms(config.ready_timeout.as_millis() as u64);
+    config.ready_timeout = Duration::from_millis(ready_ms);
+    if let Some(w) = warn {
+        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair config: {w}")));
+    }
     // An initial grant above the cap would violate the cap immediately.
     if config.initial_stream_credit > limits.max_stream_credit {
         let _ = events.try_send(RuntimeEvent::Stderr(format!(
@@ -128,6 +135,8 @@ pub fn spawn(
     let limits = Arc::new(limits);
     let (cmd_tx, cmd_rx) = mpsc::channel(limits.max_queued_commands);
     let (state_tx, state_rx) = watch::channel(State::Starting);
+    let (ready_url_tx, ready_url_rx) = watch::channel(None::<String>);
+    let kind = config.kind;
     let stream_buffer = config.stream_buffer;
     let cancel_timeout = config.cancel_timeout;
     let stream_bytes_total = Arc::new(AtomicU64::new(0));
@@ -138,6 +147,7 @@ pub fn spawn(
         events,
         cmd_rx,
         state_tx,
+        ready_url_tx,
         generation: 0,
         next_id: AtomicU64::new(1),
         next_task: next_task.clone(),
@@ -152,6 +162,8 @@ pub fn spawn(
         Handle {
             cmd: cmd_tx,
             state: state_rx,
+            ready_url: ready_url_rx,
+            kind,
             stream_buffer,
             cancel_timeout,
             stream_bytes_total,
@@ -168,6 +180,9 @@ struct Supervisor {
     events: mpsc::Sender<RuntimeEvent>,
     cmd_rx: mpsc::Receiver<Command>,
     state_tx: watch::Sender<State>,
+    /// The current generation's validated `ready` url (Web kind): set just
+    /// before the Ready transition, cleared when the generation ends.
+    ready_url_tx: watch::Sender<Option<String>>,
     generation: u64,
     next_id: AtomicU64,
     /// Shared with `Handle` so a page-load can watermark "tasks that
@@ -260,6 +275,14 @@ impl Supervisor {
         }
     }
 
+    fn set_ready_url(&self, url: Option<String>) {
+        self.ready_url_tx.send_if_modified(|cur| {
+            let changed = *cur != url;
+            *cur = url;
+            changed
+        });
+    }
+
     async fn run(mut self) {
         self.run_loop().await;
         let outcome = self.shutdown_outcome.unwrap_or(ShutdownOutcome::Unknown);
@@ -312,6 +335,9 @@ impl Supervisor {
                 Ok(io) => self.run_child(io).await,
                 Err(e) => ExitCause::Crashed(format!("spawn failed: {e}")),
             };
+            // The generation is over, so its url is stale: a restart is a
+            // new process on a new port (protocol-v1 section 4.1).
+            self.set_ready_url(None);
 
             match cause {
                 ExitCause::CleanShutdown => {

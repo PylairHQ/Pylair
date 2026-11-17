@@ -1,10 +1,10 @@
 use crate::commands;
 use crate::registry::handle_emit_failure;
 use crate::selftest::attach_parent_console;
-use crate::util::fmt_state;
+use crate::util::state_payload;
 use crate::{
-    events, spawn_supervisor, PyRuntime, Registry, RuntimeEvent, SpawnSpec, SpawnSpecError,
-    SupervisorConfig,
+    events, spawn_supervisor, PyRuntime, Registry, RuntimeEvent, RuntimeKind, SpawnSpec,
+    SpawnSpecError, SupervisorConfig,
 };
 use serde_json::json;
 use tauri::{Emitter, Manager, Runtime};
@@ -95,6 +95,24 @@ impl<R: Runtime> Builder<R> {
         self
     }
 
+    /// What the supervised child is. The default is the bridge runtime
+    /// (ready on `hello`); [`RuntimeKind::Web`] is wrap mode, where the
+    /// child is `python -m pylair.wrap`, ready only on its `ready {url}`
+    /// notification (protocol-v1 section 4.1). A web runtime's state events
+    /// and `python_state` carry the current `url`.
+    pub fn runtime_kind(mut self, kind: RuntimeKind) -> Self {
+        self.config.kind = kind;
+        self
+    }
+
+    /// `Web` kind only: how long to wait for `ready {url}` after `hello`.
+    /// Default 120s, clamped to 1s..=1h at spawn (the clamp is logged on
+    /// `pylair://stderr`). Independent of [`Builder::hello_timeout`].
+    pub fn ready_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.ready_timeout = timeout;
+        self
+    }
+
     pub fn build(self) -> tauri::plugin::TauriPlugin<R> {
         let mut plugin = tauri::plugin::Builder::<R>::new("pylair");
         // Installed-webview self-test: the client sees this flag and runs its
@@ -116,6 +134,7 @@ impl<R: Runtime> Builder<R> {
                 // spawn the actor via tauri's runtime, not bare tokio::spawn.
                 let (handle, actor) = spawn_supervisor(spec, self.config.clone(), ev_tx);
                 tauri::async_runtime::spawn(actor);
+                let url_source = handle.clone();
                 app.manage(PyRuntime(handle));
                 app.manage(Registry::new(Default::default()));
 
@@ -124,14 +143,18 @@ impl<R: Runtime> Builder<R> {
                 tauri::async_runtime::spawn(async move {
                     while let Some(ev) = ev_rx.recv().await {
                         let payload = match ev {
+                            // A web runtime's url is read at emit time, so a lagging
+                            // consumer attaches the CURRENT url, never a stale one.
                             RuntimeEvent::StateChanged { from, to, detail } => Some((
                                 events::STATE,
-                                json!({"from": fmt_state(from), "to": fmt_state(to), "detail": detail}),
+                                state_payload(from, to, &detail, url_source.ready_url().as_deref()),
                             )),
                             RuntimeEvent::Stderr(line) => Some((events::STDERR, json!(line))),
                             RuntimeEvent::Exposes(x) => Some((events::EXPOSES, x)),
                         };
-                        let Some((event, payload)) = payload else { continue };
+                        let Some((event, payload)) = payload else {
+                            continue;
+                        };
                         // Runtime-wide events go to subscribed webviews only.
                         // Stderr is narrower: the app's allow-list.
                         let reg = app_handle.state::<Registry>();
