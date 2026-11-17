@@ -25,6 +25,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros"] }
 async-trait = "0.1"
 dunce = "1"
+# Save As dialog for wrap-mode downloads. gtk3 so Linux reuses the GTK that
+# webkit2gtk already links, instead of needing an xdg-desktop-portal.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

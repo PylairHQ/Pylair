@@ -107,6 +107,9 @@ pub enum SpawnSpecError {
     /// found next to the executable either. Carries Tauri's error — on
     /// macOS it names the symlinked ancestor Tauri refuses to run under.
     ResourceDir(String),
+    /// Wrap mode: `pylair-wrap.json` is missing, unreadable or not a
+    /// version this plugin reads.
+    WrapConfig(String),
 }
 
 impl std::fmt::Display for SpawnSpecError {
@@ -119,6 +122,7 @@ impl std::fmt::Display for SpawnSpecError {
                  the app is launched through a symlinked path (e.g. /tmp \
                  -> /private/tmp): launch the app's real path instead."
             ),
+            Self::WrapConfig(e) => write!(f, "wrap mode config: {e}"),
         }
     }
 }

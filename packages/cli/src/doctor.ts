@@ -1,13 +1,15 @@
 /** `pylair doctor` — diagnose the dev/build environment. */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { platform, arch } from "node:os";
 import { checkCapabilities, formatFinding, loadCapabilities } from "./capabilities.js";
-import { loadConfig, loadTauriConfig } from "./config.js";
+import { loadConfig, loadTauriConfig, type PylairConfig } from "./config.js";
 import { venvPython } from "./dev.js";
 import { hostTriple } from "./build.js";
+import { wrapWarnings } from "./wrapconfig.js";
+import { STAGED_APP, runSmokeImports, smokeImports } from "./wrapbuild.js";
 
 interface Check {
   name: string;
@@ -29,6 +31,94 @@ export function meetsMinPython(version: string, min: string): boolean {
   const [maj, mi] = [Number(v[1]), Number(v[2])];
   const [fmaj, fmi] = [Number(m[1]), Number(m[2])];
   return maj > fmaj || (maj === fmaj && mi >= fmi);
+}
+
+/** Wrap-mode checks. `add` records one line each. Exported for tests. */
+export function wrapChecks(
+  appDir: string,
+  cfg: PylairConfig,
+  add: (name: string, ok: boolean, detail: string) => void,
+): void {
+  const w = cfg.wrap!;
+  add("[tool.pylair] config", true, `mode=wrap framework=${w.framework} source=${cfg.source}`);
+  const warns = wrapWarnings(w);
+  add("wrap command", warns.length === 0, warns.length ? warns.join("\n    ") : w.cmd ? w.cmd.join(" ") : `entry ${w.entry}`);
+
+  // Dependencies come from a manifest, never from guessing imports.
+  const hasLock = existsSync(join(appDir, "uv.lock"));
+  const hasReqs = existsSync(join(appDir, cfg.requirements));
+  add(
+    "dependency manifest",
+    hasLock || hasReqs,
+    hasLock
+      ? "pyproject.toml + uv.lock"
+      : hasReqs
+        ? `${cfg.requirements} only (no uv.lock): the bundled env can drift from \`pylair dev\`'s; prefer \`uv add\``
+        : "none: run `uv init` and `uv add <packages>` (Pylair does not infer dependencies from imports)",
+  );
+
+  const src = join(appDir, cfg.source);
+  add("source dir", existsSync(src), src);
+  if (w.entry) add("entry file", existsSync(join(src, w.entry)), join(src, w.entry));
+
+  // The framework must import in the env `pylair dev` uses.
+  const mods = smokeImports(w);
+  if (mods.length) {
+    const py = venvPython(appDir);
+    if (!existsSync(py)) add("framework importable", false, `no venv at ${py}: run \`uv sync\``);
+    else {
+      const bad = runSmokeImports(py, mods, { PYTHONPATH: src }, appDir);
+      add("framework importable", !bad, bad ?? `import ${mods.join(", ")} ok in the project venv`);
+    }
+  } else {
+    add("framework importable", true, "nothing to import for this cmd (not `python -m <module>`)");
+  }
+
+  // The window shell the plugin drives, and the no-IPC guarantee for the
+  // wrapped page: capabilities must not grant any remote url.
+  for (const f of ["ui/index.html", "ui/restarting.html"])
+    add(f, existsSync(join(appDir, f)), join(appDir, f));
+  try {
+    const conf = JSON.parse(readFileSync(join(appDir, "src-tauri", "tauri.conf.json"), "utf-8"));
+    const main = (conf.app?.windows ?? []).find((x: { label?: string }) => x.label === "main");
+    add(
+      'window "main" has create: false',
+      main?.create === false,
+      main?.create === false ? "the plugin builds it with the download and new-window hooks" : "set \"create\": false on the main window in tauri.conf.json",
+    );
+  } catch {
+    /* tauri.conf.json problems are reported by its own check */
+  }
+  const capDir = join(appDir, "src-tauri", "capabilities");
+  const remote: string[] = [];
+  if (existsSync(capDir))
+    for (const f of readdirSync(capDir).filter((n) => n.endsWith(".json"))) {
+      try {
+        if (JSON.parse(readFileSync(join(capDir, f), "utf-8")).remote) remote.push(f);
+      } catch {
+        /* unparseable capability files are tauri's to report */
+      }
+    }
+  add(
+    "wrapped page gets no IPC",
+    remote.length === 0,
+    remote.length ? `capability ${remote.join(", ")} grants a remote url: the wrapped page would get Tauri IPC` : "no capability grants a remote url",
+  );
+
+  // After a build: the bundled interpreter must still import the framework
+  // (the post-prune smoke test `pylair build` runs).
+  const res = join(appDir, "src-tauri", "resources");
+  const bundled = join(res, "python", process.platform === "win32" ? "python.exe" : "bin/python3");
+  if (mods.length && existsSync(bundled) && existsSync(join(res, STAGED_APP))) {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const bad = runSmokeImports(
+      bundled,
+      mods,
+      { PYTHONPATH: `${join(res, STAGED_APP)}${sep}${join(res, "site-packages")}`, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
+      appDir,
+    );
+    add("bundled env imports framework", !bad, bad ?? "ok with the bundled interpreter (last build)");
+  }
 }
 
 export async function doctor(appDir: string): Promise<number> {
@@ -62,13 +152,17 @@ export async function doctor(appDir: string): Promise<number> {
   if (existsSync(join(appDir, "pyproject.toml"))) {
     try {
       const cfg = loadConfig(appDir);
-      add("[tool.pylair] config", true, `app-module=${cfg.appModule} source=${cfg.source}`);
-      add("source dir", existsSync(join(appDir, cfg.source)), join(appDir, cfg.source));
-      add(
-        "requirements",
-        existsSync(join(appDir, cfg.requirements)),
-        cfg.requirements,
-      );
+      if (cfg.mode === "wrap") {
+        wrapChecks(appDir, cfg, add);
+      } else {
+        add("[tool.pylair] config", true, `app-module=${cfg.appModule} source=${cfg.source}`);
+        add("source dir", existsSync(join(appDir, cfg.source)), join(appDir, cfg.source));
+        add(
+          "requirements",
+          existsSync(join(appDir, cfg.requirements)),
+          cfg.requirements,
+        );
+      }
     } catch (e) {
       add("[tool.pylair] config", false, (e as Error).message);
     }

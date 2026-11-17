@@ -8,9 +8,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { join } from "node:path";
-import { importRoot, loadConfig, tauriCliEntry } from "./config.js";
+import { importRoot, loadConfig, tauriCliEntry, type PylairConfig } from "./config.js";
 import { emit } from "./codegen.js";
 import { loadManifest } from "./manifest.js";
+import { wrapWarnings } from "./wrapconfig.js";
+import { ensureDevResources, writeRuntimeFile } from "./wrapbuild.js";
 
 const isWin = platform() === "win32";
 
@@ -51,6 +53,63 @@ function runCodegen(appDir: string, cfgModule: string, out: string, source: stri
   return false;
 }
 
+/** `bundle.resources` keys from tauri.conf.json (map or list form). */
+function resourceKeys(appDir: string): string[] {
+  try {
+    const tconf = JSON.parse(
+      readFileSync(join(appDir, "src-tauri", "tauri.conf.json"), "utf-8"),
+    );
+    const res = tconf?.bundle?.resources;
+    return Array.isArray(res) ? res : Object.keys(res ?? {});
+  } catch {
+    return []; // unreadable: `tauri dev` will surface the real error itself
+  }
+}
+
+/** Wrap mode: no codegen and no @expose surface. The plugin reads the
+ * runtime file named by PYLAIR_WRAP_CONFIG, starts the launcher with the
+ * project venv, and shows the server in the window. A change to a .py file
+ * restarts the server (new port, the window follows). */
+async function devWrap(appDir: string, cfg: PylairConfig): Promise<number> {
+  for (const w of wrapWarnings(cfg.wrap!)) console.warn(`pylair: warning: ${w}`);
+  const srcDir = join(appDir, cfg.source);
+  if (!existsSync(srcDir))
+    throw new Error(`source dir ${srcDir} not found ([tool.pylair] source)`);
+  const stateDir = join(appDir, ".pylair");
+  mkdirSync(stateDir, { recursive: true });
+  const trigger = join(stateDir, "restart-trigger");
+  writeFileSync(trigger, String(Date.now()));
+  const runtime = join(stateDir, "pylair-wrap.json");
+  // Absolute source: the plugin runs the server in it, not in a staged copy.
+  writeRuntimeFile(runtime, cfg, srcDir);
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  watch(srcDir, { recursive: true }, (_ev, file) => {
+    if (!file?.endsWith(".py")) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => writeFileSync(trigger, String(Date.now())), 150);
+  });
+
+  ensureDevResources(appDir, resourceKeys(appDir));
+  console.log("pylair: watching python source; starting tauri dev (wrap mode)");
+  const child = spawn(process.execPath, [tauriCliEntry(appDir), "dev"], {
+    cwd: appDir,
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      PYLAIR_WRAP_CONFIG: runtime,
+      PYLAIR_PYTHON: venvPython(appDir),
+      PYLAIR_RESTART_TRIGGER: trigger,
+      PYLAIR_DEV: "1",
+    },
+  });
+  return new Promise((resolve) => {
+    child.on("exit", (code) => resolve(code ?? 1));
+    for (const sig of ["SIGINT", "SIGTERM"] as const)
+      process.on(sig, () => child.kill(sig));
+  });
+}
+
 export async function dev(opts: { appDir: string }): Promise<number> {
   const { appDir } = opts;
   const cfg = loadConfig(appDir);
@@ -61,6 +120,8 @@ export async function dev(opts: { appDir: string }): Promise<number> {
     throw new Error(`could not run uv: ${sync.error.message} — is uv on PATH?`);
   if (sync.status !== 0)
     throw new Error("uv sync failed — is pyproject.toml valid?");
+
+  if (cfg.mode === "wrap") return devWrap(appDir, cfg);
 
   const srcDir = join(appDir, cfg.source);
   const stateDir = join(appDir, ".pylair");

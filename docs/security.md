@@ -425,7 +425,7 @@ interpreter or module runs. On Windows the interpreter spawns with
 `PYLAIR_CONSOLE` (any value) in the launching environment to keep the
 window for debugging — it grants no extra privilege, just visibility.
 
-## 9. Wrap mode (W1 and W3 landed; W2 pending)
+## 9. Wrap mode (W1, W2 and W3 landed)
 
 Wrap mode shows a Python web framework's own UI (Gradio, Streamlit,
 FastAPI...) in the window, served on `127.0.0.1` on a random port. Its
@@ -439,8 +439,10 @@ stands:
 | The server's stdout can never corrupt the frame channel | **Done (W1).** Frame fd hygiene plus a closed stdin and logs-only stdout/stderr for the server; covered by a fault-injection test. |
 | The server and everything it spawned die with the launcher | **Done (W1).** POSIX: the server shares the launcher's process group, which the supervisor kills and reaps (the launcher also walks the group, escalating SIGTERM to SIGKILL). Windows: the launcher sits in the supervisor's Job Object with `KILL_ON_JOB_CLOSE`. Covered by tests on both. Proven per OS, not across them: see the CI legs. |
 | Hung-server detection | **Done (W1).** The launcher probes the server over HTTP and exits non-zero after 3 consecutive misses. Pings alone cannot see a wedged server. |
-| In-window navigation locked to the app origin, other links to the system browser | **W2.** `same_origin` exists and is tested; the navigation and new-window handlers are not registered yet. |
-| The wrapped page gets zero Tauri IPC | **Verified in the W0 spike** (all `plugin:*` invokes rejected from the remote origin); the permanent acceptance-job check is **W2/W3**. |
+| In-window navigation locked to the app origin, other links to the system browser | **Done (W2).** The plugin's navigation hook and the window's new-window hook apply `wrap::policy` (exact origin via `same_origin`; `http`, `https` and `mailto` elsewhere go to the system browser, every other scheme is refused). `target=_blank` and `window.open` never open a second window. Unit-tested on every OS; the installed self-test proves the refusal on the real webview. |
+| The wrapped page gets zero Tauri IPC | **Done (W2), permanently checked.** The wrap template's capability grants no `remote` url, so only the local pages (starting, restarting) have IPC. `pylair doctor` fails a capability that grants a remote url, the scaffold test asserts the template has none, and the installed self-test (`PYLAIR_SELF_TEST_WRAP`) injects a probe into the wrapped page that must find 10 IPC calls all denied: a future capability change that opens remote IPC fails there. |
+| Downloads: Save As by default, feedback after | **Done (W2).** A native Save As dialog (`downloads = "ask"`) or straight to Downloads without overwriting (`"downloads"`); the file name is reduced to its last path component. A small note in the page says where it went. |
+| Runtime events reach local pages only | **Done (W2).** While the window shows the wrapped page it is sent no `pylair://state` or `pylair://stderr` events, so the server's log and the lifecycle are not delivered into remote content. |
 | Adapters force `share=False`, disable tunnels and framework telemetry | **Done (W3).** The gradio adapter patches `Blocks.launch` so `share=False` wins over the entry's own argument (there is no config-only way to forbid a tunnel), and sets `GRADIO_ANALYTICS_ENABLED=False` before the import. The streamlit adapter runs `streamlit run` with `--browser.gatherUsageStats false` plus the `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false` env. `command` mode still runs whatever the app does. |
 | The server listens on loopback only | **Enforced for the adapters (W3), not for `command` mode.** The gradio patch forces `server_name=127.0.0.1`; the streamlit flags force `--server.address 127.0.0.1`. The launcher chooses and passes a loopback *port* (`{port}`, `PYLAIR_PORT`) and probes `127.0.0.1`, but a `command` that binds `0.0.0.0` is reachable from the network. Recipes must pass `127.0.0.1` as the host. |
 

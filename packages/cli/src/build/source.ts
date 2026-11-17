@@ -59,6 +59,9 @@ export function stageSource(
   dest: string,
   include: string[] = [],
   warn: (msg: string) => void = console.warn,
+  /** Top-level names to leave out entirely (a root source dir holding the
+   * project's own `src-tauri`, `node_modules`...). Not reported as skipped. */
+  exclude: string[] = [],
 ): string[] {
   const pats = include.map((g) => g.replace(/\\/g, "/").replace(/^\.\//, ""));
   const skipped: string[] = [];
@@ -67,6 +70,7 @@ export function stageSource(
     filter: (src) => {
       const rel = relative(srcDir, src).replace(/\\/g, "/");
       if (!rel) return true; // the root itself
+      if (exclude.includes(rel.split("/")[0])) return false;
       if (pats.some((g) => matchGlob(g, rel))) return true;
       if (!secretish(rel)) return true;
       if (pats.some((g) => couldMatchUnder(g, rel))) return true; // descend only

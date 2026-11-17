@@ -7,14 +7,14 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { build } from "./build.js";
 import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
 import { doctor } from "./doctor.js";
 import { loadManifest } from "./manifest.js";
-
-const COMMANDS = ["dev", "build", "doctor", "codegen"] as const;
+import { initWrap } from "./wrap.js";
+import { WRAP_FRAMEWORKS, type WrapFramework } from "./wrapconfig.js";
+import { cliVersion } from "./version.js";
 
 function usage(): void {
   console.log(`pylair — Pylair CLI
@@ -26,6 +26,19 @@ Commands:
   build     Produce a native installer with bundled Python
   doctor    Diagnose environment and app config
   codegen   Generate typed TypeScript stubs from @expose signatures
+  wrap      Turn an existing Python web app into a desktop app (wrap mode)
+  init      pylair init --mode wrap  (the same as \`pylair wrap\`)
+
+wrap options:
+  [entry]               The app's entry file (gradio / streamlit), e.g. app.py
+  --framework <name>    command | gradio | streamlit (default: from your
+                        dependencies, or command when --cmd is given)
+  --cmd <argv...>       Server command for framework command; {port} is the
+                        port Pylair picks. Everything after --cmd is the command.
+  --source <dir>        Directory holding the app (default: the entry's, else app)
+  --dir <path>          Project directory (default: cwd)
+  Needs a dependency manifest (pyproject.toml, ideally with uv.lock). A bare
+  app.py gets an error that offers \`uv init\`; imports are never guessed.
 
 codegen options:
   --module, -m <name>   Python module exposing @expose functions (required)
@@ -38,6 +51,7 @@ build options:
   --dir <path>          App directory (default: cwd)
   --bundles <list>      Comma-separated bundle kinds passed to tauri build
   --skip-fetch          Reuse already-staged resources/python
+  --stage-only          Stage and verify the bundle, stop before tauri build
   Any other flags are forwarded to tauri build, including the value
   after a --flag; everything after -- is forwarded verbatim.
 
@@ -92,11 +106,13 @@ export function parseBuildArgs(rest: string[]): {
   dir?: string;
   bundles?: string;
   skipFetch: boolean;
+  stageOnly: boolean;
   tauriArgs: string[];
 } {
   let dir: string | undefined;
   let bundles: string | undefined;
   let skipFetch = false;
+  let stageOnly = false;
   const tauriArgs: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -119,6 +135,10 @@ export function parseBuildArgs(rest: string[]): {
       skipFetch = true;
       continue;
     }
+    if (key === "--stage-only") {
+      stageOnly = true;
+      continue;
+    }
     if (a.startsWith("--")) {
       tauriArgs.push(a);
       if (inline === undefined && i + 1 < rest.length && !rest[i + 1].startsWith("-"))
@@ -126,7 +146,46 @@ export function parseBuildArgs(rest: string[]): {
     }
   }
   if (bundles !== undefined) tauriArgs.push("--bundles", bundles);
-  return { dir, bundles, skipFetch, tauriArgs };
+  return { dir, bundles, skipFetch, stageOnly, tauriArgs };
+}
+
+/** Split `pylair wrap` / `pylair init` args. Everything after `--cmd` is the
+ * server command, verbatim. Exported for tests. */
+export function parseWrapArgs(rest: string[]): {
+  dir?: string;
+  entry?: string;
+  framework?: WrapFramework;
+  cmd?: string[];
+  source?: string;
+  local?: string;
+  mode?: string;
+} {
+  const out: ReturnType<typeof parseWrapArgs> = {};
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--cmd") {
+      out.cmd = rest.slice(i + 1);
+      break;
+    }
+    const eq = a.indexOf("=");
+    const key = a.startsWith("--") && eq !== -1 ? a.slice(0, eq) : a;
+    const inline = a.startsWith("--") && eq !== -1 ? a.slice(eq + 1) : undefined;
+    const value = () => inline ?? rest[++i];
+    if (key === "--dir") out.dir = value();
+    else if (key === "--framework") {
+      const f = value();
+      if (!(WRAP_FRAMEWORKS as readonly string[]).includes(f))
+        throw new Error(`--framework must be one of ${WRAP_FRAMEWORKS.join(", ")}, got '${f}'`);
+      out.framework = f as WrapFramework;
+    } else if (key === "--source") out.source = value();
+    else if (key === "--local") out.local = value();
+    else if (key === "--mode") out.mode = value();
+    else if (a.startsWith("-")) throw new Error(`unknown option '${a}' (see pylair --help)`);
+    else if (out.entry === undefined) out.entry = a;
+    else throw new Error(`unexpected argument '${a}'`);
+  }
+  if (out.cmd && out.cmd.length === 0) throw new Error("--cmd needs a command");
+  return out;
 }
 
 function codegen(argv: string[]): number {
@@ -156,20 +215,6 @@ function codegen(argv: string[]): number {
   return 0;
 }
 
-/** The CLI's own version, read from package.json relative to this built
- * file (dist/cli.js -> ../package.json), so it works from any cwd and
- * from the published tarball. Falls back to 0.0.0 if unreadable. */
-function cliVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf-8"),
-    );
-    return String(pkg.version ?? "0.0.0");
-  } catch {
-    return "0.0.0";
-  }
-}
-
 export function main(argv: string[]): number | Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
@@ -180,6 +225,35 @@ export function main(argv: string[]): number | Promise<number> {
     console.log(cliVersion());
     return 0;
   }
+  if (command === "wrap" || command === "init") {
+    let p: ReturnType<typeof parseWrapArgs>;
+    try {
+      p = parseWrapArgs(rest);
+      if (command === "init" && p.mode !== "wrap")
+        throw new Error(
+          p.mode === "bridge"
+            ? "bridge apps are scaffolded with `npx create-pylair <name>`; `pylair init` only supports --mode wrap"
+            : "pass --mode wrap",
+        );
+    } catch (e) {
+      console.error(`pylair ${command}: ${(e as Error).message}`);
+      return 2;
+    }
+    return initWrap({
+      appDir: resolveAppDir(p.dir),
+      entry: p.entry,
+      framework: p.framework,
+      cmd: p.cmd,
+      source: p.source,
+      local: p.local,
+    }).then(
+      () => 0,
+      (e) => {
+        console.error(`pylair ${command}: ${(e as Error).message}`);
+        return 1;
+      },
+    );
+  }
   if (command === "codegen") {
     try {
       return codegen(rest);
@@ -189,11 +263,12 @@ export function main(argv: string[]): number | Promise<number> {
     }
   }
   if (command === "build") {
-    const { dir, skipFetch, tauriArgs } = parseBuildArgs(rest);
+    const { dir, skipFetch, stageOnly, tauriArgs } = parseBuildArgs(rest);
     return build({
       appDir: resolveAppDir(dir),
       tauriArgs,
       skipFetch,
+      stageOnly,
     }).then(
       () => 0,
       (e) => {

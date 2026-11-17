@@ -1,0 +1,125 @@
+/** Scaffolding core, shared by the `create-pylair` binary and `pylair wrap`
+ * (which scaffolds the wrap template into an existing project).
+ *
+ * Importing this module has no side effects; `index.ts` is the CLI.
+ */
+
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const TEMPLATES = resolve(fileURLToPath(import.meta.url), "../../templates");
+const BINARY = new Set([".png", ".ico", ".icns"]);
+
+/** The registry versions a scaffolded app pins. Bump together with the
+ * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
+export const PINS = {
+  py: "pylair==0.1.0rc10",
+  js: "0.1.0-rc.20",
+  cli: "0.1.0-rc.20",
+  rs: `tauri-plugin-pylair = "=0.1.0-rc.15"`,
+} as const;
+
+/**
+ * Wrap mode needs the crate (`Builder::wrap`) and the `pylair.wrap`
+ * launcher, neither of which is in the versions pinned above. Until the
+ * release train publishes them and flips this to true (with the pins
+ * bumped), a registry-mode wrap scaffold would build an app that cannot
+ * compile, so it is refused with the way forward. `--local` always works:
+ * it points every dependency at a checkout that has wrap mode.
+ */
+export const WRAP_IN_PUBLISHED_VERSIONS = false;
+
+export function wrapUnavailable(local: string | undefined): string | undefined {
+  if (local || WRAP_IN_PUBLISHED_VERSIONS) return undefined;
+  return (
+    "wrap mode is not in the published Pylair packages yet (it ships with 0.1.0). " +
+    "Until then scaffold against a checkout: --local /path/to/pylair-repo"
+  );
+}
+
+export function substitutions(name: string, identifier: string, local?: string): Record<string, string> {
+  const snake = name.replace(/-/g, "_").replace(/\W/g, "_");
+  const subs: Record<string, string> = {
+    __APP_NAME__: name,
+    __APP_ID__: identifier,
+    __APP_SNAKE__: snake,
+  };
+  if (local) {
+    const root = resolve(local);
+    const unixPath = (p: string) => p.replace(/\\/g, "/");
+    const py = unixPath(join(root, "python/pylair"));
+    subs.__PYLAIR_PY__ = `pylair @ file://${py.startsWith("/") ? py : `/${py}`}`;
+    subs.__PYLAIR_JS_PKG__ = "@pylair/client";
+    subs.__PYLAIR_JS__ = `file:${unixPath(join(root, "packages/client"))}`;
+    subs.__PYLAIR_RS__ = `tauri-plugin-pylair = { path = "${unixPath(join(root, "crates/tauri-plugin-pylair"))}" }`;
+    subs.__PYLAIR_CLI__ = `file:${unixPath(join(root, "packages/cli"))}`;
+  } else {
+    subs.__PYLAIR_PY__ = PINS.py;
+    subs.__PYLAIR_JS_PKG__ = "@pylair/client";
+    subs.__PYLAIR_JS__ = PINS.js;
+    subs.__PYLAIR_CLI__ = PINS.cli;
+    subs.__PYLAIR_RS__ = PINS.rs;
+  }
+  return subs;
+}
+
+function fill(text: string, subs: Record<string, string>): string {
+  let out = text;
+  for (const [k, v] of Object.entries(subs)) out = out.split(k).join(v);
+  return out;
+}
+
+export interface CopyOptions {
+  /** Never overwrite a file that already exists (initialising a project
+   * that has its own files). */
+  keepExisting?: boolean;
+  /** Leave out any template entry whose `/`-separated relative path (in
+   * the output, `.tmpl` and `_gitignore` already renamed) this accepts. */
+  skip?: (rel: string) => boolean;
+}
+
+export interface CopyResult {
+  /** Files written, relative to the destination, `/`-separated. */
+  written: string[];
+  /** Files left alone because they already existed (`keepExisting`). */
+  kept: string[];
+}
+
+/** Copy a template tree, substituting placeholders. */
+export function copyTree(
+  src: string,
+  dst: string,
+  subs: Record<string, string>,
+  opts: CopyOptions = {},
+  rel = "",
+): CopyResult {
+  const out: CopyResult = { written: [], kept: [] };
+  mkdirSync(dst, { recursive: true });
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    const s = join(src, e.name);
+    const isTmpl = e.name.endsWith(".tmpl");
+    // npm strips .gitignore from published tarballs: ship it as
+    // _gitignore (create-vite convention) and rename on scaffold.
+    const name = e.name === "_gitignore" ? ".gitignore" : e.name;
+    const outName = isTmpl ? name.slice(0, -5) : name;
+    const d = join(dst, outName);
+    const r = rel ? `${rel}/${outName}` : outName;
+    if (opts.skip?.(r)) continue;
+    if (e.isDirectory()) {
+      const sub = copyTree(s, d, subs, opts, r);
+      out.written.push(...sub.written);
+      out.kept.push(...sub.kept);
+    } else if (opts.keepExisting && existsSync(d)) {
+      out.kept.push(r);
+    } else {
+      if (isTmpl || !BINARY.has(e.name.slice(e.name.lastIndexOf(".")))) {
+        writeFileSync(d, fill(readFileSync(s, "utf-8"), subs));
+      } else {
+        cpSync(s, d);
+      }
+      out.written.push(r);
+    }
+  }
+  return out;
+}

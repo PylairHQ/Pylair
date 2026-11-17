@@ -7,9 +7,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { MODES, parseWrapConfig } from "./wrapconfig.js";
+import type { Mode, WrapConfig } from "./wrapconfig.js";
+
+export type { Mode, WrapConfig } from "./wrapconfig.js";
 
 export interface PylairConfig {
-  /** Python module holding the @expose functions (e.g. "app.backend"). */
+  /** `bridge` (default) or `wrap` (an existing Python web UI in the window). */
+  mode: Mode;
+  /** `[tool.pylair.wrap]`; present exactly when `mode` is `wrap`. */
+  wrap?: WrapConfig;
+  /** Python module holding the @expose functions (e.g. "app.backend").
+   * Empty in wrap mode, which has no @expose surface. */
   appModule: string;
   /** Directory staged as the app backend source (default "backend"). */
   source: string;
@@ -35,16 +44,6 @@ export interface TauriConfig {
   macSigningIdentity?: string;
 }
 
-const KEYMAP: Record<string, keyof PylairConfig> = {
-  "app-module": "appModule",
-  source: "source",
-  requirements: "requirements",
-  "python-version": "pythonVersion",
-  prune: "prune",
-  include: "include",
-  bundles: "bundles",
-};
-
 /** Parse [tool.pylair] with smol-toml — no Python interpreter required at
  * build/dev time (a system python3 may be <3.11 or absent entirely). */
 export function loadConfig(appDir: string): PylairConfig {
@@ -62,16 +61,26 @@ export function loadConfig(appDir: string): PylairConfig {
     throw new Error(`could not parse ${pyproject}: ${(e as Error).message}`);
   }
 
+  const modeRaw = raw.mode ?? "bridge";
+  if (typeof modeRaw !== "string" || !(MODES as readonly string[]).includes(modeRaw))
+    throw new Error(
+      `[tool.pylair] mode must be "bridge" or "wrap", got ${JSON.stringify(modeRaw)} (${pyproject})`,
+    );
+  const mode = modeRaw as Mode;
+  const wrap = mode === "wrap" ? parseWrapConfig(raw.wrap, pyproject) : undefined;
+
   const cfg: PylairConfig = {
+    mode,
+    wrap,
     appModule: String(raw["app-module"] ?? ""),
-    source: String(raw.source ?? "backend"),
+    source: String(raw.source ?? (mode === "wrap" ? "app" : "backend")),
     requirements: String(raw.requirements ?? "requirements.txt"),
     pythonVersion: String(raw["python-version"] ?? "3.12"),
     prune: Array.isArray(raw.prune) ? raw.prune.map(String) : [],
     include: Array.isArray(raw.include) ? raw.include.map(String) : [],
     bundles: raw.bundles ? String(raw.bundles) : undefined,
   };
-  if (!cfg.appModule)
+  if (mode === "bridge" && !cfg.appModule)
     throw new Error(
       `[tool.pylair] app-module is required in ${pyproject} ` +
         `(the module holding your @expose functions)`,

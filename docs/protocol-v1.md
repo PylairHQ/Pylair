@@ -285,8 +285,11 @@ default is the bridge kind, and nothing below applies to it.
   nothing to queue them for).
 - **The url is validated before it is trusted.** It must parse as `http`
   with the host exactly `127.0.0.1` and an explicit port, carry no
-  credentials, and share its origin with `http://127.0.0.1:<port>`
-  (`same_origin`, parse-based). `localhost`, `[::1]`, `https`, a missing
+  credentials, contain no control character, whitespace or backslash, and
+  share its origin with `http://127.0.0.1:<port>` (`same_origin`,
+  parse-based; the control-character rule exists because the url parser
+  silently drops a CR and reads a backslash as a slash, so a JSON-escaped CR
+  that was never decoded would navigate to `/r`). `localhost`, `[::1]`, `https`, a missing
   port, `user@host` forms and `127.0.0.1.evil.com` are all rejected. A
   missing, non-string or failing url is a **protocol violation**, handled
   like a malformed frame: kill, `crashed`, restart policy. The url is the

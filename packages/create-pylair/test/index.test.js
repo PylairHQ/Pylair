@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,5 +99,78 @@ test("no args fails loudly when stdin is not a TTY", () => {
   const res = scaffold([], dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /app name required/);
+  rmSync(dir, { recursive: true });
+});
+
+const REPO = fileURLToPath(new URL("../../..", import.meta.url));
+
+test("--mode wrap needs --local until wrap mode is published", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const res = scaffold(["w-app", "--mode", "wrap"], dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /wrap mode is not in the published Pylair packages yet/);
+  assert.match(res.stderr, /--local/);
+  assert.ok(!existsSync(join(dir, "w-app")), "a refused scaffold must create nothing");
+  rmSync(dir, { recursive: true });
+});
+
+test("--mode wrap --local scaffolds a wrap app with no React and no remote capability", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const res = scaffold(["w-app", "--mode", "wrap", "--local", REPO], dir);
+  assert.equal(res.status, 0, res.stderr);
+  const app = join(dir, "w-app");
+  for (const f of [
+    "pyproject.toml",
+    "app/main.py",
+    "ui/index.html",
+    "ui/restarting.html",
+    "ui/status.js",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json",
+    "src-tauri/capabilities/default.json",
+    "src-tauri/src/lib.rs",
+    ".gitignore",
+  ])
+    assert.ok(existsSync(join(app, f)), `missing ${f}`);
+  for (const f of ["src/App.tsx", "vite.config.ts", "index.html"])
+    assert.ok(!existsSync(join(app, f)), `wrap template must not ship ${f}`);
+  const py = readFileSync(join(app, "pyproject.toml"), "utf8");
+  assert.match(py, /mode = "wrap"/);
+  assert.match(py, /framework = "command"/);
+  const conf = JSON.parse(readFileSync(join(app, "src-tauri/tauri.conf.json"), "utf8"));
+  assert.equal(conf.app.windows[0].create, false, "the plugin builds the window");
+  // Permanent: the wrapped page is a remote origin and must get no IPC, so
+  // no capability may name a remote url.
+  const caps = JSON.parse(readFileSync(join(app, "src-tauri/capabilities/default.json"), "utf8"));
+  assert.equal(caps.remote, undefined);
+  assert.deepEqual(caps.windows, ["main"]);
+  rmSync(dir, { recursive: true });
+});
+
+test("--mode must be bridge or wrap, and the bridge template is untouched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const bad = scaffold(["x-app", "--mode", "hybrid"], dir);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--mode must be "bridge" or "wrap"/);
+  const ok = scaffold(["b-app", "--mode", "bridge"], dir);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(existsSync(join(dir, "b-app/src/App.tsx")));
+  assert.ok(!existsSync(join(dir, "b-app/ui")));
+  rmSync(dir, { recursive: true });
+});
+
+test("--into adds the wrap shell to an existing project without overwriting anything", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  writeFileSync(join(dir, "pyproject.toml"), "# mine\n");
+  writeFileSync(join(dir, "package.json"), "{}\n");
+  const res = scaffold(["--mode", "wrap", "--into", dir, "--name", "mine", "--local", REPO], dir);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout.trim().split("\n").pop());
+  assert.ok(out.kept.includes("package.json"));
+  assert.ok(out.written.includes("src-tauri/tauri.conf.json"));
+  assert.equal(readFileSync(join(dir, "pyproject.toml"), "utf8"), "# mine\n");
+  assert.equal(readFileSync(join(dir, "package.json"), "utf8"), "{}\n");
+  assert.ok(!existsSync(join(dir, "app")), "no sample app in an existing project");
+  assert.notEqual(scaffold(["--mode", "wrap", "--into", dir, "--name", "Bad Name", "--local", REPO], dir).status, 0);
   rmSync(dir, { recursive: true });
 });
