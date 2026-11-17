@@ -118,14 +118,101 @@ unchanged:
   acceptance-job check, so a future capability change that opens remote
   IPC fails CI.
 
-### What capabilities do not scope (known limitation)
+### Restricting functions per window
 
-Invocation is capability-level: within a granted capability, every
-covered webview can invoke every exposed function. Pylair adds no
-per-window or per-function ACL on invocation. Finer scoping is planned
-with wrap mode.
+By default a capability that grants `pylair:default` lets every window it
+covers call every `@expose`d function. To narrow that, put a **command
+scope** on the permission. Both call commands, `python_call` and
+`python_call_stream`, read the scope and check the function name before
+anything else happens (before the window is subscribed, a task id is
+allocated, credit is taken or a channel is written to), so a denied call
+costs nothing and Python never sees it. The wire protocol between the host
+and Python is unchanged; this is a host-side check.
 
-**Task control, however, is owner-scoped.** The supervisor records
+Each scope entry is `{ "name": "..." }` and nothing else (an unknown key
+makes the entry malformed, and a malformed entry **fails closed**: every
+call it covers is denied rather than the entry being ignored). A `name` is
+either an exact function name or a prefix with a single trailing `*`
+(`"admin_*"`); a `*` anywhere else is an ordinary character.
+
+Hide a few functions from a window, keeping everything else (recommended
+shape, one entry on the set covers both call commands):
+
+```json
+{
+  "identifier": "main",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    { "identifier": "pylair:default", "deny": [{ "name": "admin_*" }] }
+  ]
+}
+```
+
+Give a window only a short list of functions (scope **both** commands the
+same way, since a stream call goes through `python_call_stream`):
+
+```json
+{
+  "identifier": "reports",
+  "windows": ["reports"],
+  "permissions": [
+    { "identifier": "pylair:allow-python-call",        "allow": [{ "name": "report_*" }] },
+    { "identifier": "pylair:allow-python-call-stream", "allow": [{ "name": "report_*" }] },
+    "pylair:allow-python-state"
+  ]
+}
+```
+
+The decision, applied per call to the entries that cover the calling
+window:
+
+1. no entries at all: the call is allowed;
+2. any `deny` entry matches: denied, always, whatever else matches;
+3. otherwise, if there is any `allow` entry, one must match or the call is
+   denied;
+4. otherwise (only `deny` entries, none matched): allowed.
+
+**Allow entries narrow, they do not add.** Tauri unions the scope entries
+of every capability that covers a window. So a capability that grants
+`pylair:default` unscoped to a window and a second capability that gives
+the same window `allow: [{ "name": "report_*" }]` do not combine into
+"everything": the one allow entry makes it "only `report_*`". Likewise
+two capabilities on one window each listing allow entries union their
+lists, and deny entries from any of them apply. Two windows are judged
+independently, each by its own covering capabilities. A window no
+capability covers has no access at all (Tauri's ACL rejects the command
+before the plugin runs).
+
+**The `allow: []` trap.** An empty allow list is the same as no entries,
+so `{ "identifier": "pylair:default", "allow": [] }` permits **every**
+function, the opposite of what it looks like. To withhold calls from a
+window, do not grant the permission; to restrict, list names.
+`pylair build` and `pylair doctor` reject this configuration. They also
+reject a window that scopes `python-call` but not `python-call-stream`
+(or the reverse), since the unscoped command is a side door, and a
+malformed entry; they warn on a pattern that matches no exposed function
+(`pylair build` only, because that needs the app's function list; if it
+cannot be loaded the check is skipped with a one-line note) and on a
+window whose two commands carry different scopes.
+
+A denied call returns `PERMISSION_DENIED` (`-32050`, protocol §8) with
+`data: {"fn", "window"}`; `@pylair/client` raises `PermissionDeniedError`
+with `.fn` and `.window`. No runtime warning is logged for a pattern that
+matches nothing; that is the CLI's job.
+
+**What this does not hide.** Function *names* are still visible to every
+window through the `pylair://exposes` event (and the generated stubs). The
+scope stops calls, not discovery; do not put secrets in function names.
+The scaffolded template's capability stays open (no scope) on purpose;
+add scopes when you add windows or load less-trusted content.
+
+### What stays capability-level, and what is owner-scoped
+
+Finer-grained rules than the per-function allow/deny above (per-argument,
+per-tag) are not implemented; see `docs/decisions/0004-per-function-permissions.md`.
+
+**Task control is owner-scoped.** The supervisor records
 `{task → call id, owner webview}` per runtime generation, where the owner
 is the Tauri-reported window label — never a JS-supplied value:
 
