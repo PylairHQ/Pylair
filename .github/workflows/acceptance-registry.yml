@@ -202,13 +202,34 @@ jobs:
                capabilities/selftest-winb.json
             echo "PYLAIR_WINB_CAP=1" >> "$GITHUB_ENV"
             echo "two-window self-test capability written (resolved crate carries the permission)"
+            CRATE_VER=$(grep -A1 'name = "tauri-plugin-pylair"' Cargo.lock \
+              | grep -o 'version = "[^"]*"' | head -1 | cut -d'"' -f2)
+            # Per-function permissions: the canonical file denies `add` for
+            # win-b, and the self-test then REQUIRES win-b to be denied.
+            # A published crate predating fn scoping (no src/fn_scope.rs)
+            # cannot enforce that: write the file without the deny entry and
+            # leave out the fixture function, so the client reports
+            # "fn-permission": "skipped: ..." instead of failing. Once the
+            # resolved crate has fn scoping the check is mandatory again.
+            FNSCOPE=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" \
+              -path "*tauri-plugin-pylair-$CRATE_VER/src/fn_scope.rs" -print -quit 2>/dev/null)
+            if [ -n "$FNSCOPE" ]; then
+              cat >> ../backend/app.py <<'PYEOF'
+
+          @expose
+          def fn_permissions_fixture() -> None:
+              return None
+          PYEOF
+              echo "fn_permissions_fixture appended (resolved crate $CRATE_VER enforces per-function permissions)"
+            else
+              node -e 'const fs=require("fs");const f="capabilities/selftest-winb.json";const j=JSON.parse(fs.readFileSync(f,"utf8"));j.permissions=j.permissions.map(p=>typeof p==="object"&&p.identifier==="pylair:default"?"pylair:default":p);fs.writeFileSync(f,JSON.stringify(j,null,2))'
+              echo "resolved crate $CRATE_VER predates per-function permissions: selftest-winb.json written WITHOUT the deny entry, fn-permission will be skipped"
+            fi
             # The stderr probe additionally needs the resolved crate's
             # stderr_targets filter: a published crate predating it
             # broadcasts stderr by design and would fail on the missing
             # feature. Grep the lockfile-pinned crate source; the client
             # self-test skips the probe when the fixture is absent.
-            CRATE_VER=$(grep -A1 'name = "tauri-plugin-pylair"' Cargo.lock \
-              | grep -o 'version = "[^"]*"' | head -1 | cut -d'"' -f2)
             LIBRS=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" \
               -path "*tauri-plugin-pylair-$CRATE_VER/src/lib.rs" -print -quit 2>/dev/null)
             if [ -n "$LIBRS" ] && grep -q "stderr_targets" "$LIBRS"; then

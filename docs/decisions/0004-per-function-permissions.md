@@ -67,7 +67,14 @@ Option 1, host-side only.
 - The installed two-window self-test (`PYLAIR_SELF_TEST_WEBVIEW`) now
   proves a per-window denial on every OS: `selftest-winb.json` denies
   `add` for `win-b`, which must get `PERMISSION_DENIED` through both
-  commands while `main` still calls it.
+  commands while `main` still calls it. The check is armed by a fixture
+  function (`fn_permissions_fixture`, the same pattern as `log_stderr`)
+  that exists only where the plugin enforces scopes: the path-dependency
+  acceptance jobs always carry it (mandatory), while registry acceptance
+  appends it only when the resolved crate has `src/fn_scope.rs`, and
+  otherwise writes `selftest-winb.json` without the deny entry and the
+  check reports `skipped: resolved plugin predates per-function
+  permissions`.
 - A real-ACL test crate (`crates/fn-scope-acl-tests`) embeds capability
   files through `tauri_build` and drives the commands through the mock
   runtime's IPC, so scope parsing and union behaviour are tested against

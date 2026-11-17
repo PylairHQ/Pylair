@@ -49,6 +49,26 @@ async function selfTestLabel(): Promise<string> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The fn-permission check's overall verdict. `supported` says whether the
+ * resolved plugin enforces per-function permissions (the CI fixture function
+ * exists only then). Unsupported is a skip with its reason, never a failure;
+ * supported stays mandatory, so a stale capability file or a plugin that
+ * stopped enforcing still fails.
+ */
+export function judgeFnPermission(
+  supported: boolean,
+  probe: Partial<DenyProbe> | undefined,
+  fn: string,
+  mainCallOk: boolean,
+): { ok: boolean; check: string } {
+  if (!supported)
+    return { ok: true, check: "skipped: resolved plugin predates per-function permissions" };
+  const why =
+    judgeDenyProbe(probe, fn) ?? (mainCallOk ? null : `main could not call ${fn} (the "call" check failed)`);
+  return why ? { ok: false, check: `FAIL: ${why}` } : { ok: true, check: "ok" };
+}
+
 /** What win-b saw when it tried a function its capability denies. */
 interface DenyOutcome {
   denied: boolean;
@@ -206,13 +226,29 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   });
   // Per-function permissions: win-b's capability denies `spec.add`. The
   // owner (main) just called it successfully (the "call" check above), so a
-  // pass here means the denial is per window, not global.
-  await run("fn-permission", async () => {
-    const b = await within(bReport, 30_000, "win-b report");
-    const why = judgeDenyProbe(b.denyProbe, spec.add);
-    if (why) throw new Error(why);
-    if (checks["call"] !== "ok") throw new Error(`main could not call ${spec.add} (the "call" check failed)`);
-  });
+  // pass here means the denial is per window, not global. The fixture exists
+  // only when CI found a plugin that enforces scopes (the same pattern as
+  // log_stderr); without it the check is skipped with its reason. It runs
+  // last so its task id cannot disturb the ids the intruder targets.
+  {
+    let supported = true;
+    try {
+      await within(call("fn_permissions_fixture", {}), 30_000, "fn_permissions_fixture");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) supported = false;
+      else {
+        ok = false;
+        checks["fn-permission"] = `FAIL: ${e instanceof Error ? e.message : String(e)}`;
+        supported = true;
+      }
+    }
+    if (checks["fn-permission"] === undefined) {
+      const b = await within(bReport, 30_000, "win-b report").catch(() => undefined);
+      const v = judgeFnPermission(supported, b?.denyProbe, spec.add, checks["call"] === "ok");
+      checks["fn-permission"] = v.check;
+      if (!v.ok) ok = false;
+    }
+  }
   await (await ipc()).invoke(CMD.selftestReport, { result: { ok, checks } });
 }
 
