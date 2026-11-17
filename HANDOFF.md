@@ -61,6 +61,11 @@ below is skipped for rc.18.
 Humans dispatch every publish; an agent's job stops at green CI and a
 prepared bump commit (AGENTS.md, "Release rules").
 
+Before starting: check the bundled-interpreter pin is current
+(`PBS_TAG`/`PBS_VERSIONS`/`PBS_SHA256` in `packages/cli/src/build/pbs.ts`
+against the newest python-build-standalone release). pip-audit does not
+cover the bundled CPython.
+
 1. crates.io: `tauri-plugin-pylair`.
 2. PyPI: `pylair` and `pylair-ollama` (`release.yml`, `package` input).
 3. Regenerate `packages/create-pylair/templates/default/src-tauri/Cargo.lock`

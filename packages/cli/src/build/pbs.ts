@@ -3,8 +3,8 @@
 
 import { arch, platform } from "node:os";
 
-export const PBS_TAG = "20251120";
-export const PBS_VERSIONS: Record<string, string> = { "3.12": "3.12.12", "3.13": "3.13.9" };
+export const PBS_TAG = "20261110";
+export const PBS_VERSIONS: Record<string, string> = { "3.12": "3.12.16", "3.13": "3.13.18" };
 const HOST_TRIPLES: Record<string, string> = {
   "darwin:arm64": "aarch64-apple-darwin",
   "darwin:x64": "x86_64-apple-darwin",
@@ -19,16 +19,16 @@ const HOST_TRIPLES: Record<string, string> = {
  * against upstream SHA256SUMS before committing.
  */
 export const PBS_SHA256: Record<string, string> = {
-  "3.12.12-aarch64-apple-darwin": "9955ac87eff0d561e64920dc46fd8625912d2c2be4a53c66ad80125d6d9fbdb7",
-  "3.12.12-aarch64-unknown-linux-gnu": "4c4594cb38ddf6769f11f86818a4c6617652f4994e5a962eb4f8cf0ec977a1be",
-  "3.12.12-x86_64-apple-darwin": "1b4d8eec597ff69a3b67946f30622a6c25c6612e6d15aa431b864ebff66ac8a1",
-  "3.12.12-x86_64-pc-windows-msvc": "70ecfaf0bfc58298db11d6389be92c29ec4ef8cd93ebb6a7e54b41d9fc056b10",
-  "3.12.12-x86_64-unknown-linux-gnu": "8d2cd1393c1aec9d701cebeccb83d1519951f71d3ecb42d5e70c70af4db9be34",
-  "3.13.9-aarch64-apple-darwin": "29d38bd5fbe267b37cecac990015c662796edcf51c2f5e321d59ec06a1850816",
-  "3.13.9-aarch64-unknown-linux-gnu": "fdc5d80488b64fcef3b99f297618f68e5374c13d89e888a66abeff4967afd308",
-  "3.13.9-x86_64-apple-darwin": "9da51afb00480a8ccd4909bd302c80d9c104d633c5e865cf37dd5e587185e125",
-  "3.13.9-x86_64-pc-windows-msvc": "f4c22b31ddbf8d7824cbcba2d8707621c2c8fab1fb6d2c1810c2bb0304d8e9a8",
-  "3.13.9-x86_64-unknown-linux-gnu": "1bc9a94ab2425fb6ae58e45f69cab61647759b57895649701390822d976fa923",
+  "3.12.16-aarch64-apple-darwin": "2f11b8aa3726bdbd87dd9eb76568412faddf4f47e26913fa45d6a2e424972acd",
+  "3.12.16-aarch64-unknown-linux-gnu": "b6a41defec4975d94b4ff1950236e7383e5c02ba40ea48c9ec33c66087a35aab",
+  "3.12.16-x86_64-apple-darwin": "b78a4c479f1964ec484880bee567568266f68da102269fb93a05fe8716b45f91",
+  "3.12.16-x86_64-pc-windows-msvc": "355ee61b8207b91574491b1c6dc9b0ebb4408fc56bfafe498f3ef439314b52dc",
+  "3.12.16-x86_64-unknown-linux-gnu": "6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39",
+  "3.13.18-aarch64-apple-darwin": "7a2384641584ab9984221fcb0fc9265df465922af71be71410529e2a9c3f0540",
+  "3.13.18-aarch64-unknown-linux-gnu": "55c00325f7c1fddf325dfc621aabdfbbac4dc54adda224af88ec411dc12db239",
+  "3.13.18-x86_64-apple-darwin": "d27d59a722db9f69926eb6d9564071247221f45a04da920ea7f3001c97e32f9b",
+  "3.13.18-x86_64-pc-windows-msvc": "2e0fed09d48989f64c9305da9ff2d37a41c0d13ab2aa6283405b2b620dfbf805",
+  "3.13.18-x86_64-unknown-linux-gnu": "f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb",
 };
 
 export function hostTriple(): string {
