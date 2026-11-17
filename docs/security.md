@@ -425,26 +425,41 @@ interpreter or module runs. On Windows the interpreter spawns with
 `PYLAIR_CONSOLE` (any value) in the launching environment to keep the
 window for debugging — it grants no extra privilege, just visibility.
 
-## 9. Wrap mode (W1, in progress)
+## 9. Wrap mode (W1 landed; W2 and W3 pending)
 
 Wrap mode shows a Python web framework's own UI (Gradio, Streamlit,
-FastAPI…) in the window, served on `127.0.0.1` on a random port. Its
-posture, per `docs/decisions/0003-wrap-mode.md`:
+FastAPI...) in the window, served on `127.0.0.1` on a random port. Its
+posture, per `docs/decisions/0003-wrap-mode.md`, and where each piece
+stands:
 
-- The wrapped page is a **remote origin → zero Tauri IPC** (verified in
-  the spike; designated a permanent acceptance-job check). A compromised
-  wrapped page cannot reach `python_*` or any plugin command.
-- W1 locks in-window navigation to the app origin via exact origin match
-  (`same_origin` — implemented, parse-based, so `evil.com` subdomains,
-  `user@host` tricks, and default-port confusion all fail) and sends
-  other links to the system browser. The navigation handler itself is
-  part of the W1 work.
-- Adapters force `share=False`, disable tunnels and framework telemetry.
+| Property | Status |
+|---|---|
+| The launcher and the supervisor's `Web` runtime kind (`python -m pylair.wrap`, `ready {url}`, `ready_timeout`) | **Done (W1).** Wire contract in `docs/protocol-v1.md` section 4.1. |
+| The ready url is validated before use: `http`, host exactly `127.0.0.1`, explicit port, no credentials, same origin as `http://127.0.0.1:<port>` (`validate_ready_url`, built on `same_origin`) | **Done (W1).** Anything else is a protocol violation: the runtime is killed and restarted. |
+| The server's stdout can never corrupt the frame channel | **Done (W1).** Frame fd hygiene plus a closed stdin and logs-only stdout/stderr for the server; covered by a fault-injection test. |
+| The server and everything it spawned die with the launcher | **Done (W1).** POSIX: the server shares the launcher's process group, which the supervisor kills and reaps (the launcher also walks the group, escalating SIGTERM to SIGKILL). Windows: the launcher sits in the supervisor's Job Object with `KILL_ON_JOB_CLOSE`. Covered by tests on both. Proven per OS, not across them: see the CI legs. |
+| Hung-server detection | **Done (W1).** The launcher probes the server over HTTP and exits non-zero after 3 consecutive misses. Pings alone cannot see a wedged server. |
+| In-window navigation locked to the app origin, other links to the system browser | **W2.** `same_origin` exists and is tested; the navigation and new-window handlers are not registered yet. |
+| The wrapped page gets zero Tauri IPC | **Verified in the W0 spike** (all `plugin:*` invokes rejected from the remote origin); the permanent acceptance-job check is **W2/W3**. |
+| Adapters force `share=False`, disable tunnels and framework telemetry | **W3.** Not built. `command` mode runs whatever the app does. |
+| The server listens on loopback only | **Not enforced by W1.** The launcher chooses and passes a loopback *port* (`{port}`, `PYLAIR_PORT`) and probes `127.0.0.1`, but a `command` that binds `0.0.0.0` is reachable from the network. Recipes and adapters must pass `127.0.0.1` as the host. |
+
+- The wrapped page is a **remote origin, so it gets no Tauri IPC**. A
+  compromised wrapped page cannot reach `python_*` or any plugin command.
+  `same_origin` is parse-based, so `evil.com` subdomains, `user@host`
+  tricks and default-port confusion all fail.
 - **Stated exposure, no more:** a loopback server is reachable by other
-  local processes and by pages in the user's browser — the same
-  exposure as `streamlit run` on a developer machine. A token-checking
-  reverse proxy is a documented future hardening (and noted as
-  insufficient alone, since the app's own port stays open).
+  local processes and by pages in the user's browser, the same exposure as
+  `streamlit run` on a developer machine. The port is picked by binding
+  `127.0.0.1:0`, reading it and closing it, so another local process can in
+  principle take it before the server binds (the server then exits, the
+  launcher exits non-zero, and the restart picks a new port). A
+  token-checking reverse proxy is documented future hardening, and is
+  insufficient alone, since the app's own port stays open.
+- A web runtime exposes no `@expose`d functions: every `call` answers
+  `FUNCTION_NOT_FOUND`, so the allowlist model of section 3 is unchanged.
+  `python_state` returns `{state, url}` for a web runtime and the bare
+  string for the bridge kind.
 
 ## 10. Supply chain and distribution
 

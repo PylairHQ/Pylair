@@ -43,6 +43,52 @@ acceptance green on the pins commit, then the npm trio under `--tag
 next`, then registry acceptance with `source=registry`. PyPI (step 2
 below) is skipped for rc.20.
 
+## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
+
+Wrap mode ships in 0.1.0. W1 is the plumbing only; nothing user-facing
+(CLI, config keys, window, navigation) exists yet.
+
+What it adds:
+
+- `python -m pylair.wrap --cmd <argv...> [--ready-path /]` (new package
+  `pylair.wrap`): reuses the runtime's frame-fd hygiene and transport,
+  picks a loopback port (5 bind retries), exports `PYLAIR_PORT`, replaces
+  `{port}` (and a bare `python` becomes the launcher's own interpreter),
+  waits for TCP then non-5xx on the ready path, sends `ready {url}`, then
+  probes every 10s and exits 5 after 3 consecutive misses (4 when the
+  server exits, 3 when it cannot start, 2 for bad usage). Tuning flags
+  `--probe-interval`, `--probe-timeout`, `--max-misses` exist for tests.
+- Crate: `RuntimeKind::{Bridge, Web}` on `SupervisorConfig::kind` (default
+  Bridge, unchanged), `SupervisorConfig::ready_timeout` (default 120s,
+  clamped 1s..=1h), `Builder::runtime_kind` / `Builder::ready_timeout`,
+  `Handle::{kind, ready_url, subscribe_ready_url}`. Ready is reached on
+  `ready`, the url is validated (`util::validate_ready_url`), and the
+  generation's url is cleared when it ends. `pylair://state` payloads gain
+  `url` while a web server is up; `python_state` returns `{state, url}`
+  for the web kind and the bare string for the bridge kind.
+- `docs/protocol-v1.md` section 4.1 is the contract; `docs/security.md`
+  section 9 has the honest status table.
+
+For W2 (CLI, config, window):
+
+- Wire it with `Builder::runtime_kind(RuntimeKind::Web)` and a spawn spec
+  for `python -m pylair.wrap --cmd ...`. Navigate to `ready_url()` when the
+  state is `ready`; a restart is a NEW url, so re-navigate on every
+  `ready` and show the restarting page in between.
+- `python_state`'s web shape is a plain-JSON union by design (bridge
+  unchanged). If W2 prefers a dedicated command it needs a permission
+  file; do not widen `pylair:default`.
+- The launcher cannot force a server to bind loopback only. The command
+  (or the W3 adapter) must pass `127.0.0.1`; document it in the recipes.
+- The `pylair` PyPI package and the crate both change, so the 0.1.0 train
+  has a PyPI publish and a crate publish. No versions were bumped here.
+
+Test notes: `crates/tauri-plugin-pylair/tests/web_runtime.rs` (fake
+runtimes plus the real launcher), `python/pylair/tests/test_wrap.py`,
+and `python/pylair/tests/wrap_server.py` (the misbehaving test server).
+These start many Python processes; if one fails while a build is
+saturating the machine, rerun it before treating it as real.
+
 Merged since rc.17 (d7daaaf):
 
 - PR 70, R4: `lib.rs` split into modules (pure move).
