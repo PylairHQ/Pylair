@@ -146,6 +146,81 @@ async fn until<T>(
     }
 }
 
+/// Kill exactly this process (not its tree).
+fn kill_pid(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(2) with a pid we just read from the server's own log.
+        if unsafe { libc::kill(pid as i32, libc::SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().to_string())
+        }
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+    }
+}
+
+/// After the server went down (a trigger or a kill): the restarting page is
+/// shown, a NEW ready url appears, the window follows it, and a GET of it
+/// still returns the marker. Returns the new url.
+async fn follow_restart<R: Runtime>(
+    ui: &Arc<Ui<R>>,
+    old: &tauri::Url,
+    marker: &str,
+    shown_before: u32,
+) -> Result<tauri::Url, String> {
+    let app = ui.app.clone();
+    until(
+        "the restarting page to be shown",
+        Duration::from_secs(60),
+        || {
+            (ui.restarting_shown
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > shown_before)
+                .then_some(())
+        },
+    )
+    .await?;
+    let new_url = until("a new ready url", Duration::from_secs(180), || {
+        ui.handle
+            .ready_url()
+            .and_then(|u| tauri::Url::parse(&u).ok())
+            .filter(|u| u != old)
+    })
+    .await?;
+    until(
+        "the window to follow the new url",
+        Duration::from_secs(60),
+        || {
+            let cur = app.get_webview_window(super::WINDOW)?.url().ok()?;
+            crate::util::same_origin(cur.as_str(), new_url.as_str()).then_some(())
+        },
+    )
+    .await?;
+    let get_url = new_url.clone();
+    let (status, body) = tauri::async_runtime::spawn_blocking(move || http_get(&get_url))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("GET {new_url} after the restart: {e}"))?;
+    if status >= 500 || (!marker.is_empty() && !body.contains(marker)) {
+        return Err(format!(
+            "GET {new_url} after the restart: {status}, marker missing"
+        ));
+    }
+    Ok(new_url)
+}
+
 /// Wait until the wrapped page at `url` has finished loading, so script sent
 /// to the window runs in the page that stays (not one about to be replaced).
 async fn wait_loaded<R: Runtime>(ui: &Arc<Ui<R>>, url: &tauri::Url) -> Result<(), String> {
@@ -238,64 +313,65 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
         "GET {url} -> {status} with the marker; navigation lock refused an unknown scheme in place and as a new window; {ipc}"
     );
 
-    // Optional (PYLAIR_SELF_TEST_WRAP_RESTART, `pylair dev` only: it needs the
-    // restart trigger file): restart the server and prove the window shows
-    // the local restarting page, then follows the server to its NEW url.
+    // Optional (PYLAIR_SELF_TEST_WRAP_RESTART, with PYLAIR_RESTART_TRIGGER set:
+    // `pylair dev` sets it, and so can an installed app's launcher): restart
+    // the server through the trigger file.
+    let mut current = url.clone();
     if std::env::var_os("PYLAIR_SELF_TEST_WRAP_RESTART").is_some() {
-        let trigger = std::env::var_os("PYLAIR_RESTART_TRIGGER").ok_or((
-            9,
-            "PYLAIR_RESTART_TRIGGER is not set (run under `pylair dev`)".to_string(),
-        ))?;
+        let trigger = std::env::var_os("PYLAIR_RESTART_TRIGGER")
+            .ok_or((9, "PYLAIR_RESTART_TRIGGER is not set".to_string()))?;
         let before = ui
             .restarting_shown
             .load(std::sync::atomic::Ordering::SeqCst);
         std::fs::write(&trigger, format!("{:?}", Instant::now()))
             .map_err(|e| (9, format!("cannot touch the restart trigger: {e}")))?;
-        until(
-            "the restarting page to be shown",
-            Duration::from_secs(60),
-            || {
-                (ui.restarting_shown
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    > before)
-                    .then_some(())
-            },
-        )
-        .await
-        .map_err(fail(9))?;
-        let new_url = until("a new ready url", Duration::from_secs(120), || {
-            ui.handle
-                .ready_url()
-                .and_then(|u| tauri::Url::parse(&u).ok())
-                .filter(|u| u != &url)
-        })
-        .await
-        .map_err(fail(9))?;
-        until(
-            "the window to follow the new url",
-            Duration::from_secs(60),
-            || {
-                let cur = app.get_webview_window(super::WINDOW)?.url().ok()?;
-                crate::util::same_origin(cur.as_str(), new_url.as_str()).then_some(())
-            },
-        )
-        .await
-        .map_err(fail(9))?;
-        let get_url = new_url.clone();
-        let (status, body) = tauri::async_runtime::spawn_blocking(move || http_get(&get_url))
+        let next = follow_restart(ui, &current, marker, before)
             .await
-            .map_err(|e| (9, e.to_string()))?
-            .map_err(|e| (9, format!("GET {new_url} after the restart: {e}")))?;
-        if status >= 500 || (!marker.is_empty() && !body.contains(marker)) {
+            .map_err(fail(9))?;
+        summary.push_str(&format!(
+            "; restart: restarting page shown, window followed {current} -> {next}"
+        ));
+        current = next;
+    }
+
+    // Optional (PYLAIR_SELF_TEST_WRAP_CRASH): KILL the server (its pid is in
+    // the launcher's log line) and expect the supervisor to treat it as a
+    // crash: Restarting with an exit reason, the restarting page, a new url,
+    // and the app serving again.
+    if std::env::var_os("PYLAIR_SELF_TEST_WRAP_CRASH").is_some() {
+        let pid = until(
+            "the server's pid in its log",
+            Duration::from_secs(30),
+            || ui.server_pid(),
+        )
+        .await
+        .map_err(fail(12))?;
+        *ui.restart_reason.lock().unwrap() = None;
+        let before = ui
+            .restarting_shown
+            .load(std::sync::atomic::Ordering::SeqCst);
+        kill_pid(pid).map_err(|e| (12, format!("cannot kill the server (pid {pid}): {e}")))?;
+        let next = follow_restart(ui, &current, marker, before)
+            .await
+            .map_err(fail(12))?;
+        let reason = ui
+            .restart_reason
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        if !reason.contains("exited") {
             return Err((
-                9,
-                format!("GET {new_url} after the restart: {status}, marker missing"),
+                12,
+                format!("a killed server must restart as a crash, reason was {reason:?}"),
             ));
         }
         summary.push_str(&format!(
-            "; restarting page shown, window followed {url} -> {new_url}"
+            "; crash: killed server pid {pid} ({reason}), restarting page shown, window followed {current} -> {next}"
         ));
+        current = next;
     }
+    let _ = &current;
 
     // Optional (PYLAIR_SELF_TEST_WRAP_DOWNLOAD=<path>|<text>): the page starts
     // a download of <path>, and with `downloads = "downloads"` it must land in

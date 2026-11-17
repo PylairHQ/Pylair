@@ -161,6 +161,9 @@ pub struct Ui<R: Runtime> {
     denied: std::sync::atomic::AtomicU32,
     /// The last finished download: where it went and whether it worked.
     last_download: Mutex<Option<(PathBuf, bool)>>,
+    /// Why the server last went down (the Restarting detail, e.g. "exited
+    /// exit status: 4"): the self-test checks a killed server is a crash.
+    restart_reason: Mutex<Option<String>>,
     /// Origin of the wrapped page whose load last finished (the self-test
     /// waits for it: script run on a page that is still being replaced is lost).
     app_loaded: Mutex<Option<String>>,
@@ -185,6 +188,7 @@ impl<R: Runtime> Ui<R> {
             denied: std::sync::atomic::AtomicU32::new(0),
             last_download: Mutex::new(None),
             app_loaded: Mutex::new(None),
+            restart_reason: Mutex::new(None),
             inner: Mutex::new(Inner {
                 showing: Showing::Local,
                 shown_app_url: None,
@@ -235,6 +239,16 @@ impl<R: Runtime> Ui<R> {
         if let Some(w) = self.app.get_webview_window(WINDOW) {
             let _ = w.navigate(url);
         }
+    }
+
+    /// The pid of the server the launcher started most recently, from its
+    /// own log line (`started pid N on 127.0.0.1:PORT: ...`).
+    pub(crate) fn server_pid(&self) -> Option<u32> {
+        let g = self.inner.lock().unwrap();
+        g.log.iter().rev().find_map(|l| {
+            let rest = l.split("started pid ").nth(1)?;
+            rest.split_whitespace().next()?.parse().ok()
+        })
     }
 
     /// A wrapped page finished loading.
@@ -299,6 +313,9 @@ impl<R: Runtime> Ui<R> {
             RuntimeEvent::StateChanged { from, to, detail } => {
                 let url = self.handle.ready_url();
                 let payload = state_payload(*from, *to, detail, url.as_deref());
+                if *to == crate::State::Restarting {
+                    *self.restart_reason.lock().unwrap() = Some(detail.clone());
+                }
                 let action = {
                     let mut g = self.inner.lock().unwrap();
                     g.last_state = Some(payload);
