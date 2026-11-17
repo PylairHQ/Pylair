@@ -1,0 +1,21 @@
+{
+  "identifier": "q10b",
+  "description": "allow entry as a bare string instead of an object: must fail closed",
+  "windows": [
+    "q10b"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        "add"
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        "add"
+      ]
+    }
+  ]
+}

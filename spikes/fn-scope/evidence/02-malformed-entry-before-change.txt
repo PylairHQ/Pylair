@@ -1,0 +1,4 @@
+test a_malformed_scope_entry_fails_closed_instead_of_becoming_no_entry ... FAILED
+thread 'a_malformed_scope_entry_fails_closed_instead_of_becoming_no_entry' (891) panicked at tests/fn_scope_acl.rs:562:13:
+q10 python_call: a scope entry that does not parse must refuse the call, got Ok
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.27s

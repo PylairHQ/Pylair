@@ -1,0 +1,107 @@
+test a_malformed_scope_entry_fails_closed_instead_of_becoming_no_entry ... OUT window=q10 cmd=python_call fn=add -> Acl("\"error deserializing scope: unknown field `nmae`, expected `name`\"")
+OUT window=q10 cmd=python_call_stream fn=add -> Acl("\"error deserializing scope: unknown field `nmae`, expected `name`\"")
+OUT window=q10b cmd=python_call fn=add -> Acl("\"error deserializing scope: invalid type: string \\\"add\\\", expected struct FnScope\"")
+OUT window=q10b cmd=python_call_stream fn=add -> Acl("\"error deserializing scope: invalid type: string \\\"add\\\", expected struct FnScope\"")
+test a_pattern_matching_no_exposed_function_warns_once ... pylair: scope pattern "typo_*" for window "q9" matches no exposed function
+OUT window=q9 cmd=python_call fn=add -> Ok
+OUT window=q9 cmd=python_call_stream fn=add -> Ok
+OUT window=q9 cmd=python_call_stream fn=add -> Ok
+OUT window=q9 cmd=python_call_stream fn=add -> Ok
+test q1_allow_list_present_and_no_match_is_denied ... OUT window=q1-allow cmd=python_call fn=add -> Ok
+OUT window=q1-allow cmd=python_call fn=counter -> Runtime(-32602)
+OUT window=q1-allow cmd=python_call fn=spy -> Denied
+OBS window=q1-allow cmd=python_call handler saw allow=["add", "count*"] deny=[]
+OUT window=q1-allow cmd=python_call_stream fn=add -> Ok
+OUT window=q1-allow cmd=python_call_stream fn=counter -> Ok
+OUT window=q1-allow cmd=python_call_stream fn=spy -> Denied
+OBS window=q1-allow cmd=python_call_stream handler saw allow=["add", "count*"] deny=[]
+test q1_deny_beats_an_allow_entry_that_also_matches ... OUT window=q1-both cmd=python_call fn=spy -> Denied
+OUT window=q1-both cmd=python_call fn=spy_count -> Ok
+OUT window=q1-both cmd=python_call fn=add -> Denied
+OUT window=q1-both cmd=python_call_stream fn=spy -> Denied
+OUT window=q1-both cmd=python_call_stream fn=spy_count -> Ok
+OUT window=q1-both cmd=python_call_stream fn=add -> Denied
+test q1_object_deny_entry_reaches_the_handler_and_denies ... OUT window=q1 cmd=python_call fn=spy -> Denied
+OUT window=q1 cmd=python_call fn=spy_count -> Denied
+OUT window=q1 cmd=python_call fn=add -> Ok
+OBS window=q1 cmd=python_call handler saw allow=[] deny=["sp*"]
+OUT window=q1 cmd=python_call_stream fn=spy -> Denied
+OUT window=q1 cmd=python_call_stream fn=spy_count -> Denied
+OUT window=q1 cmd=python_call_stream fn=add -> Ok
+OBS window=q1 cmd=python_call_stream handler saw allow=[] deny=["sp*"]
+test q2_a_scope_on_only_one_call_command_leaves_the_other_open ... OUT window=q2d cmd=python_call_stream fn=spy -> Denied
+OUT window=q2d cmd=python_call fn=spy -> Ok
+test q2_a_scoped_allow_next_to_the_unscoped_grant_narrows_it ... OUT window=q2b cmd=python_call fn=add -> Ok
+OUT window=q2b cmd=python_call fn=counter -> Denied
+OBS window=q2b cmd=python_call handler saw allow=["add"] deny=[]
+OUT window=q2b cmd=python_call_stream fn=add -> Ok
+OUT window=q2b cmd=python_call_stream fn=counter -> Denied
+OBS window=q2b cmd=python_call_stream handler saw allow=["add"] deny=[]
+test q2_scope_on_the_default_set_applies_to_both_call_commands ... OUT window=q2c cmd=python_call fn=spy -> Denied
+OUT window=q2c cmd=python_call fn=add -> Ok
+OBS window=q2c cmd=python_call handler saw allow=[] deny=["sp*"]
+OUT window=q2c cmd=python_call_stream fn=spy -> Denied
+OUT window=q2c cmd=python_call_stream fn=add -> Ok
+OBS window=q2c cmd=python_call_stream handler saw allow=[] deny=["sp*"]
+test q2_scoped_deny_beats_the_unscoped_grant_in_one_capability ... OUT window=q2 cmd=python_call fn=spy -> Denied
+OUT window=q2 cmd=python_call fn=add -> Ok
+OBS window=q2 cmd=python_call handler saw allow=[] deny=["sp*"]
+OUT window=q2 cmd=python_call_stream fn=spy -> Denied
+OUT window=q2 cmd=python_call_stream fn=add -> Ok
+OBS window=q2 cmd=python_call_stream handler saw allow=[] deny=["sp*"]
+test q3_a_deny_in_one_capability_beats_an_allow_in_another ... OUT window=q3c cmd=python_call fn=spy -> Denied
+OBS window=q3c cmd=python_call handler saw allow=["spy"] deny=["spy"]
+OUT window=q3c cmd=python_call_stream fn=spy -> Denied
+OBS window=q3c cmd=python_call_stream handler saw allow=["spy"] deny=["spy"]
+test q3_allow_entries_from_two_capabilities_union ... OUT window=q3 cmd=python_call fn=add -> Ok
+OUT window=q3 cmd=python_call fn=counter -> Runtime(-32602)
+OUT window=q3 cmd=python_call fn=spy -> Denied
+OBS window=q3 cmd=python_call handler saw allow=["add", "counter"] deny=[]
+OUT window=q3 cmd=python_call_stream fn=add -> Ok
+OUT window=q3 cmd=python_call_stream fn=counter -> Ok
+OUT window=q3 cmd=python_call_stream fn=spy -> Denied
+OBS window=q3 cmd=python_call_stream handler saw allow=["add", "counter"] deny=[]
+test q3_an_unscoped_grant_in_another_capability_is_narrowed_by_a_scoped_allow ... OUT window=q3b cmd=python_call fn=add -> Ok
+OUT window=q3b cmd=python_call fn=counter -> Denied
+OBS window=q3b cmd=python_call handler saw allow=["add"] deny=[]
+OUT window=q3b cmd=python_call_stream fn=add -> Ok
+OUT window=q3b cmd=python_call_stream fn=counter -> Denied
+OBS window=q3b cmd=python_call_stream handler saw allow=["add"] deny=[]
+test q3_deny_entries_from_two_capabilities_union ... OUT window=q3d cmd=python_call fn=spy -> Denied
+OUT window=q3d cmd=python_call fn=add -> Denied
+OUT window=q3d cmd=python_call fn=counter -> Runtime(-32602)
+OBS window=q3d cmd=python_call handler saw allow=[] deny=["add", "spy"]
+OUT window=q3d cmd=python_call_stream fn=spy -> Denied
+OUT window=q3d cmd=python_call_stream fn=add -> Denied
+OUT window=q3d cmd=python_call_stream fn=counter -> Ok
+OBS window=q3d cmd=python_call_stream handler saw allow=[] deny=["add", "spy"]
+test q4_each_window_sees_only_its_own_capability ... OUT window=q4-a cmd=python_call fn=add -> Ok
+OUT window=q4-a cmd=python_call fn=counter -> Denied
+OUT window=q4-b cmd=python_call fn=add -> Denied
+OUT window=q4-b cmd=python_call fn=counter -> Runtime(-32602)
+OBS window=q4-a cmd=python_call handler saw allow=["add"] deny=[]
+OBS window=q4-b cmd=python_call handler saw allow=["counter"] deny=[]
+OUT window=q4-a cmd=python_call_stream fn=add -> Ok
+OUT window=q4-a cmd=python_call_stream fn=counter -> Denied
+OUT window=q4-b cmd=python_call_stream fn=add -> Denied
+OUT window=q4-b cmd=python_call_stream fn=counter -> Ok
+OBS window=q4-a cmd=python_call_stream handler saw allow=["add"] deny=[]
+OBS window=q4-b cmd=python_call_stream handler saw allow=["counter"] deny=[]
+OUT window=q4-none cmd=python_call fn=add -> Acl("\"pylair.python_call not allowed on window \\\"q4-none\\\", webview \\\"q4-none\\\", URL: local\\n\\nallowed on: [windows: \\\"q1\\\", URL: local], [windows: \\\"q1-allow\\\", URL: local], [windows: \\\"q1-both\\\", URL: local], [windows: \\\"q10\\\", URL: local], [windows: \\\"q10b\\\", URL: local], [windows: \\\"q2\\\", URL: local], [windows: \\\"q2\\\", URL: local], [windows: \\\"q2b\\\", URL: local], [windows: \\\"q2b\\\", URL: local], [windows: \\\"q2c\\\", URL: local], [windows: \\\"q2d\\\", URL: local], [windows: \\\"q3\\\", URL: local], [windows: \\\"q3\\\", URL: local], [windows: \\\"q3b\\\", URL: local], [windows: \\\"q3b\\\", URL: local], [windows: \\\"q3c\\\", URL: local], [windows: \\\"q3c\\\", URL: local], [windows: \\\"q3d\\\", URL: local], [windows: \\\"q3d\\\", URL: local], [windows: \\\"q4-a\\\", URL: local], [windows: \\\"q4-b\\\", URL: local], [windows: \\\"q5\\\", URL: local], [windows: \\\"q5b\\\", URL: local], [windows: \\\"q7\\\", URL: local], [windows: \\\"q9\\\", URL: local]\\n\\nreferenced by: capability: q1, permission: allow-python-call || capability: q1-allow, permission: allow-python-call || capability: q1-both, permission: allow-python-call || capability: q10, permission: allow-python-call || capability: q10b, permission: allow-python-call || capability: q2, permission: allow-python-call || capability: q2, permission: allow-python-call || capability: q2b, permission: allow-python-call || capability: q2b, permission: allow-python-call || capability: q2c, permission: allow-python-call || capability: q2d, permission: allow-python-call || capability: q3-a, permission: allow-python-call || capability: q3-b, permission: allow-python-call || capability: q3b-a, permission: allow-python-call || capability: q3b-b, permission: allow-python-call || capability: q3c-a, permission: allow-python-call || capability: q3c-b, permission: allow-python-call || capability: q3d-a, permission: allow-python-call || capability: q3d-b, permission: allow-python-call || capability: q4-a, permission: allow-python-call || capability: q4-b, permission: allow-python-call || capability: q5, permission: allow-python-call || capability: q5b, permission: allow-python-call || capability: q7, permission: allow-python-call || capability: q9, permission: allow-python-call\"")
+OUT window=q4-none cmd=python_call_stream fn=add -> Acl("\"pylair.python_call_stream not allowed on window \\\"q4-none\\\", webview \\\"q4-none\\\", URL: local\\n\\nallowed on: [windows: \\\"q1\\\", URL: local], [windows: \\\"q1-allow\\\", URL: local], [windows: \\\"q1-both\\\", URL: local], [windows: \\\"q10\\\", URL: local], [windows: \\\"q10b\\\", URL: local], [windows: \\\"q2\\\", URL: local], [windows: \\\"q2\\\", URL: local], [windows: \\\"q2b\\\", URL: local], [windows: \\\"q2b\\\", URL: local], [windows: \\\"q2c\\\", URL: local], [windows: \\\"q2d\\\", URL: local], [windows: \\\"q2d\\\", URL: local], [windows: \\\"q3\\\", URL: local], [windows: \\\"q3\\\", URL: local], [windows: \\\"q3b\\\", URL: local], [windows: \\\"q3b\\\", URL: local], [windows: \\\"q3c\\\", URL: local], [windows: \\\"q3c\\\", URL: local], [windows: \\\"q3d\\\", URL: local], [windows: \\\"q3d\\\", URL: local], [windows: \\\"q4-a\\\", URL: local], [windows: \\\"q4-b\\\", URL: local], [windows: \\\"q5\\\", URL: local], [windows: \\\"q5b\\\", URL: local], [windows: \\\"q7\\\", URL: local], [windows: \\\"q9\\\", URL: local]\\n\\nreferenced by: capability: q1, permission: allow-python-call-stream || capability: q1-allow, permission: allow-python-call-stream || capability: q1-both, permission: allow-python-call-stream || capability: q10, permission: allow-python-call-stream || capability: q10b, permission: allow-python-call-stream || capability: q2, permission: allow-python-call-stream || capability: q2, permission: allow-python-call-stream || capability: q2b, permission: allow-python-call-stream || capability: q2b, permission: allow-python-call-stream || capability: q2c, permission: allow-python-call-stream || capability: q2d, permission: allow-python-call-stream || capability: q2d, permission: allow-python-call-stream || capability: q3-a, permission: allow-python-call-stream || capability: q3-b, permission: allow-python-call-stream || capability: q3b-a, permission: allow-python-call-stream || capability: q3b-b, permission: allow-python-call-stream || capability: q3c-a, permission: allow-python-call-stream || capability: q3c-b, permission: allow-python-call-stream || capability: q3d-a, permission: allow-python-call-stream || capability: q3d-b, permission: allow-python-call-stream || capability: q4-a, permission: allow-python-call-stream || capability: q4-b, permission: allow-python-call-stream || capability: q5, permission: allow-python-call-stream || capability: q5b, permission: allow-python-call-stream || capability: q7, permission: allow-python-call-stream || capability: q9, permission: allow-python-call-stream\"")
+test q5_an_explicit_empty_allow_array_is_indistinguishable_from_no_entries ... OUT window=q5b cmd=python_call fn=spy -> Ok
+OBS window=q5b cmd=python_call handler saw allow=[] deny=[]
+OUT window=q5b cmd=python_call_stream fn=spy -> Ok
+OBS window=q5b cmd=python_call_stream handler saw allow=[] deny=[]
+test q5_no_entries_means_empty_allow_and_empty_deny_and_everything_allowed ... OUT window=q5 cmd=python_call fn=add -> Ok
+OUT window=q5 cmd=python_call fn=counter -> Runtime(-32602)
+OUT window=q5 cmd=python_call fn=spy -> Ok
+OBS window=q5 cmd=python_call handler saw allow=[] deny=[]
+OUT window=q5 cmd=python_call_stream fn=add -> Ok
+OUT window=q5 cmd=python_call_stream fn=counter -> Ok
+OUT window=q5 cmd=python_call_stream fn=spy -> Ok
+OBS window=q5 cmd=python_call_stream handler saw allow=[] deny=[]
+test q6_the_real_authority_is_consulted_for_origin_and_window ... ok
+test q6_the_stock_mock_context_has_an_empty_acl_and_rejects_every_plugin_command ... ok
+test q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing ... ok
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.31s

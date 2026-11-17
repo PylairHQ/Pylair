@@ -118,6 +118,7 @@ impl<R: Runtime> Builder<R> {
                 tauri::async_runtime::spawn(actor);
                 app.manage(PyRuntime(handle));
                 app.manage(Registry::new(Default::default()));
+                app.manage(crate::fn_scope::ExposedNames::default());
 
                 let app_handle = app.clone();
                 let stderr = self.stderr.clone();
@@ -129,7 +130,10 @@ impl<R: Runtime> Builder<R> {
                                 json!({"from": fmt_state(from), "to": fmt_state(to), "detail": detail}),
                             )),
                             RuntimeEvent::Stderr(line) => Some((events::STDERR, json!(line))),
-                            RuntimeEvent::Exposes(x) => Some((events::EXPOSES, x)),
+                            RuntimeEvent::Exposes(x) => {
+                                app_handle.state::<crate::fn_scope::ExposedNames>().set(&x);
+                                Some((events::EXPOSES, x))
+                            }
                         };
                         let Some((event, payload)) = payload else { continue };
                         // Runtime-wide events go to subscribed webviews only.

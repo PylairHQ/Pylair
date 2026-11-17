@@ -1,0 +1,25 @@
+{
+  "identifier": "q10",
+  "description": "deny entry with a misspelt key: must fail closed",
+  "windows": [
+    "q10"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "deny": [
+        {
+          "nmae": "spy"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "deny": [
+        {
+          "nmae": "spy"
+        }
+      ]
+    }
+  ]
+}

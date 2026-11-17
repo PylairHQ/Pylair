@@ -166,8 +166,7 @@ fn invoke_from(
     cmd: &str,
     args: Value,
 ) -> Result<Value, Value> {
-    get_ipc_response(w, request(url, cmd, args))
-        .map(|b| b.deserialize::<Value>().unwrap())
+    get_ipc_response(w, request(url, cmd, args)).map(|b| b.deserialize::<Value>().unwrap())
 }
 
 static NEXT_CHANNEL: AtomicU32 = AtomicU32::new(100);
@@ -229,7 +228,9 @@ fn inputs(name: &str) -> (Value, bool) {
 
 fn via(w: &WebviewWindow<MockRuntime>, cmd: &str, name: &str) -> Out {
     let (input, stream) = inputs(name);
-    classify(invoke(w, cmd, args_for(cmd, name, input, stream)))
+    let out = classify(invoke(w, cmd, args_for(cmd, name, input, stream)));
+    eprintln!("OUT window={} cmd={cmd} fn={name} -> {out:?}", w.label());
+    out
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -240,6 +241,11 @@ fn sorted(mut v: Vec<String>) -> Vec<String> {
 fn seen(label: &str, cmd: &str) -> Seen {
     let s = observed(label, cmd)
         .unwrap_or_else(|| panic!("the {cmd} handler never recorded a scope for window {label}"));
+    eprintln!(
+        "OBS window={label} cmd={cmd} handler saw allow={:?} deny={:?}",
+        sorted(s.allow.clone()),
+        sorted(s.deny.clone())
+    );
     Seen {
         allow: sorted(s.allow),
         deny: sorted(s.deny),
@@ -258,11 +264,21 @@ fn q1_object_deny_entry_reaches_the_handler_and_denies() {
     let w = fx.win("q1");
     for cmd in [CALL, STREAM] {
         assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: spy matches sp*");
-        assert_eq!(via(w, cmd, "spy_count"), Out::Denied, "{cmd}: spy_count matches sp*");
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: add must pass");
+        assert_eq!(
+            via(w, cmd, "spy_count"),
+            Out::Denied,
+            "{cmd}: spy_count matches sp*"
+        );
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: add must pass"
+        );
         assert_eq!(
             seen("q1", cmd),
-            Seen { allow: vec![], deny: names(&["sp*"]) },
+            Seen {
+                allow: vec![],
+                deny: names(&["sp*"])
+            },
             "{cmd}: the handler must see exactly the capability's deny entry"
         );
     }
@@ -273,12 +289,25 @@ fn q1_allow_list_present_and_no_match_is_denied() {
     let fx = fixture(&["q1-allow"]);
     let w = fx.win("q1-allow");
     for cmd in [CALL, STREAM] {
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: exact allow");
-        assert!(via(w, cmd, "counter").reached_supervisor(), "{cmd}: glob allow count*");
-        assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: allow list present, no match");
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: exact allow"
+        );
+        assert!(
+            via(w, cmd, "counter").reached_supervisor(),
+            "{cmd}: glob allow count*"
+        );
+        assert_eq!(
+            via(w, cmd, "spy"),
+            Out::Denied,
+            "{cmd}: allow list present, no match"
+        );
         assert_eq!(
             seen("q1-allow", cmd),
-            Seen { allow: names(&["add", "count*"]), deny: vec![] }
+            Seen {
+                allow: names(&["add", "count*"]),
+                deny: vec![]
+            }
         );
     }
 }
@@ -288,9 +317,20 @@ fn q1_deny_beats_an_allow_entry_that_also_matches() {
     let fx = fixture(&["q1-both"]);
     let w = fx.win("q1-both");
     for cmd in [CALL, STREAM] {
-        assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: allow sp* and deny spy");
-        assert!(via(w, cmd, "spy_count").reached_supervisor(), "{cmd}: allow sp*, not denied");
-        assert_eq!(via(w, cmd, "add"), Out::Denied, "{cmd}: allow list present, no match");
+        assert_eq!(
+            via(w, cmd, "spy"),
+            Out::Denied,
+            "{cmd}: allow sp* and deny spy"
+        );
+        assert!(
+            via(w, cmd, "spy_count").reached_supervisor(),
+            "{cmd}: allow sp*, not denied"
+        );
+        assert_eq!(
+            via(w, cmd, "add"),
+            Out::Denied,
+            "{cmd}: allow list present, no match"
+        );
     }
 }
 
@@ -301,12 +341,28 @@ fn q2_scoped_deny_beats_the_unscoped_grant_in_one_capability() {
     let fx = fixture(&["q2"]);
     let w = fx.win("q2");
     for cmd in [CALL, STREAM] {
-        assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: deny beats the unscoped grant");
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: everything else still allowed");
-        assert_eq!(seen("q2", cmd), Seen { allow: vec![], deny: names(&["sp*"]) });
+        assert_eq!(
+            via(w, cmd, "spy"),
+            Out::Denied,
+            "{cmd}: deny beats the unscoped grant"
+        );
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: everything else still allowed"
+        );
+        assert_eq!(
+            seen("q2", cmd),
+            Seen {
+                allow: vec![],
+                deny: names(&["sp*"])
+            }
+        );
     }
     // The unscoped grant is still what authorises the other commands.
-    assert_eq!(invoke(w, "python_state", json!({})).unwrap(), json!("ready"));
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready")
+    );
 }
 
 #[test]
@@ -317,13 +373,22 @@ fn q2_a_scoped_allow_next_to_the_unscoped_grant_narrows_it() {
     let fx = fixture(&["q2b"]);
     let w = fx.win("q2b");
     for cmd in [CALL, STREAM] {
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: add is on the allow list");
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: add is on the allow list"
+        );
         assert_eq!(
             via(w, cmd, "counter"),
             Out::Denied,
             "{cmd}: pylair:default grants every function, but the scoped allow list narrows it"
         );
-        assert_eq!(seen("q2b", cmd), Seen { allow: names(&["add"]), deny: vec![] });
+        assert_eq!(
+            seen("q2b", cmd),
+            Seen {
+                allow: names(&["add"]),
+                deny: vec![]
+            }
+        );
     }
 }
 
@@ -333,17 +398,33 @@ fn q2_scope_on_the_default_set_applies_to_both_call_commands() {
     let w = fx.win("q2c");
     for cmd in [CALL, STREAM] {
         assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: set-level deny");
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: add allowed");
-        assert_eq!(seen("q2c", cmd), Seen { allow: vec![], deny: names(&["sp*"]) });
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: add allowed"
+        );
+        assert_eq!(
+            seen("q2c", cmd),
+            Seen {
+                allow: vec![],
+                deny: names(&["sp*"])
+            }
+        );
     }
-    assert_eq!(invoke(w, "python_state", json!({})).unwrap(), json!("ready"));
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready")
+    );
 }
 
 #[test]
 fn q2_a_scope_on_only_one_call_command_leaves_the_other_open() {
     let fx = fixture(&["q2d"]);
     let w = fx.win("q2d");
-    assert_eq!(via(w, STREAM, "spy"), Out::Denied, "scoped command is closed");
+    assert_eq!(
+        via(w, STREAM, "spy"),
+        Out::Denied,
+        "scoped command is closed"
+    );
     assert!(
         via(w, CALL, "spy").reached_supervisor(),
         "python_call carries no scope here, so the same function is reachable through it"
@@ -357,10 +438,22 @@ fn q3_allow_entries_from_two_capabilities_union() {
     let fx = fixture(&["q3"]);
     let w = fx.win("q3");
     for cmd in [CALL, STREAM] {
-        assert!(via(w, cmd, "add").reached_supervisor(), "{cmd}: from capability q3-a");
-        assert!(via(w, cmd, "counter").reached_supervisor(), "{cmd}: from capability q3-b");
+        assert!(
+            via(w, cmd, "add").reached_supervisor(),
+            "{cmd}: from capability q3-a"
+        );
+        assert!(
+            via(w, cmd, "counter").reached_supervisor(),
+            "{cmd}: from capability q3-b"
+        );
         assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: in neither");
-        assert_eq!(seen("q3", cmd), Seen { allow: names(&["add", "counter"]), deny: vec![] });
+        assert_eq!(
+            seen("q3", cmd),
+            Seen {
+                allow: names(&["add", "counter"]),
+                deny: vec![]
+            }
+        );
     }
 }
 
@@ -375,7 +468,13 @@ fn q3_an_unscoped_grant_in_another_capability_is_narrowed_by_a_scoped_allow() {
             Out::Denied,
             "{cmd}: capability q3b-a grants everything, q3b-b's allow list still narrows it"
         );
-        assert_eq!(seen("q3b", cmd), Seen { allow: names(&["add"]), deny: vec![] });
+        assert_eq!(
+            seen("q3b", cmd),
+            Seen {
+                allow: names(&["add"]),
+                deny: vec![]
+            }
+        );
     }
 }
 
@@ -384,8 +483,18 @@ fn q3_a_deny_in_one_capability_beats_an_allow_in_another() {
     let fx = fixture(&["q3c"]);
     let w = fx.win("q3c");
     for cmd in [CALL, STREAM] {
-        assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: allowed by q3c-a, denied by q3c-b");
-        assert_eq!(seen("q3c", cmd), Seen { allow: names(&["spy"]), deny: names(&["spy"]) });
+        assert_eq!(
+            via(w, cmd, "spy"),
+            Out::Denied,
+            "{cmd}: allowed by q3c-a, denied by q3c-b"
+        );
+        assert_eq!(
+            seen("q3c", cmd),
+            Seen {
+                allow: names(&["spy"]),
+                deny: names(&["spy"])
+            }
+        );
     }
 }
 
@@ -396,8 +505,17 @@ fn q3_deny_entries_from_two_capabilities_union() {
     for cmd in [CALL, STREAM] {
         assert_eq!(via(w, cmd, "spy"), Out::Denied, "{cmd}: denied by q3d-a");
         assert_eq!(via(w, cmd, "add"), Out::Denied, "{cmd}: denied by q3d-b");
-        assert!(via(w, cmd, "counter").reached_supervisor(), "{cmd}: denied by neither");
-        assert_eq!(seen("q3d", cmd), Seen { allow: vec![], deny: names(&["add", "spy"]) });
+        assert!(
+            via(w, cmd, "counter").reached_supervisor(),
+            "{cmd}: denied by neither"
+        );
+        assert_eq!(
+            seen("q3d", cmd),
+            Seen {
+                allow: vec![],
+                deny: names(&["add", "spy"])
+            }
+        );
     }
 }
 
@@ -408,18 +526,46 @@ fn q4_each_window_sees_only_its_own_capability() {
     let fx = fixture(&["q4-a", "q4-b", "q4-none"]);
     let (a, b) = (fx.win("q4-a"), fx.win("q4-b"));
     for cmd in [CALL, STREAM] {
-        assert!(via(a, cmd, "add").reached_supervisor(), "{cmd}: q4-a may add");
-        assert_eq!(via(a, cmd, "counter"), Out::Denied, "{cmd}: q4-a may not counter");
+        assert!(
+            via(a, cmd, "add").reached_supervisor(),
+            "{cmd}: q4-a may add"
+        );
+        assert_eq!(
+            via(a, cmd, "counter"),
+            Out::Denied,
+            "{cmd}: q4-a may not counter"
+        );
         assert_eq!(via(b, cmd, "add"), Out::Denied, "{cmd}: q4-b may not add");
-        assert!(via(b, cmd, "counter").reached_supervisor(), "{cmd}: q4-b may counter");
-        assert_eq!(seen("q4-a", cmd), Seen { allow: names(&["add"]), deny: vec![] });
-        assert_eq!(seen("q4-b", cmd), Seen { allow: names(&["counter"]), deny: vec![] });
+        assert!(
+            via(b, cmd, "counter").reached_supervisor(),
+            "{cmd}: q4-b may counter"
+        );
+        assert_eq!(
+            seen("q4-a", cmd),
+            Seen {
+                allow: names(&["add"]),
+                deny: vec![]
+            }
+        );
+        assert_eq!(
+            seen("q4-b", cmd),
+            Seen {
+                allow: names(&["counter"]),
+                deny: vec![]
+            }
+        );
     }
     // A window no capability covers never reaches the handler at all.
     let none = fx.win("q4-none");
     for cmd in [CALL, STREAM] {
-        assert!(matches!(via(none, cmd, "add"), Out::Acl(_)), "{cmd}: not covered by any capability");
-        assert!(observed("q4-none", cmd).is_none(), "{cmd}: handler must not run");
+        assert!(
+            matches!(via(none, cmd, "add"), Out::Acl(_)),
+            "{cmd}: not covered by any capability"
+        );
+        assert!(
+            observed("q4-none", cmd).is_none(),
+            "{cmd}: handler must not run"
+        );
     }
 }
 
@@ -433,7 +579,13 @@ fn q5_no_entries_means_empty_allow_and_empty_deny_and_everything_allowed() {
         for name in ["add", "counter", "spy"] {
             assert!(via(w, cmd, name).reached_supervisor(), "{cmd}: {name}");
         }
-        assert_eq!(seen("q5", cmd), Seen { allow: vec![], deny: vec![] });
+        assert_eq!(
+            seen("q5", cmd),
+            Seen {
+                allow: vec![],
+                deny: vec![]
+            }
+        );
     }
 }
 
@@ -444,8 +596,17 @@ fn q5_an_explicit_empty_allow_array_is_indistinguishable_from_no_entries() {
     let fx = fixture(&["q5b"]);
     let w = fx.win("q5b");
     for cmd in [CALL, STREAM] {
-        assert!(via(w, cmd, "spy").reached_supervisor(), "{cmd}: allow [] allows everything");
-        assert_eq!(seen("q5b", cmd), Seen { allow: vec![], deny: vec![] });
+        assert!(
+            via(w, cmd, "spy").reached_supervisor(),
+            "{cmd}: allow [] allows everything"
+        );
+        assert_eq!(
+            seen("q5b", cmd),
+            Seen {
+                allow: vec![],
+                deny: vec![]
+            }
+        );
     }
 }
 
@@ -465,7 +626,9 @@ fn q6_the_stock_mock_context_has_an_empty_acl_and_rejects_every_plugin_command()
         .build()
         .unwrap();
     let r = invoke(&w, "python_state", json!({}));
-    let msg = r.expect_err("the empty mock ACL must reject plugin commands").to_string();
+    let msg = r
+        .expect_err("the empty mock ACL must reject plugin commands")
+        .to_string();
     assert!(msg.contains("not allowed"), "unexpected rejection: {msg}");
 }
 
@@ -474,7 +637,10 @@ fn q6_the_real_authority_is_consulted_for_origin_and_window() {
     let fx = fixture(&["q2"]);
     let w = fx.win("q2");
     // Same window, same command, local origin: allowed.
-    assert_eq!(invoke(w, "python_state", json!({})).unwrap(), json!("ready"));
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready")
+    );
     // Same window, remote origin: the capability is local-only.
     let r = invoke_from(w, "https://evil.example/", "python_state", json!({}));
     let msg = r.expect_err("remote origin must be refused").to_string();
@@ -503,20 +669,42 @@ fn q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing() {
         assert_eq!(err["data"]["window"], json!("q7"), "{cmd}: {err}");
     }
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(rt.0.task_watermark(), watermark, "no task id may be allocated");
-    assert!(!reg.lock().unwrap().is_subscribed("q7"), "a denied call must not subscribe");
-    assert_eq!(fx.channel.lock().unwrap().len(), sent, "nothing may reach the Channel");
+    assert_eq!(
+        rt.0.task_watermark(),
+        watermark,
+        "no task id may be allocated"
+    );
+    assert!(
+        !reg.lock().unwrap().is_subscribed("q7"),
+        "a denied call must not subscribe"
+    );
+    assert_eq!(
+        fx.channel.lock().unwrap().len(),
+        sent,
+        "nothing may reach the Channel"
+    );
 
     // Control: an allowed call from the same window takes exactly the next
     // id, subscribes the window and delivers its terminal on the Channel.
-    let ack = invoke(w, STREAM, args_for(STREAM, "add", json!({"a": 1, "b": 2}), false))
-        .expect("add is allowed for q7");
-    assert_eq!(ack["task"], json!(watermark), "the denied calls must not have consumed an id");
+    let ack = invoke(
+        w,
+        STREAM,
+        args_for(STREAM, "add", json!({"a": 1, "b": 2}), false),
+    )
+    .expect("add is allowed for q7");
+    assert_eq!(
+        ack["task"],
+        json!(watermark),
+        "the denied calls must not have consumed an id"
+    );
     assert_eq!(rt.0.task_watermark(), watermark + 1);
     assert!(reg.lock().unwrap().is_subscribed("q7"));
     let deadline = Instant::now() + Duration::from_secs(15);
     while fx.channel.lock().unwrap().len() <= sent {
-        assert!(Instant::now() < deadline, "the allowed call never delivered");
+        assert!(
+            Instant::now() < deadline,
+            "the allowed call never delivered"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     let (label, body) = fx.channel.lock().unwrap()[sent].clone();
@@ -534,16 +722,54 @@ fn a_pattern_matching_no_exposed_function_warns_once() {
     // prototype has the names to compare against.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !warnings().iter().any(|l| l.contains("q9")) {
-        assert!(Instant::now() < deadline, "no warning for q9: {:?}", warnings());
+        assert!(
+            Instant::now() < deadline,
+            "no warning for q9: {:?}",
+            warnings()
+        );
         assert!(via(w, CALL, "add").reached_supervisor());
         std::thread::sleep(Duration::from_millis(50));
     }
     for _ in 0..3 {
         assert!(via(w, STREAM, "add").reached_supervisor());
     }
-    let mine: Vec<String> = warnings().into_iter().filter(|l| l.contains("q9")).collect();
+    let mine: Vec<String> = warnings()
+        .into_iter()
+        .filter(|l| l.contains("q9"))
+        .collect();
     assert!(mine.iter().any(|l| l.contains("typo_*")), "{mine:?}");
-    assert!(!mine.iter().any(|l| l.contains("\"add\"")), "add matches a real function: {mine:?}");
+    assert!(
+        !mine.iter().any(|l| l.contains("\"add\"")),
+        "add matches a real function: {mine:?}"
+    );
     let typo = mine.iter().filter(|l| l.contains("typo_*")).count();
     assert_eq!(typo, 1, "warn once per window and pattern, got: {mine:?}");
+}
+
+// ---- malformed entries must fail closed -------------------------------------
+
+#[test]
+fn a_malformed_scope_entry_fails_closed_instead_of_becoming_no_entry() {
+    let fx = fixture(&["q10", "q10b"]);
+    let rt = fx.app.state::<PyRuntime>();
+    let watermark = rt.0.task_watermark();
+    for label in ["q10", "q10b"] {
+        let w = fx.win(label);
+        for cmd in [CALL, STREAM] {
+            let out = via(w, cmd, "add");
+            assert!(
+                matches!(out, Out::Acl(_)),
+                "{label} {cmd}: a scope entry that does not parse must refuse the call, got {out:?}"
+            );
+            assert!(
+                observed(label, cmd).is_none(),
+                "{label} {cmd}: handler must not run"
+            );
+        }
+    }
+    assert_eq!(
+        rt.0.task_watermark(),
+        watermark,
+        "nothing may reach the supervisor"
+    );
 }

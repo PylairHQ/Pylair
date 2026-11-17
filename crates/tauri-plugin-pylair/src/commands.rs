@@ -1,7 +1,9 @@
+use crate::fn_scope::{self, ExposedNames, FnScope};
 use crate::registry::subscribed;
 use crate::util::fmt_state;
 use crate::{protocol, supervisor, ErrorObj, Handle, PyRuntime, Registry, StreamItem};
 use serde_json::{json, Value};
+use tauri::ipc::CommandScope;
 use tauri::{Emitter, Runtime};
 
 #[tauri::command]
@@ -9,9 +11,14 @@ async fn python_call<R: Runtime>(
     window: tauri::WebviewWindow<R>,
     reg: tauri::State<'_, Registry>,
     rt: tauri::State<'_, PyRuntime>,
+    exposed: tauri::State<'_, ExposedNames>,
+    scope: CommandScope<FnScope>,
     fn_name: String,
     input: Value,
 ) -> Result<Value, ErrorObj> {
+    // SPIKE: the scope check runs first, so a denial takes no task slot,
+    // no credit and no registry subscription.
+    fn_scope::check(&scope, "python_call", window.label(), &fn_name, &exposed)?;
     subscribed(&window, &reg);
     rt.0.call(
         &fn_name,
@@ -47,15 +54,27 @@ pub struct StreamAck {
 /// as a stream exactly as before but NO `stream` field reaches the
 /// runtime, so no mismatch validation applies.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn python_call_stream<R: Runtime>(
     window: tauri::WebviewWindow<R>,
     reg: tauri::State<'_, Registry>,
     rt: tauri::State<'_, PyRuntime>,
+    exposed: tauri::State<'_, ExposedNames>,
+    scope: CommandScope<FnScope>,
     on_event: tauri::ipc::Channel<Value>,
     fn_name: String,
     input: Value,
     stream: Option<bool>,
 ) -> Result<StreamAck, ErrorObj> {
+    // SPIKE: checked before the impl subscribes the window, allocates a
+    // task or sends anything on the channel.
+    fn_scope::check(
+        &scope,
+        "python_call_stream",
+        window.label(),
+        &fn_name,
+        &exposed,
+    )?;
     python_call_stream_impl(&window, &reg, &rt, on_event, fn_name, input, stream).await
 }
 
