@@ -425,7 +425,7 @@ interpreter or module runs. On Windows the interpreter spawns with
 `PYLAIR_CONSOLE` (any value) in the launching environment to keep the
 window for debugging — it grants no extra privilege, just visibility.
 
-## 9. Wrap mode (W1 landed; W2 and W3 pending)
+## 9. Wrap mode (W1 and W3 landed; W2 pending)
 
 Wrap mode shows a Python web framework's own UI (Gradio, Streamlit,
 FastAPI...) in the window, served on `127.0.0.1` on a random port. Its
@@ -441,8 +441,8 @@ stands:
 | Hung-server detection | **Done (W1).** The launcher probes the server over HTTP and exits non-zero after 3 consecutive misses. Pings alone cannot see a wedged server. |
 | In-window navigation locked to the app origin, other links to the system browser | **W2.** `same_origin` exists and is tested; the navigation and new-window handlers are not registered yet. |
 | The wrapped page gets zero Tauri IPC | **Verified in the W0 spike** (all `plugin:*` invokes rejected from the remote origin); the permanent acceptance-job check is **W2/W3**. |
-| Adapters force `share=False`, disable tunnels and framework telemetry | **W3.** Not built. `command` mode runs whatever the app does. |
-| The server listens on loopback only | **Not enforced by W1.** The launcher chooses and passes a loopback *port* (`{port}`, `PYLAIR_PORT`) and probes `127.0.0.1`, but a `command` that binds `0.0.0.0` is reachable from the network. Recipes and adapters must pass `127.0.0.1` as the host. |
+| Adapters force `share=False`, disable tunnels and framework telemetry | **Done (W3).** The gradio adapter patches `Blocks.launch` so `share=False` wins over the entry's own argument (there is no config-only way to forbid a tunnel), and sets `GRADIO_ANALYTICS_ENABLED=False` before the import. The streamlit adapter runs `streamlit run` with `--browser.gatherUsageStats false` plus the `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false` env. `command` mode still runs whatever the app does. |
+| The server listens on loopback only | **Enforced for the adapters (W3), not for `command` mode.** The gradio patch forces `server_name=127.0.0.1`; the streamlit flags force `--server.address 127.0.0.1`. The launcher chooses and passes a loopback *port* (`{port}`, `PYLAIR_PORT`) and probes `127.0.0.1`, but a `command` that binds `0.0.0.0` is reachable from the network. Recipes must pass `127.0.0.1` as the host. |
 
 - The wrapped page is a **remote origin, so it gets no Tauri IPC**. A
   compromised wrapped page cannot reach `python_*` or any plugin command.

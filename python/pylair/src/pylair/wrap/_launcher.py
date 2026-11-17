@@ -3,12 +3,19 @@
 Usage::
 
     python -m pylair.wrap [launcher options] --cmd <argv...> [launcher options]
+    python -m pylair.wrap --framework {gradio|streamlit} --entry app.py [launcher options]
 
 The command is everything after `--cmd`, except trailing launcher options
 (`--ready-path`, `--probe-interval`, `--probe-timeout`, `--max-misses`),
 which are peeled off the tail so both `--cmd app --ready-path /x` and
 `--ready-path /x --cmd app` work. `{port}` in the command is replaced with
 the chosen port and `PYLAIR_PORT` is exported to the server.
+
+`--framework gradio|streamlit --entry` runs the matching adapter module
+(`pylair.wrap._gradio` / `pylair.wrap._streamlit`) as the server instead
+of a `--cmd`: the adapter pins the framework's host, port, share and
+telemetry knobs from the app's env. `--framework command` (the default)
+is `--cmd` mode, unchanged.
 
 Lifecycle (docs/protocol-v1.md `ready`, docs/security.md section 9):
 
@@ -81,9 +88,42 @@ class Options:
     probe_interval: float = DEFAULT_PROBE_INTERVAL
     probe_timeout: float = DEFAULT_PROBE_TIMEOUT
     max_misses: int = DEFAULT_MAX_MISSES
+    framework: str = "command"
+    entry: str | None = None
 
 
-_FLAGS = ("--ready-path", "--probe-interval", "--probe-timeout", "--max-misses")
+_FLAGS = (
+    "--ready-path",
+    "--probe-interval",
+    "--probe-timeout",
+    "--max-misses",
+    "--framework",
+    "--entry",
+)
+
+# Only the original four peel off a --cmd tail: `--cmd app --entry x`
+# must keep passing --entry to the app exactly as W1 did. Framework and
+# entry are launcher options recognised before --cmd only; a --cmd
+# cannot combine with --framework anyway.
+_TAIL_FLAGS = _FLAGS[:4]
+
+FRAMEWORKS = ("command", "gradio", "streamlit")
+
+# Cheap framework endpoints for readiness and health probes, chosen so a
+# slow page hydration is never a probe miss (decision 0003). `/` is what
+# `command` has always probed; it stays the default there.
+READY_PATHS = {
+    "command": "/",
+    "gradio": "/config",
+    "streamlit": "/_stcore/health",
+}
+
+
+def adapter_command(framework: str, entry: str) -> list[str]:
+    """The server argv for a framework adapter: our own interpreter, the
+    adapter module, the user's entry. The framework itself comes from the
+    app's env, which for a packaged app is the bundled interpreter's."""
+    return [sys.executable, "-m", f"pylair.wrap._{framework}", entry]
 
 
 def _take_flag(tokens: list[str], i: int) -> tuple[str, str, int] | None:
@@ -100,37 +140,57 @@ def _take_flag(tokens: list[str], i: int) -> tuple[str, str, int] | None:
 
 
 def parse_args(argv: list[str]) -> Options:
-    if "--cmd" not in argv:
-        raise UsageError("missing --cmd <argv...>")
-    at = argv.index("--cmd")
-    head, tail = list(argv[:at]), list(argv[at + 1 :])
+    if "--cmd" in argv:
+        at = argv.index("--cmd")
+        head, tail = list(argv[:at]), list(argv[at + 1 :])
+    else:
+        head, tail = list(argv), []
     raw: dict[str, str] = {}
     i = 0
     while i < len(head):
         taken = _take_flag(head, i)
         if taken is None:
-            raise UsageError(f"unexpected argument before --cmd: {head[i]!r}")
+            raise UsageError(f"unexpected argument: {head[i]!r}")
         raw[taken[0]] = taken[1]
         i += taken[2]
     # Peel launcher options off the tail. Walk from the end so the app's own
     # arguments are never reordered; only a recognised flag at the very end
     # is taken.
     while tail:
-        if len(tail) >= 2 and tail[-2] in _FLAGS:
+        if len(tail) >= 2 and tail[-2] in _TAIL_FLAGS:
             raw.setdefault(tail[-2], tail[-1])
             del tail[-2:]
-        elif any(tail[-1].startswith(f + "=") for f in _FLAGS):
+        elif any(tail[-1].startswith(f + "=") for f in _TAIL_FLAGS):
             flag, _, value = tail[-1].partition("=")
             raw.setdefault(flag, value)
             del tail[-1]
         else:
             break
-    if not tail:
-        raise UsageError("--cmd needs a command")
-    opts = Options(cmd=tail)
+
+    framework = raw.get("--framework", "command")
+    if framework not in FRAMEWORKS:
+        raise UsageError(
+            f"unknown --framework {framework!r} (one of {', '.join(FRAMEWORKS)})"
+        )
+    entry = raw.get("--entry")
+    if framework == "command":
+        if entry is not None:
+            raise UsageError("--entry only applies to --framework gradio|streamlit")
+        if "--cmd" not in argv:
+            raise UsageError("missing --cmd <argv...>")
+        if not tail:
+            raise UsageError("--cmd needs a command")
+        cmd = tail
+    else:
+        if "--cmd" in argv:
+            raise UsageError(f"--cmd does not combine with --framework {framework}")
+        if entry is None:
+            raise UsageError(f"--framework {framework} needs --entry app.py")
+        cmd = adapter_command(framework, entry)
+
+    opts = Options(cmd=cmd, framework=framework, entry=entry)
+    opts.ready_path = raw.get("--ready-path", READY_PATHS[framework])
     try:
-        if "--ready-path" in raw:
-            opts.ready_path = raw["--ready-path"]
         if "--probe-interval" in raw:
             opts.probe_interval = float(raw["--probe-interval"])
         if "--probe-timeout" in raw:
@@ -551,7 +611,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         opts = parse_args(list(sys.argv[1:] if argv is None else argv))
     except UsageError as e:
-        _log(f"usage: python -m pylair.wrap --cmd <argv...> [--ready-path /]  ({e})")
+        _log(
+            "usage: python -m pylair.wrap [--framework {command|gradio|streamlit}] "
+            f"[--entry app.py | --cmd <argv...>] [--ready-path /]  ({e})"
+        )
         return EXIT_USAGE
     channel = open_frame_channel()  # hygiene first: fd 1 -> stderr
     return Launcher(opts, channel).run()

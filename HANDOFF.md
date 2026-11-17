@@ -124,6 +124,55 @@ Merged since rc.17 (d7daaaf):
 `python/` and `integrations/` have not changed since rc.16, so step 2
 below is skipped for rc.20.
 
+## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
+
+W3 adds the framework adapters on top of the W1 launcher. Still no
+user-facing surface: W2 owns config keys, `pylair wrap`, the window and
+navigation. The launcher's command mode is unchanged.
+
+What it adds:
+
+- `python -m pylair.wrap --framework {command|gradio|streamlit}
+  [--entry app.py] [--cmd <argv...>] [--ready-path P]`. Bare
+  `--cmd` still means command mode; `--framework command --cmd` is
+  identical. The other frameworks require `--entry` and reject `--cmd`.
+- `pylair.wrap._gradio`: sets `GRADIO_ANALYTICS_ENABLED=False`, patches
+  `gradio.Blocks.launch` so `server_name=127.0.0.1`,
+  `server_port=$PYLAIR_PORT`, `inbrowser=False`, `share=False` and a
+  blocking foreground launch win over anything the entry passes, then
+  runs the entry via `runpy.run_path(run_name="__main__")`. Covers
+  `Interface`/`ChatInterface` (they inherit `Blocks.launch`). Entries
+  that never call `launch()` are served if they define a `demo` Blocks;
+  anything else exits 4 with a named error.
+- `pylair.wrap._streamlit`: invokes `streamlit.web.cli.main` (the
+  console_script entry, stable across 1.x) with `run ENTRY
+  --server.address 127.0.0.1 --server.port $PYLAIR_PORT --server.headless
+  true --browser.gatherUsageStats false --server.fileWatcherType none
+  --server.scriptHealthCheckEnabled true`, plus the
+  `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false` env. Multipage apps work:
+  Streamlit finds `pages/` next to the entry itself.
+- Health paths are per-framework so a slow page hydration is never a
+  probe miss: Gradio `/config`, Streamlit `/_stcore/health`.
+  `/_stcore/script-health-check` (enabled by the flag above) executes
+  the entry once in a throwaway session; it exists for tests and later
+  `doctor`, and is deliberately NOT the steady-state probe.
+- Version policy lives in `pylair.wrap._shared`: supported majors are
+  gradio 5.x and streamlit 1.x (the `wrap` test dependency group pins
+  the same majors). An off-pin or unparseable version logs a warning
+  and still runs; a missing framework is a clean exit-3 error. The
+  frameworks come from the app's env, never from pylair's deps.
+
+For W2: the adapters are plain `pylair.wrap` modules spawned as the
+server command, so the existing launcher/supervisor wiring carries them
+unchanged. If `doctor` wants a "does the entry run" check later,
+`/_stcore/script-health-check` and gradio `/config` are the cheap
+proofs. The IPC probe and navigation policy remain W2.
+
+Test notes: `python/pylair/tests/test_wrap_adapters.py` plus the fixture
+apps under `tests/wrap_apps/`; they need `uv sync --group wrap` and skip
+without it, so the default suite stays light. CI runs them in the
+`wrap-adapters` leg on all three OSes.
+
 ## Release order
 
 Humans dispatch every publish; an agent's job stops at green CI and a
