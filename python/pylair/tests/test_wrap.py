@@ -214,8 +214,19 @@ class Wrap:
         self.proc.stdin.write(_LEN.pack(len(body)) + body)
         self.proc.stdin.flush()
 
+    def diag(self) -> str:
+        """What the launcher said: its status and stderr, for failure messages."""
+        status = self.proc.poll()
+        state = "still running" if status is None else f"exited {status}"
+        time.sleep(0.2)
+        text = "".join(self.stderr) or "(empty)"
+        return "launcher " + state + "; stderr:" + chr(10) + text
+
     def recv(self, timeout: float = WAIT) -> dict:
-        return self.frames.get(timeout=timeout)
+        try:
+            return self.frames.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(f"no frame within {timeout}s; {self.diag()}") from None
 
     def recv_method(self, method: str, timeout: float = WAIT) -> dict:
         deadline = time.monotonic() + timeout
@@ -225,7 +236,12 @@ class Wrap:
                 return m
 
     def wait(self, timeout: float = WAIT) -> int:
-        return self.proc.wait(timeout=timeout)
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"launcher did not exit within {timeout}s; {self.diag()}"
+            ) from None
 
     def err_text(self) -> str:
         time.sleep(0.2)
