@@ -67,7 +67,9 @@ def main() -> None:
         with open(args.state_file, "w") as f:
             f.write(str(starts + 1))
         if starts < args.fail_starts:
-            print("server: address already in use (injected)", file=sys.stderr, flush=True)
+            print(
+                "server: address already in use (injected)", file=sys.stderr, flush=True
+            )
             os._exit(98)
     if args.pidfile:
         with open(args.pidfile, "w") as f:

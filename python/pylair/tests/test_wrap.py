@@ -235,10 +235,32 @@ class Wrap:
         return self
 
     def __exit__(self, *exc) -> bool:
+        # End every test the way a dying host would: stdin EOF, and the
+        # launcher must take its server tree down itself. Only a launcher
+        # that fails to do so is killed, tree and all (a venv's python.exe
+        # on Windows is a shim, so killing `proc` alone would orphan the
+        # real launcher and its server).
         if self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self.proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self._kill_tree()
         return False
+
+    def _kill_tree(self) -> None:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                check=False,
+                capture_output=True,
+            )
+        else:
+            self.proc.kill()
+        self.proc.wait(timeout=10)
 
 
 def read_pid(path: Path, timeout: float = WAIT) -> int:
