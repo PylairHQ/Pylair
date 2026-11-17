@@ -11,6 +11,7 @@ pub mod transport;
 
 mod builder;
 mod commands;
+mod fn_scope;
 mod registry;
 mod selftest;
 mod spec;
