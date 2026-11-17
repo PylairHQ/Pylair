@@ -1,0 +1,26 @@
+== M1: python_call subscribes the window BEFORE the scope check
+test q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+== M2: allow beats deny in permitted()
+test q1_deny_beats_an_allow_entry_that_also_matches ... FAILED
+test q3_a_deny_in_one_capability_beats_an_allow_in_another ... FAILED
+test result: FAILED. 17 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+test fn_scope::tests::deny_beats_an_allow_that_also_matches ... FAILED
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+== M3: python_call_stream check removed (impl reached on denial)
+test q1_deny_beats_an_allow_entry_that_also_matches ... FAILED
+test q1_allow_list_present_and_no_match_is_denied ... FAILED
+test q1_object_deny_entry_reaches_the_handler_and_denies ... FAILED
+test q2_a_scope_on_only_one_call_command_leaves_the_other_open ... FAILED
+test q2_a_scoped_allow_next_to_the_unscoped_grant_narrows_it ... FAILED
+test q2_scope_on_the_default_set_applies_to_both_call_commands ... FAILED
+test q3_a_deny_in_one_capability_beats_an_allow_in_another ... FAILED
+test q2_scoped_deny_beats_the_unscoped_grant_in_one_capability ... FAILED
+test q3_allow_entries_from_two_capabilities_union ... FAILED
+test q3_an_unscoped_grant_in_another_capability_is_narrowed_by_a_scoped_allow ... FAILED
+test q3_deny_entries_from_two_capabilities_union ... FAILED
+test q4_each_window_sees_only_its_own_capability ... FAILED
+test q5_an_explicit_empty_allow_array_is_indistinguishable_from_no_entries ... FAILED
+test q5_no_entries_means_empty_allow_and_empty_deny_and_everything_allowed ... FAILED
+test q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing ... FAILED
+test result: FAILED. 4 passed; 15 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
