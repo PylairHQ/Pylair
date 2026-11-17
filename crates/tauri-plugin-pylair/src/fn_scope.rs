@@ -33,24 +33,27 @@ pub(crate) struct FnScope {
 /// Exact match, or prefix match when the pattern ends in `*`. Only a single
 /// trailing star is a glob; a star anywhere else is a literal character.
 pub(crate) fn pattern_matches(pattern: &str, name: &str) -> bool {
-    let _ = (pattern, name);
-    false
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    }
 }
 
 /// Decide a call. No entries at all means everything is allowed. A deny
 /// match always wins. When allow entries exist, one of them must match.
 pub(crate) fn permitted(allow: &[&str], deny: &[&str], name: &str) -> bool {
-    let _ = (allow, deny, name);
-    true
+    if deny.iter().any(|p| pattern_matches(p, name)) {
+        return false;
+    }
+    allow.is_empty() || allow.iter().any(|p| pattern_matches(p, name))
 }
 
 /// The error a denied call returns.
 pub(crate) fn denied(window: &str, fn_name: &str) -> ErrorObj {
-    let _ = (window, fn_name);
     ErrorObj {
-        code: protocol::INTERNAL,
-        message: String::new(),
-        data: None,
+        code: protocol::PERMISSION_DENIED,
+        message: format!("function \"{fn_name}\" is not permitted for window \"{window}\""),
+        data: Some(json!({ "fn": fn_name, "window": window })),
     }
 }
 
