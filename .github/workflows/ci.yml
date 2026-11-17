@@ -34,6 +34,18 @@ jobs:
         with:
           node-version-file: .nvmrc
       - run: node scripts/check-action-pins.mjs --remote
+      # actionlint, downloaded as a release tarball pinned by version and
+      # sha256 (not a GitHub Action, so no uses: pin). -shellcheck= silences
+      # shellcheck findings for now; expression and syntax errors still fail.
+      - name: Lint workflow files (actionlint)
+        env:
+          AL_VERSION: "1.7.12"
+          AL_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tgz
+          echo "${AL_SHA256}  /tmp/actionlint.tgz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -shellcheck= .github/workflows/*.yml
 
   js:
     name: JS (${{ matrix.os }})

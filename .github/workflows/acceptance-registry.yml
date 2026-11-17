@@ -153,8 +153,8 @@ jobs:
         # mid-block does not fail a pwsh step unless it's the last one.
         shell: bash
         run: |
-          # Input reaches the shell via env only — never ${{ }} inside
-          # run: (script-injection surface). Validate shape once.
+          # Input reaches the shell via env only — never expression syntax
+          # inside run: (script-injection surface). Validate shape once.
           if [[ "$EXPECT" == *$'\n'* || "$EXPECT" == *$'\r'* ]] || \
              [[ ! "$EXPECT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "invalid expect_version input: '$EXPECT'"

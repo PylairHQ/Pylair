@@ -30,7 +30,7 @@ jobs:
     name: Generate + attach SBOMs
     runs-on: ubuntu-22.04
     env:
-      # Input reaches the shell via env only — never ${{ }} inside run:.
+      # Input reaches the shell via env only — never expression syntax inside run:.
       TAG: ${{ inputs.tag }}
     steps:
       # The tag input also feeds `gh` below — same env-only rule, and
