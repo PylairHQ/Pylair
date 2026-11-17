@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -125,11 +127,28 @@ def main() -> None:
         )
 
     note(f"starting on {sys.executable} {sys.version.split()[0]} port {args.port}")
-    # HTTPServer.server_bind() calls socket.getfqdn() between bind() and
-    # listen(); time that step on its own so a slow lookup shows up in the log.
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), H)
+
+    # Evidence from CI (macOS, python.org 3.12): the server sat between bind()
+    # and listen() (lsof: the port CLOSED, connects timing out) and never got
+    # past the constructor. http.server.HTTPServer.server_bind() does a
+    # socket.getfqdn() lookup there. This fixture does not need a server name,
+    # so it skips that lookup, and measures the lookup on a side thread so a
+    # slow resolver still shows up in the log without delaying listen().
+    class Server(ThreadingHTTPServer):
+        def server_bind(self) -> None:
+            socketserver.TCPServer.server_bind(self)
+            self.server_name = "127.0.0.1"
+            self.server_port = self.server_address[1]
+
+    def time_getfqdn() -> None:
+        t = time.monotonic()
+        socket.getfqdn("127.0.0.1")
+        note(f"socket.getfqdn('127.0.0.1') took {time.monotonic() - t:.2f}s")
+
+    threading.Thread(target=time_getfqdn, daemon=True).start()
+    srv = Server(("127.0.0.1", args.port), H)
     srv.daemon_threads = True
-    note(f"listening on {srv.server_address} (server_name {srv.server_name!r})")
+    note(f"listening on {srv.server_address}")
     srv.serve_forever()
 
 
