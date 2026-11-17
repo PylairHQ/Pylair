@@ -1,0 +1,10 @@
+{
+  "identifier": "q3b-a",
+  "description": "window q3b: unscoped pylair:default",
+  "windows": [
+    "q3b"
+  ],
+  "permissions": [
+    "pylair:default"
+  ]
+}

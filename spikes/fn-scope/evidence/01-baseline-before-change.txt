@@ -1,0 +1,61 @@
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Ok
+  left: Runtime(-32602)
+  left: Runtime(-32602)
+  left: Runtime(-32602)
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+ right: Denied
+test a_pattern_matching_no_exposed_function_warns_once ... FAILED
+test q1_allow_list_present_and_no_match_is_denied ... FAILED
+test q1_deny_beats_an_allow_entry_that_also_matches ... FAILED
+test q1_object_deny_entry_reaches_the_handler_and_denies ... FAILED
+test q2_a_scope_on_only_one_call_command_leaves_the_other_open ... FAILED
+test q2_a_scoped_allow_next_to_the_unscoped_grant_narrows_it ... FAILED
+test q2_scope_on_the_default_set_applies_to_both_call_commands ... FAILED
+test q2_scoped_deny_beats_the_unscoped_grant_in_one_capability ... FAILED
+test q3_a_deny_in_one_capability_beats_an_allow_in_another ... FAILED
+test q3_allow_entries_from_two_capabilities_union ... FAILED
+test q3_an_unscoped_grant_in_another_capability_is_narrowed_by_a_scoped_allow ... FAILED
+test q3_deny_entries_from_two_capabilities_union ... FAILED
+test q4_each_window_sees_only_its_own_capability ... FAILED
+test q5_an_explicit_empty_allow_array_is_indistinguishable_from_no_entries ... FAILED
+test q5_no_entries_means_empty_allow_and_empty_deny_and_everything_allowed ... FAILED
+test q6_the_real_authority_is_consulted_for_origin_and_window ... ok
+test q6_the_stock_mock_context_has_an_empty_acl_and_rejects_every_plugin_command ... ok
+test q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing ... FAILED
+test result: FAILED. 2 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.25s
+the python_call handler never recorded a scope for window q5
+the python_call handler never recorded a scope for window q5b
+thread 'a_pattern_matching_no_exposed_function_warns_once' (6956) panicked at tests/fn_scope_acl.rs:537:9:
+thread 'q1_allow_list_present_and_no_match_is_denied' (6957) panicked at tests/fn_scope_acl.rs:278:9:
+thread 'q1_deny_beats_an_allow_entry_that_also_matches' (6958) panicked at tests/fn_scope_acl.rs:291:9:
+thread 'q1_object_deny_entry_reaches_the_handler_and_denies' (6959) panicked at tests/fn_scope_acl.rs:260:9:
+thread 'q2_a_scope_on_only_one_call_command_leaves_the_other_open' (6997) panicked at tests/fn_scope_acl.rs:346:5:
+thread 'q2_a_scoped_allow_next_to_the_unscoped_grant_narrows_it' (7000) panicked at tests/fn_scope_acl.rs:321:9:
+thread 'q2_scope_on_the_default_set_applies_to_both_call_commands' (7010) panicked at tests/fn_scope_acl.rs:335:9:
+thread 'q2_scoped_deny_beats_the_unscoped_grant_in_one_capability' (7019) panicked at tests/fn_scope_acl.rs:304:9:
+thread 'q3_a_deny_in_one_capability_beats_an_allow_in_another' (7023) panicked at tests/fn_scope_acl.rs:387:9:
+thread 'q3_allow_entries_from_two_capabilities_union' (7034) panicked at tests/fn_scope_acl.rs:362:9:
+thread 'q3_an_unscoped_grant_in_another_capability_is_narrowed_by_a_scoped_allow' (7044) panicked at tests/fn_scope_acl.rs:373:9:
+thread 'q3_deny_entries_from_two_capabilities_union' (7047) panicked at tests/fn_scope_acl.rs:397:9:
+thread 'q4_each_window_sees_only_its_own_capability' (7058) panicked at tests/fn_scope_acl.rs:412:9:
+thread 'q5_an_explicit_empty_allow_array_is_indistinguishable_from_no_entries' (7068) panicked at tests/fn_scope_acl.rs:242:28:
+thread 'q5_no_entries_means_empty_allow_and_empty_deny_and_everything_allowed' (7071) panicked at tests/fn_scope_acl.rs:242:28:
+thread 'q7_denied_calls_take_no_slot_subscribe_nothing_and_send_nothing' (7095) panicked at tests/fn_scope_acl.rs:500:14:

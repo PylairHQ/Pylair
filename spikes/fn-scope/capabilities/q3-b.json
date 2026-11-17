@@ -1,0 +1,25 @@
+{
+  "identifier": "q3-b",
+  "description": "two capabilities, window q3: allow counter",
+  "windows": [
+    "q3"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "counter"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "counter"
+        }
+      ]
+    }
+  ]
+}

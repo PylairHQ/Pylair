@@ -1,0 +1,31 @@
+{
+  "identifier": "q1-allow",
+  "description": "allow list add, count*",
+  "windows": [
+    "q1-allow"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "count*"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "count*"
+        }
+      ]
+    }
+  ]
+}

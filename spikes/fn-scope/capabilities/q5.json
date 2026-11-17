@@ -1,0 +1,10 @@
+{
+  "identifier": "q5",
+  "description": "no scope entries at all",
+  "windows": [
+    "q5"
+  ],
+  "permissions": [
+    "pylair:default"
+  ]
+}

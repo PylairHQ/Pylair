@@ -481,6 +481,7 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 | -32032 | PROTOCOL_VIOLATION | garbage on frame fd / bad hello / credit overrun |
 | -32033 | RUNTIME_RESTARTED | in-flight call killed by a dev-mode hot reload |
 | -32040 | LIMIT_EXCEEDED | a configured resource limit was hit |
+| -32050 | PERMISSION_DENIED | spike only: the window's capability scope does not permit `fn` |
 
 `LIMIT_EXCEEDED` errors carry `data: {"limit": "<name>", "max": <n>}`
 naming which cap fired — e.g. `"max_concurrent_tasks"`,

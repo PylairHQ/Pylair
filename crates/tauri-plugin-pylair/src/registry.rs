@@ -19,6 +19,13 @@ impl WindowRegistry {
         self.subscribed.insert(label.to_string());
     }
 
+    /// SPIKE ONLY: whether a webview is in the subscriber set. Lets the
+    /// fn-scope tests prove a denied call does not subscribe its window.
+    #[doc(hidden)]
+    pub fn is_subscribed(&self, label: &str) -> bool {
+        self.subscribed.contains(label)
+    }
+
     /// Delivery targets for runtime-wide events (state, stderr, exposes).
     /// Stream chunks are addressed to their owning window directly.
     pub(super) fn broadcast_targets(&self) -> Vec<String> {

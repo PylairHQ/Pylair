@@ -1,0 +1,31 @@
+{
+  "identifier": "q9",
+  "description": "allow list with a pattern that matches nothing",
+  "windows": [
+    "q9"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "typo_*"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        },
+        {
+          "name": "typo_*"
+        }
+      ]
+    }
+  ]
+}

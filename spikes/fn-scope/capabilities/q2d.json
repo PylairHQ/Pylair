@@ -1,0 +1,18 @@
+{
+  "identifier": "q2d",
+  "description": "pylair:default plus a deny on python_call_stream only",
+  "windows": [
+    "q2d"
+  ],
+  "permissions": [
+    "pylair:default",
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "deny": [
+        {
+          "name": "sp*"
+        }
+      ]
+    }
+  ]
+}

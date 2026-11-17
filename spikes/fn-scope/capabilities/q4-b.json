@@ -1,0 +1,25 @@
+{
+  "identifier": "q4-b",
+  "description": "window q4-b: allow counter",
+  "windows": [
+    "q4-b"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "counter"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "counter"
+        }
+      ]
+    }
+  ]
+}

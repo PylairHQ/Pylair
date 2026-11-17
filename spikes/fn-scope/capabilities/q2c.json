@@ -1,0 +1,17 @@
+{
+  "identifier": "q2c",
+  "description": "scope attached to the pylair:default set itself",
+  "windows": [
+    "q2c"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:default",
+      "deny": [
+        {
+          "name": "sp*"
+        }
+      ]
+    }
+  ]
+}

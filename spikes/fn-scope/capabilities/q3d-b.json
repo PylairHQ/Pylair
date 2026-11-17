@@ -1,0 +1,25 @@
+{
+  "identifier": "q3d-b",
+  "description": "window q3d: deny add",
+  "windows": [
+    "q3d"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "deny": [
+        {
+          "name": "add"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "deny": [
+        {
+          "name": "add"
+        }
+      ]
+    }
+  ]
+}

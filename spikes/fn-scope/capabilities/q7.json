@@ -1,0 +1,25 @@
+{
+  "identifier": "q7",
+  "description": "deny counter on both commands",
+  "windows": [
+    "q7"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "deny": [
+        {
+          "name": "counter"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "deny": [
+        {
+          "name": "counter"
+        }
+      ]
+    }
+  ]
+}

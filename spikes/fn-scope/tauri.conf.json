@@ -1,0 +1,8 @@
+{
+  "productName": "fn-scope-spike",
+  "version": "0.0.0",
+  "identifier": "com.pylair.fnscope",
+  "build": { "frontendDist": "./frontend" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false }
+}

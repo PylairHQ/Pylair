@@ -1,0 +1,26 @@
+{
+  "identifier": "q2",
+  "description": "pylair:default plus a scoped deny, one capability",
+  "windows": [
+    "q2"
+  ],
+  "permissions": [
+    "pylair:default",
+    {
+      "identifier": "pylair:allow-python-call",
+      "deny": [
+        {
+          "name": "sp*"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "deny": [
+        {
+          "name": "sp*"
+        }
+      ]
+    }
+  ]
+}

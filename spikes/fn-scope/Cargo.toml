@@ -1,0 +1,16 @@
+[package]
+name = "fn-scope-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of the repo's cargo workspace, not published.
+[workspace]
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+tauri = { version = "2", features = ["test"] }
+tauri-plugin-pylair = { path = "../../crates/tauri-plugin-pylair" }
+serde_json = "1"

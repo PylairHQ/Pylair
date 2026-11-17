@@ -1,0 +1,25 @@
+{
+  "identifier": "q3b-b",
+  "description": "window q3b: scoped allow add",
+  "windows": [
+    "q3b"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "add"
+        }
+      ]
+    }
+  ]
+}

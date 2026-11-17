@@ -1,0 +1,17 @@
+{
+  "identifier": "q5b",
+  "description": "explicit empty allow array",
+  "windows": [
+    "q5b"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": []
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": []
+    }
+  ]
+}

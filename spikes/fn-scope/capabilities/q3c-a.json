@@ -1,0 +1,25 @@
+{
+  "identifier": "q3c-a",
+  "description": "window q3c: allow spy",
+  "windows": [
+    "q3c"
+  ],
+  "permissions": [
+    {
+      "identifier": "pylair:allow-python-call",
+      "allow": [
+        {
+          "name": "spy"
+        }
+      ]
+    },
+    {
+      "identifier": "pylair:allow-python-call-stream",
+      "allow": [
+        {
+          "name": "spy"
+        }
+      ]
+    }
+  ]
+}
