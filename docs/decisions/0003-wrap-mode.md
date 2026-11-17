@@ -91,6 +91,35 @@ framework limits.
 - The IPC probe becomes a permanent check in the acceptance job so a
   future capability change that opens remote IPC fails CI.
 
+## W2 implementation notes
+
+The three UX decisions above landed in W2 (plugin `wrap` module, the wrap
+template, `pylair wrap`), with these findings from building them:
+
+- **The window is built from `RunEvent::Ready`, off the main thread.** A
+  window built in plugin `setup` blocks on an acknowledgement from the event
+  loop, which has not started: the app hangs before showing anything (found
+  by running it, not by tests). The template declares the window with
+  `"create": false` so the plugin can build it with the download and
+  new-window hooks, which only a window builder carries.
+- **Navigation lock = plugin `on_navigation` + window `on_new_window`.** A
+  `file:` url never reaches the handler at all: the webview blocks a web page
+  from loading one. A custom scheme does, in place and as a new window, so
+  the self-test uses that.
+- **Feedback after a download is a small note in the page**, not a native
+  notification (which would add a plugin dependency) or a modal dialog.
+- **Back, Reload and Home** are a "Navigate" menu on top of Tauri's default
+  menu (so Copy and Paste still work on macOS), with Alt+Left / Cmd+[,
+  Ctrl/Cmd+R, Alt+Home / Cmd+Shift+H. Pressing Back from the app to the
+  starting page returns to the app at once, so history cannot trap the user
+  on a dead page.
+- **`pylair://state` and `pylair://stderr` are not delivered while the
+  wrapped page is showing**; a local page that loads late is replayed the
+  last state and the server's last 200 log lines.
+- **The ready url is checked for control characters and backslashes**, not
+  only parsed: the W0 Windows `\r` bug (a JSON-escaped CR navigating to
+  `/r`) is now refused at the source instead of normalised.
+
 ## W3 implementation notes
 
 - Health paths are per-framework, picked so a slow first-page hydration

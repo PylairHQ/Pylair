@@ -28,6 +28,41 @@ pyproject.toml [tool.pylair] + src-tauri/tauri.conf.json
 8. warn loudly if no signing credentials are configured
 ```
 
+## Wrap mode
+
+`[tool.pylair] mode = "wrap"` builds the same installer for an existing
+Python web app instead of a typed bridge (`docs/wrap-mode-brief.md`). The
+pipeline is the one above with these differences:
+
+- **Config.** `[tool.pylair.wrap]` (`framework`, `entry`, `cmd`,
+  `ready-path`, `ready-timeout`, `downloads`) is validated before anything is
+  downloaded; every error names the key and what is allowed. `app-module` is
+  not used. `source` (default `app`) is the directory the server runs in.
+- **Step 3** stages the source dir as `resources/app/` whatever it is called
+  (`"resources/app": "app/"` in `tauri.conf.json` never changes), and writes
+  `resources/pylair-wrap.json`: the launcher command line
+  (`python -m pylair.wrap --framework F [--entry E] --ready-path P [--cmd ...]`)
+  and the window options the plugin reads at startup. A source dir that is
+  the project root (`source = "."`) leaves out `src-tauri`, `node_modules`,
+  `ui`, `dist` and `target`.
+- **Step 6** imports the framework with the bundled interpreter after the
+  prune: `gradio`, `streamlit`, or the module of a `python -m <module>`
+  command. An over-pruned bundle fails here, not on a user's machine.
+- **`--stage-only`** runs steps 1 to 6 and stops before `tauri build`: no
+  installer, no signing. CI uses it to prove a project builds.
+- **`pylair dev`** needs no codegen: it writes `.pylair/pylair-wrap.json`
+  with the absolute source dir and runs `tauri dev`; a change to a `.py` file
+  restarts the server (a new port, and the window follows).
+- **`pylair doctor`** checks the config, the dependency manifest, that the
+  framework imports in the project venv (and, after a build, in the bundled
+  interpreter), the window shell files, `"create": false` on the main window,
+  and that no capability grants a remote url (the wrapped page must get no IPC).
+
+Dependencies must come from a manifest (`pyproject.toml`, ideally with
+`uv.lock`; `requirements.txt` is the warned fallback). `pylair wrap` on a
+bare `app.py` stops with that explanation and offers `uv init`; imports are
+never guessed.
+
 ## Network access on first build
 
 A first build needs GitHub access twice: we download

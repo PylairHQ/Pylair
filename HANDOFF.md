@@ -89,6 +89,53 @@ and `python/pylair/tests/wrap_server.py` (the misbehaving test server).
 These start many Python processes; if one fails while a build is
 saturating the machine, rerun it before treating it as real.
 
+## Wrap mode W2 (CLI + config + window), on branch `wrap-w2`
+
+Builds on W1 (PR 92). Everything a wrap app needs short of the framework
+adapters (W3).
+
+- **Config and CLI.** `[tool.pylair] mode` and `[tool.pylair.wrap]`
+  (`packages/cli/src/wrapconfig.ts`, strict validation, every error names the
+  key). `pylair wrap [entry]` / `pylair init --mode wrap` initialise an
+  existing project (manifest required, never overwrites a file);
+  `create-pylair --mode wrap` scaffolds a FastAPI command-mode sample (no
+  React). `pylair dev`, `build` (with `--stage-only`) and `doctor` handle
+  wrap apps. See `docs/build.md`, "Wrap mode".
+- **Plugin.** `Builder::wrap()`, one line in the app's `lib.rs`: reads
+  `pylair-wrap.json`, starts the launcher, builds the window from
+  `RunEvent::Ready` (see the decision record), local starting and restarting
+  pages, navigation lock, downloads, Back / Reload / Home menu. Decisions are
+  pure functions in `crates/tauri-plugin-pylair/src/wrap/policy.rs`.
+- **The launcher interface is generated, not implemented here.**
+  `python -m pylair.wrap --framework F [--entry E] --ready-path P [--cmd ...]`.
+  W1's launcher does not know `--framework` / `--entry` yet (W3 adds them),
+  so a real wrap app cannot run end to end until W3 merges. The installed
+  self-test was run locally with a scratch `sitecustomize` that drops those
+  two flags; nothing of that is in the repo.
+- **Installed self-test.** `PYLAIR_SELF_TEST_WRAP=<marker>` on an installed app
+  checks: ready, the window at the app url, GET returns the marker, the
+  navigation lock refuses an unknown scheme in place and as a new window,
+  and 10 IPC calls from the wrapped page are all denied (the permanent no-IPC
+  check). Optional: `PYLAIR_SELF_TEST_WRAP_RESTART=1` (dev only: restarts the
+  server, expects the restarting page and a new url) and
+  `PYLAIR_SELF_TEST_WRAP_DOWNLOAD=<path>|<text>` (needs `downloads =
+  "downloads"`). W3 wires it into the acceptance matrix.
+
+Before the 0.1.0 train can ship wrap mode:
+
+- `create-pylair --mode wrap` and `pylair wrap` refuse to run without
+  `--local` until `WRAP_IN_PUBLISHED_VERSIONS` in
+  `packages/create-pylair/src/scaffold.ts` is flipped to true, because the
+  published crate (rc.15) and `pylair` (rc10) have no wrap mode. Flip it in
+  the same commit that bumps the pins.
+- The crate gained a dependency (`rfd`, Save As dialog), so the default
+  template's `Cargo.lock` regenerates in the usual post-publish step, and the
+  wrap template ships no `Cargo.lock` yet: generate and commit one after the
+  crate is live, with the test that pins it (as for the default template).
+- `@pylair/cli` does not depend on `create-pylair`: `pylair wrap` runs the
+  scaffolder (`create-pylair@<same version>` through npx, or a checkout's
+  build with `--local`) so templates and pins cannot drift.
+
 Merged since rc.17 (d7daaaf):
 
 - PR 70, R4: `lib.rs` split into modules (pure move).
