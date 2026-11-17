@@ -1,17 +1,23 @@
+use crate::fn_scope::{self, FnScope};
 use crate::registry::subscribed;
 use crate::util::fmt_state;
 use crate::{protocol, supervisor, ErrorObj, Handle, PyRuntime, Registry, StreamItem};
 use serde_json::{json, Value};
-use tauri::{Emitter, Runtime};
+use tauri::ipc::CommandScope;
+use tauri::{Emitter, Manager, Runtime};
 
 #[tauri::command]
 async fn python_call<R: Runtime>(
     window: tauri::WebviewWindow<R>,
     reg: tauri::State<'_, Registry>,
     rt: tauri::State<'_, PyRuntime>,
+    scope: CommandScope<FnScope>,
     fn_name: String,
     input: Value,
 ) -> Result<Value, ErrorObj> {
+    // Per-function permissions: checked before the window is subscribed or
+    // anything reaches the supervisor, so a denial touches no state.
+    fn_scope::check(&scope, window.label(), &fn_name)?;
     subscribed(&window, &reg);
     rt.0.call(
         &fn_name,
@@ -46,16 +52,24 @@ pub struct StreamAck {
 /// `true` for `stream()`. Absent (older clients) the task is accounted
 /// as a stream exactly as before but NO `stream` field reaches the
 /// runtime, so no mismatch validation applies.
+///
+/// The window's per-function scope is checked first (same rule as
+/// `python_call`), before the window is subscribed, a task is allocated,
+/// credit is granted or anything is sent on `on_event`. The managed
+/// registry and runtime are read from the window instead of being separate
+/// parameters, which keeps the command within clippy's argument limit.
 #[tauri::command]
 async fn python_call_stream<R: Runtime>(
     window: tauri::WebviewWindow<R>,
-    reg: tauri::State<'_, Registry>,
-    rt: tauri::State<'_, PyRuntime>,
+    scope: CommandScope<FnScope>,
     on_event: tauri::ipc::Channel<Value>,
     fn_name: String,
     input: Value,
     stream: Option<bool>,
 ) -> Result<StreamAck, ErrorObj> {
+    fn_scope::check(&scope, window.label(), &fn_name)?;
+    let reg = window.state::<Registry>();
+    let rt = window.state::<PyRuntime>();
     python_call_stream_impl(&window, &reg, &rt, on_event, fn_name, input, stream).await
 }
 
