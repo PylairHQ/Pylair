@@ -45,6 +45,24 @@ Milestones: `M0` packaging spike → `M1` supervisor/protocol → `M2` typed
 bridge → `M3` streaming/cancellation → `M4` CLI/scaffolder → `M5` Ollama
 integration → `M6` reference app + RC.
 
+## Wrap an existing Python web app
+
+Bridge mode wraps Python functions; wrap mode wraps a whole Python web
+UI. A Gradio, Streamlit, FastAPI, Flask, NiceGUI, Dash or Panel app
+serves on `127.0.0.1` under the same supervisor and shows in the Pylair
+window:
+
+```sh
+npx pylair wrap app.py     # turns an existing project into a wrap app
+npx pylair dev
+```
+
+or `npx create-pylair my-app --mode wrap` for a new one. Until the first
+release that ships wrap mode, both need `--local /path/to/pylair-repo`.
+The Gradio and Streamlit adapters pin the loopback bind, `share=False`
+and telemetry off; `[tool.pylair.wrap]` is the config. Full guide,
+recipes and known limitations: [docs/wrap.md](docs/wrap.md).
+
 ## Known limitations
 
 - **Invocation is capability-level by default; per-function scopes are
@@ -176,7 +194,8 @@ cd python/pylair && uv sync   # Python env (fetches managed CPython)
 
 Docs: [security](docs/security.md), [protocol](docs/protocol-v1.md),
 [cancellation](docs/cancellation.md), [codegen](docs/codegen.md),
-[decisions](docs/decisions/), [ideas](docs/ideas.md).
+[wrap mode](docs/wrap.md), [decisions](docs/decisions/),
+[ideas](docs/ideas.md).
 
 ## License
 
