@@ -20,6 +20,7 @@ python-version = "3.12"
 [tool.pylair.wrap]
 framework = "command"
 cmd = ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "{port}"]
-ready-path = "/"        # probed until the server answers, then every 10s
+# ready-path = "/"      # probed until the server answers, then every 10s
+#                       # (default: "/" for command, per-framework for the adapters)
 ready-timeout = 120     # seconds to wait for the first answer
 downloads = "ask"       # "ask" = Save As dialog, "downloads" = straight to Downloads

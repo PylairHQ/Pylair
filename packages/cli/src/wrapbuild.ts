@@ -29,13 +29,16 @@ export function commandModule(cmd: string[] | undefined): string | undefined {
   return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(mod) ? mod : undefined;
 }
 
-/** What to import to show the framework is present and intact: gradio and
- * streamlit by name; for `command`, the `-m` module when there is one. */
+/** What to import to show the bundle can run: the launcher itself
+ * (`pylair.wrap`, which must be one of the app's dependencies: the supervisor
+ * starts `python -m pylair.wrap`), and the framework: gradio and streamlit by
+ * name; for `command`, the `-m` module when there is one. */
 export function smokeImports(w: WrapConfig): string[] {
-  if (w.framework === "gradio") return ["gradio"];
-  if (w.framework === "streamlit") return ["streamlit"];
+  const launcher = "pylair.wrap";
+  if (w.framework === "gradio") return [launcher, "gradio"];
+  if (w.framework === "streamlit") return [launcher, "streamlit"];
   const m = commandModule(w.cmd);
-  return m ? [m] : [];
+  return m ? [launcher, m] : [launcher];
 }
 
 /** Run the imports with `python`. Returns the failure text, or undefined

@@ -330,7 +330,9 @@ impl<R: Runtime> Builder<R> {
                             {
                                 st.0.local_page_loaded()
                             }
-                            _ => {}
+                            tauri::webview::PageLoadEvent::Finished => {
+                                st.0.app_page_finished(payload.url())
+                            }
                         }
                     }
                 }

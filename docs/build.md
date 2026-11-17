@@ -41,13 +41,16 @@ pipeline is the one above with these differences:
 - **Step 3** stages the source dir as `resources/app/` whatever it is called
   (`"resources/app": "app/"` in `tauri.conf.json` never changes), and writes
   `resources/pylair-wrap.json`: the launcher command line
-  (`python -m pylair.wrap --framework F [--entry E] --ready-path P [--cmd ...]`)
+  (`python -m pylair.wrap --framework F [--entry E] [--ready-path P] [--cmd ...]`;
+  `--ready-path` only when `ready-path` is set, so the adapters keep their
+  own health paths: gradio `/config`, streamlit `/_stcore/health`)
   and the window options the plugin reads at startup. A source dir that is
   the project root (`source = "."`) leaves out `src-tauri`, `node_modules`,
   `ui`, `dist` and `target`.
-- **Step 6** imports the framework with the bundled interpreter after the
-  prune: `gradio`, `streamlit`, or the module of a `python -m <module>`
-  command. An over-pruned bundle fails here, not on a user's machine.
+- **Step 6** imports `pylair.wrap` (the launcher the supervisor starts, so
+  `pylair` must be one of the app's dependencies) and the framework with the
+  bundled interpreter after the prune: `gradio`, `streamlit`, or the module
+  of a `python -m <module>` command. An over-pruned bundle fails here, not on a user's machine.
 - **`--stage-only`** runs steps 1 to 6 and stops before `tauri build`: no
   installer, no signing. CI uses it to prove a project builds.
 - **`pylair dev`** needs no codegen: it writes `.pylair/pylair-wrap.json`

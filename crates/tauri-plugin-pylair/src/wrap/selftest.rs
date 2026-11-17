@@ -146,6 +146,18 @@ async fn until<T>(
     }
 }
 
+/// Wait until the wrapped page at `url` has finished loading, so script sent
+/// to the window runs in the page that stays (not one about to be replaced).
+async fn wait_loaded<R: Runtime>(ui: &Arc<Ui<R>>, url: &tauri::Url) -> Result<(), String> {
+    let want = url.origin().ascii_serialization();
+    until(
+        "the app page to finish loading",
+        Duration::from_secs(60),
+        || (ui.app_loaded.lock().unwrap().as_deref() == Some(want.as_str())).then_some(()),
+    )
+    .await
+}
+
 async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, String)> {
     let fail = |code: i32| move |e: String| (code, e);
     let url = until("the server to be ready", Duration::from_secs(180), || {
@@ -194,6 +206,7 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
     let w = app
         .get_webview_window(super::WINDOW)
         .ok_or((10, "no window".to_string()))?;
+    wait_loaded(ui, &url).await.map_err(fail(10))?;
     let denied_before = ui.denied.load(std::sync::atomic::Ordering::SeqCst);
     w.eval(
         "try{location.href='pylair-selftest://blocked/a'}catch(e){};\
@@ -294,6 +307,13 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
             .path()
             .download_dir()
             .map_err(|e| (11, format!("no Downloads folder: {e}")))?;
+        let current = ui
+            .handle
+            .ready_url()
+            .and_then(|u| tauri::Url::parse(&u).ok());
+        wait_loaded(ui, current.as_ref().unwrap_or(&url))
+            .await
+            .map_err(fail(11))?;
         *ui.last_download.lock().unwrap() = None;
         w.eval(format!(
             "location.href = {}",

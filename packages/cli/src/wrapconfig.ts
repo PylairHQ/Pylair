@@ -22,8 +22,11 @@ export interface WrapConfig {
   entry?: string;
   /** command: argv of the server; `{port}` is replaced by the launcher. */
   cmd?: string[];
-  /** Path probed for readiness and health (default "/"). */
-  readyPath: string;
+  /** Path probed for readiness and health. Unset means the launcher's own
+   * per-framework default ("/" for command, /config for gradio,
+   * /_stcore/health for streamlit), which is picked so a slow first page is
+   * never a probe miss; setting it here overrides that. */
+  readyPath?: string;
   /** Seconds the supervisor waits for the server to answer (default 120). */
   readyTimeout: number;
   downloads: DownloadMode;
@@ -98,8 +101,11 @@ export function parseWrapConfig(raw: unknown, pyproject = "pyproject.toml"): Wra
       throw err(pyproject, `cmd is only for framework "command"; "${framework}" runs entry`);
   }
 
-  const readyPath = t["ready-path"] ?? "/";
-  if (typeof readyPath !== "string" || !readyPath.startsWith("/") || /\s/.test(readyPath))
+  const readyPath = t["ready-path"];
+  if (
+    readyPath !== undefined &&
+    (typeof readyPath !== "string" || !readyPath.startsWith("/") || /\s/.test(readyPath))
+  )
     throw err(
       pyproject,
       `ready-path must be a path starting with "/" and without spaces, got ${JSON.stringify(readyPath)}`,
@@ -154,7 +160,7 @@ export function wrapWarnings(w: WrapConfig): string[] {
 export function launcherArgs(w: WrapConfig): string[] {
   const a = ["-m", "pylair.wrap", "--framework", w.framework];
   if (w.entry !== undefined) a.push("--entry", w.entry);
-  a.push("--ready-path", w.readyPath);
+  if (w.readyPath !== undefined) a.push("--ready-path", w.readyPath);
   if (w.cmd) a.push("--cmd", ...w.cmd);
   return a;
 }

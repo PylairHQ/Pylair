@@ -90,7 +90,8 @@ export function wrapToml(w: WrapConfig, source: string): string {
   lines.push(`framework = ${tomlString(w.framework)}`);
   if (w.entry !== undefined) lines.push(`entry = ${tomlString(w.entry)}`);
   if (w.cmd) lines.push(`cmd = [${w.cmd.map(tomlString).join(", ")}]`);
-  lines.push(`ready-path = ${tomlString(w.readyPath)}`, `ready-timeout = ${w.readyTimeout}`, `downloads = ${tomlString(w.downloads)}`);
+  if (w.readyPath !== undefined) lines.push(`ready-path = ${tomlString(w.readyPath)}`);
+  lines.push(`ready-timeout = ${w.readyTimeout}`, `downloads = ${tomlString(w.downloads)}`);
   return lines.join("\n") + "\n";
 }
 
@@ -208,6 +209,14 @@ export async function initWrap(opts: InitWrapOptions): Promise<InitWrapResult> {
     appendFileSync(pyproject, pendingToml);
   }
 
+  // The supervisor starts `python -m pylair.wrap`, so the app's own
+  // environment must contain pylair. `pylair doctor` and `pylair build`
+  // check it; say so now rather than at the first run.
+  if (!mentions(manifestText, "pylair"))
+    log(
+      "pylair wrap: add Pylair to your dependencies, it runs your server: " +
+        (opts.local ? `uv add "pylair @ file://<repo>/python/pylair"` : "uv add pylair"),
+    );
   if (shell.kept.includes("package.json"))
     log(
       "pylair wrap: package.json already exists; add these to devDependencies yourself: " +

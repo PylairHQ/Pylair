@@ -161,6 +161,9 @@ pub struct Ui<R: Runtime> {
     denied: std::sync::atomic::AtomicU32,
     /// The last finished download: where it went and whether it worked.
     last_download: Mutex<Option<(PathBuf, bool)>>,
+    /// Origin of the wrapped page whose load last finished (the self-test
+    /// waits for it: script run on a page that is still being replaced is lost).
+    app_loaded: Mutex<Option<String>>,
 }
 
 /// Managed state: lets plugin hooks (navigation, page load) find the [`Ui`].
@@ -181,6 +184,7 @@ impl<R: Runtime> Ui<R> {
             restarting_shown: std::sync::atomic::AtomicU32::new(0),
             denied: std::sync::atomic::AtomicU32::new(0),
             last_download: Mutex::new(None),
+            app_loaded: Mutex::new(None),
             inner: Mutex::new(Inner {
                 showing: Showing::Local,
                 shown_app_url: None,
@@ -231,6 +235,11 @@ impl<R: Runtime> Ui<R> {
         if let Some(w) = self.app.get_webview_window(WINDOW) {
             let _ = w.navigate(url);
         }
+    }
+
+    /// A wrapped page finished loading.
+    pub(crate) fn app_page_finished(&self, url: &tauri::Url) {
+        *self.app_loaded.lock().unwrap() = Some(url.origin().ascii_serialization());
     }
 
     pub(crate) fn is_local(&self, url: &tauri::Url) -> bool {

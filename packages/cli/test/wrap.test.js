@@ -33,7 +33,7 @@ describe("[tool.pylair.wrap] parsing", () => {
       framework: "command",
       entry: undefined,
       cmd: ["python", "-m", "myapp", "--port", "{port}"],
-      readyPath: "/",
+      readyPath: undefined, // the launcher picks the framework's own default
       readyTimeout: 120,
       downloads: "ask",
     });
@@ -106,10 +106,18 @@ describe("[tool.pylair.wrap] parsing", () => {
 
 describe("the launcher interface generated from config", () => {
   test("command: --framework command ... --cmd last, ready-path before it", () => {
-    assert.deepEqual(launcherArgs(parseWrapConfig(CMD)), [
-      "-m", "pylair.wrap", "--framework", "command", "--ready-path", "/",
+    assert.deepEqual(launcherArgs(parseWrapConfig({ ...CMD, "ready-path": "/up" })), [
+      "-m", "pylair.wrap", "--framework", "command", "--ready-path", "/up",
       "--cmd", "python", "-m", "myapp", "--port", "{port}",
     ]);
+  });
+
+  test("an unset ready-path is NOT passed: the launcher's per-framework default stands", () => {
+    // gradio probes /config and streamlit /_stcore/health because GET / can
+    // stall during hydration; forcing "/" here would undo that.
+    assert.ok(!launcherArgs(parseWrapConfig(CMD)).includes("--ready-path"));
+    assert.ok(!launcherArgs(parseWrapConfig({ framework: "gradio", entry: "app.py" })).includes("--ready-path"));
+    assert.ok(!launcherArgs(parseWrapConfig({ framework: "streamlit", entry: "app.py" })).includes("--ready-path"));
   });
 
   test("an adapter passes --entry and no --cmd", () => {
@@ -147,10 +155,11 @@ describe("the launcher interface generated from config", () => {
     assert.equal(commandModule(["python", "app.py"]), undefined);
     assert.equal(commandModule(["uvicorn", "a:b"]), undefined);
     assert.equal(commandModule(["python", "-m", "bad;rm"]), undefined);
-    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "gradio", entry: "a.py" })), ["gradio"]);
-    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "streamlit", entry: "a.py" })), ["streamlit"]);
-    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "command", cmd: ["python", "-m", "uvicorn"] })), ["uvicorn"]);
-    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "command", cmd: ["./server"] })), []);
+    // the launcher is always imported: pylair must be one of the app's dependencies
+    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "gradio", entry: "a.py" })), ["pylair.wrap", "gradio"]);
+    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "streamlit", entry: "a.py" })), ["pylair.wrap", "streamlit"]);
+    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "command", cmd: ["python", "-m", "uvicorn"] })), ["pylair.wrap", "uvicorn"]);
+    assert.deepEqual(smokeImports(parseWrapConfig({ framework: "command", cmd: ["./server"] })), ["pylair.wrap"]);
   });
 });
 
@@ -488,6 +497,6 @@ describe("pylair build --stage-only on a command-mode FastAPI sample", { skip: !
     // Same project, with the framework pruned out of the bundle.
     const pp = join(app, "pyproject.toml");
     writeFileSync(pp, readFileSync(pp, "utf-8").replace('python-version = "3.12"', 'python-version = "3.12"\nprune = ["site-packages/uvicorn"]'));
-    await assert.rejects(build({ appDir: app, stageOnly: true, skipFetch: true }), /framework import check \(uvicorn\)/);
+    await assert.rejects(build({ appDir: app, stageOnly: true, skipFetch: true }), /framework import check \(pylair\.wrap, uvicorn\)/);
   });
 });
