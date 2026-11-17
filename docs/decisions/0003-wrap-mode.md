@@ -91,6 +91,33 @@ framework limits.
 - The IPC probe becomes a permanent check in the acceptance job so a
   future capability change that opens remote IPC fails CI.
 
+## W3 implementation notes
+
+- Health paths are per-framework, picked so a slow first-page hydration
+  is never a probe miss. Gradio: `GET /config`, the small JSON blob the
+  app builds once at launch (no session, no template render); `GET /`
+  on gradio can stall during hydration, which is exactly what W0 warned
+  about. Streamlit: `GET /_stcore/health`, the runtime's own cheap
+  liveness handler.
+- Gradio `share` cannot be disabled by config alone, so the adapter
+  patches `Blocks.launch`: `share=False`, `server_name=127.0.0.1`,
+  `server_port=$PYLAIR_PORT`, `inbrowser=False` and blocking win over
+  whatever the entry passes. `Interface`/`ChatInterface` inherit
+  `Blocks.launch`, so one patch covers all three.
+- Telemetry: gradio reads `GRADIO_ANALYTICS_ENABLED` at import time, so
+  the adapter sets `False` before importing. Streamlit gets both the
+  `--browser.gatherUsageStats false` flag and the
+  `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false` env.
+- Streamlit's `--server.scriptHealthCheckEnabled true` exposes
+  `/_stcore/script-health-check`, a GET that runs the entry once in a
+  throwaway session. It exists so tests (and later `doctor`) can prove
+  the app script itself runs; it re-runs the script per request, so it
+  is deliberately not the steady-state health probe.
+- Supported majors are pinned and documented: gradio 5.x, streamlit 1.x
+  (`pylair.wrap._shared.SUPPORTED_MAJORS`, mirrored by the `wrap` test
+  dependency group). Anything else warns and still runs; a missing
+  framework is a clean error, not a traceback.
+
 ## Gates
 
 Done-gates for *declaring wrap mode done* (not for starting W1):

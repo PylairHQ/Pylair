@@ -134,6 +134,27 @@ jobs:
       - working-directory: spikes/w0-wrap
         run: uv run --no-project python test_kill_tree.py
 
+  # W3 wrap adapters: real Gradio and Streamlit apps through the launcher.
+  # The frameworks live in the test-only `wrap` dependency group so the
+  # python leg stays light; this leg is the only place they install.
+  wrap-adapters:
+    name: Wrap adapters (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+      - working-directory: python/pylair
+        shell: bash
+        run: |
+          uv sync --frozen --group wrap
+          uv run pytest tests/test_wrap_adapters.py -q
+
   # Early-warning leg: the same suite on the newest stable CPython.
   # `uv python install` pins nothing — it fetches the newest stable
   # managed build, which the ">=3.12" request then resolves to (managed

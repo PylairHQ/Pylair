@@ -156,9 +156,7 @@ class Wrap:
     """A spawned `python -m pylair.wrap` with frame-level access."""
 
     def __init__(self, server_args: list[str], *opts: str, leader: bool = True):
-        env = dict(os.environ)
-        env.pop("PYTHONPATH", None)
-        cmd = [
+        argv = [
             sys.executable,
             "-m",
             "pylair.wrap",
@@ -169,6 +167,14 @@ class Wrap:
             "{port}",
             *server_args,
         ]
+        self._spawn(argv, leader=leader)
+
+    def _spawn(
+        self, argv: list[str], leader: bool = True, extra_env: dict | None = None
+    ) -> None:
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        env.update(extra_env or {})
         kwargs: dict = {}
         if os.name == "posix" and leader:
             # What the supervisor does: the launcher leads its own group.
@@ -176,7 +182,7 @@ class Wrap:
         elif os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         self.proc = subprocess.Popen(
-            cmd,
+            argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
