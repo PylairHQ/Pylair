@@ -117,8 +117,19 @@ def main() -> None:
         def log_message(self, *a: object) -> None:
             pass
 
+    t0 = time.monotonic()
+
+    def note(msg: str) -> None:
+        print(
+            f"server[{time.monotonic() - t0:6.2f}s]: {msg}", file=sys.stderr, flush=True
+        )
+
+    note(f"starting on {sys.executable} {sys.version.split()[0]} port {args.port}")
+    # HTTPServer.server_bind() calls socket.getfqdn() between bind() and
+    # listen(); time that step on its own so a slow lookup shows up in the log.
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), H)
     srv.daemon_threads = True
+    note(f"listening on {srv.server_address} (server_name {srv.server_name!r})")
     srv.serve_forever()
 
 

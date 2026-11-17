@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import socket
 import struct
 import subprocess
@@ -220,7 +221,39 @@ class Wrap:
         state = "still running" if status is None else f"exited {status}"
         time.sleep(0.2)
         text = "".join(self.stderr) or "(empty)"
-        return "launcher " + state + "; stderr:" + chr(10) + text
+        return (
+            "launcher "
+            + state
+            + "; stderr:"
+            + chr(10)
+            + text
+            + chr(10)
+            + self._sockets()
+        )
+
+    def _sockets(self) -> str:
+        """Who holds the server's port right now (best effort, POSIX tools)."""
+        m = re.search(r"on 127\.0\.0\.1:(\d+)", "".join(self.stderr))
+        if not m or os.name == "nt":
+            return "(no port to inspect)"
+        out = []
+        for cmd in (
+            ["lsof", "-nP", "-i", f":{m.group(1)}"],
+            ["ps", "-axo", "pid,ppid,state,command"],
+        ):
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=10, check=False
+                )
+                text = r.stdout.strip()
+                if cmd[0] == "ps":
+                    text = chr(10).join(
+                        ln for ln in text.splitlines() if "wrap_server" in ln
+                    )
+                out.append("$ " + " ".join(cmd) + chr(10) + (text or "(none)"))
+            except (OSError, subprocess.SubprocessError) as e:
+                out.append(f"$ {cmd[0]}: {e!r}")
+        return chr(10).join(out)
 
     def recv(self, timeout: float = WAIT) -> dict:
         try:
