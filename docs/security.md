@@ -376,6 +376,11 @@ posture, per `docs/decisions/0003-wrap-mode.md`:
   There is no fix we can apply until Tauri moves off gtk-rs 0.18; the
   advisory is tracked upstream and disclosed here as accepted residual
   risk.
+- `cargo audit` also reports **RUSTSEC-2024-0370** (`proc-macro-error`,
+  unmaintained). It arrives through the same Linux-only chain as `glib`
+  (`tauri → gtk → glib-macros`), so it affects Linux builds only, and no
+  action is possible until Tauri moves off gtk-rs 0.18. Accepted
+  residual risk for the same reason.
 
 ## 11. Reporting
 
