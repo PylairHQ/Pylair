@@ -184,32 +184,26 @@ def pick_free_port(
 # ---- probes ---------------------------------------------------------------
 
 
-def tcp_alive(port: int, timeout: float) -> bool:
+def probe_failure(port: int, path: str, timeout: float) -> str | None:
+    """TCP connect, then GET `path`: None when the server is healthy (a
+    non-5xx answer in time), else a short reason fit for the log."""
     try:
-        socket.create_connection(("127.0.0.1", port), timeout=timeout).close()
-        return True
-    except OSError:
-        return False
-
-
-def http_status(port: int, path: str, timeout: float) -> int | None:
-    """GET `path` and return the status, or None when nothing answered."""
+        socket.create_connection(("127.0.0.1", port), timeout=min(timeout, 2.0)).close()
+    except OSError as e:
+        return f"connect failed: {e!r}"
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request("GET", path, headers={"Connection": "close"})
-        return conn.getresponse().status
-    except (OSError, http.client.HTTPException, ValueError):
-        return None
+        status = conn.getresponse().status
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        return f"GET {path} failed: {e!r}"
     finally:
         conn.close()
+    return f"GET {path} answered {status}" if status >= 500 else None
 
 
 def probe(port: int, path: str, timeout: float) -> bool:
-    """TCP first, then GET: healthy means a non-5xx answer in time."""
-    if not tcp_alive(port, min(timeout, 2.0)):
-        return False
-    status = http_status(port, path, timeout)
-    return status is not None and status < 500
+    return probe_failure(port, path, timeout) is None
 
 
 # ---- process tree ---------------------------------------------------------
@@ -473,9 +467,16 @@ class Launcher:
 
     def _probe_loop(self) -> None:
         o, port = self.opts, self.port
+        last_note = 0.0
         while not self._done.is_set():  # readiness: no deadline of our own
-            if probe(port, o.ready_path, o.probe_timeout):
+            why = probe_failure(port, o.ready_path, o.probe_timeout)
+            if why is None:
                 break
+            # Say what the wait is stuck on, at most every 5s: this is the
+            # startup log a window shows while the app loads.
+            if time.monotonic() - last_note >= 5.0:
+                last_note = time.monotonic()
+                _log(f"not ready yet: {why}")
             if self._done.wait(0.2):
                 return
         if self._done.is_set():
@@ -485,11 +486,12 @@ class Launcher:
         self.send(proto.notification("ready", {"url": url}))
         misses = 0
         while not self._done.wait(o.probe_interval):
-            if probe(port, o.ready_path, o.probe_timeout):
+            why = probe_failure(port, o.ready_path, o.probe_timeout)
+            if why is None:
                 misses = 0
                 continue
             misses += 1
-            _log(f"health probe missed ({misses}/{o.max_misses})")
+            _log(f"health probe missed ({misses}/{o.max_misses}): {why}")
             if misses >= o.max_misses:
                 _log("server is not answering: exiting so the supervisor restarts it")
                 self.request_exit(EXIT_UNHEALTHY)
