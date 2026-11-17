@@ -1,9 +1,9 @@
 # Handoff
 
-Last rewritten 2026-11-14, against `main` at `a458e05` (after PR 57).
+Last rewritten 2026-11-17, against `main` at `81cd11e` (after PR 88).
 The previous contents were the rc.6 CI-fix handoff; that work landed long
 ago and the document had gone stale. What is kept here is what is still
-true: where the rc.19 train stands, the release order, and the standing
+true: where the rc.20 train stands, the release order, and the standing
 rules that AGENTS.md points at. Anything not listed here is in git history.
 
 ## Where the tree is
@@ -14,23 +14,34 @@ rc.17 is published: the crate at `0.1.0-rc.13`, `pylair` `0.1.0rc10`,
 rc.18 is published: the crate `0.1.0-rc.14` on crates.io and the npm
 trio at `0.1.0-rc.18`.
 
-rc.19 is in progress and is npm-only. The crate `0.1.0-rc.14` and the
-PyPI packages are unchanged, so there is no crate publish, no PyPI
-publish and no template `Cargo.lock` regeneration; steps 1 to 3 below
-are skipped for rc.19. rc.19 exists to ship the bundled-CPython bump
-from PR 84: python-build-standalone `20261110`, CPython `3.12.16` /
-`3.13.18`. Versions in the repo (checked in the files, not against the
-registries) and the state of each:
+rc.19 is published: npm trio at `0.1.0-rc.19` (npm-only; the crate and
+PyPI were unchanged). It shipped the bundled-CPython bump from PR 84:
+python-build-standalone `20261110`, CPython `3.12.16` / `3.13.18`.
 
-| Package | Version in the repo | rc.19 state |
+rc.20 train is in progress. It changes the crate, so it is a full train
+(same shape as PRs 82/83): this bump PR, the crate publish, then a
+separate pins PR. Reason: per-function permissions (PR 88). The crate
+gains `fn_scope` (command scopes on `python_call` and
+`python_call_stream`, `PERMISSION_DENIED` `-32050`); `@pylair/client`
+gains `PermissionDeniedError` and the self-test's `fn-permission` check;
+`@pylair/cli` gains the capability checks in `pylair build` and
+`pylair doctor`. Versions in the repo (checked in the files, not against
+the registries) and the state of each:
+
+| Package | Version in the repo | rc.20 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.14` | published, unchanged |
-| `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, not released |
-| `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, not released |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.19` | to publish |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.15` | to publish first |
+| `pylair` (PyPI) | `0.1.0-rc.10` | unchanged, skipped (Python unchanged) |
+| `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.19` | to `0.1.0-rc.20` in the pins PR |
 
-Scaffold pins for rc.19: `tauri-plugin-pylair = "=0.1.0-rc.14"`,
-`pylair==0.1.0rc10`, `@pylair/client` and `@pylair/cli` `0.1.0-rc.19`.
+Scaffold pins stay at the rc.19 values (`tauri-plugin-pylair =
+"=0.1.0-rc.14"`, `pylair==0.1.0rc10`) until the pins PR, which moves the
+crate pin to `=0.1.0-rc.15`, regenerates the template `Cargo.lock`
+against the published crate, and bumps the npm trio to `0.1.0-rc.20`.
+Pack-mode registry acceptance is expected red in the window between the
+pins commit and the crate publish. Skipped for rc.20: step 2 below (PyPI)
+and any `pylair` pin change.
 
 Merged since rc.17 (d7daaaf):
 
@@ -60,8 +71,12 @@ Merged since rc.17 (d7daaaf):
   (`3.12.16` / `3.13.18`); RUSTSEC-2024-0370 disclosed in
   `docs/security.md`; release checklist now checks the PBS pin.
 
+- PR 88: per-function permissions (crate `fn_scope`, client
+  `PermissionDeniedError`, CLI capability checks, self-test
+  `fn-permission` check, `docs/decisions/0004-per-function-permissions.md`).
+
 `python/` and `integrations/` have not changed since rc.16, so step 2
-below is skipped for rc.19.
+below is skipped for rc.20.
 
 ## Release order
 
