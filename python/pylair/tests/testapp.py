@@ -102,7 +102,24 @@ def sync_sleep(seconds: float) -> str:
 
 
 @expose(isolated=True)
-def isolated_sleep(seconds: float) -> str:
+def isolated_sleep(seconds: float, pidfile: str | None = None) -> str:
+    if pidfile:
+        with open(pidfile, "w") as f:
+            f.write(str(os.getpid()))
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(isolated=True)
+def sigterm_ignoring_sleep(seconds: float, pidfile: str | None = None) -> str:
+    """Sleeps while ignoring SIGTERM: the kill path must burn the full
+    SIGTERM grace and finish via SIGKILL (POSIX semantics only)."""
+    import signal
+
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if pidfile:
+        with open(pidfile, "w") as f:
+            f.write(str(os.getpid()))
     time.sleep(seconds)
     return "slept"
 

@@ -294,14 +294,28 @@ def test_isolated_print_does_not_corrupt_result(runtime):
     assert resp["result"] == "hi", resp
 
 
-def test_isolated_call_and_cancel_kills_worker(runtime):
+def test_isolated_call_and_cancel_kills_worker(runtime, tmp_path):
     runtime.recv()
-    runtime.send(call(1, "isolated_sleep", task=1, input={"seconds": 60}))
-    time.sleep(1.0)  # let the worker spawn
+    pidfile = tmp_path / "worker.pid"
+    runtime.send(
+        call(
+            1,
+            "isolated_sleep",
+            task=1,
+            input={"seconds": 60, "pidfile": str(pidfile)},
+        )
+    )
+    # Wait for the worker to actually exist rather than a fixed sleep:
+    # on a starved machine the spawn can outlast any constant.
+    deadline = time.time() + 15
+    while not pidfile.exists():
+        assert time.time() < deadline, "worker never spawned"
+        time.sleep(0.05)
+    wpid = int(pidfile.read_text().strip())
     t0 = time.time()
     runtime.send(proto.request(2, "cancel", {"task": 1}))
-    # The ack now reports the actual kill outcome, so it waits for the
-    # terminate/reap path — the task's own terminal can arrive first.
+    # The ack reports the actual kill outcome within a bound inside the
+    # host's cancel_timeout; the task's own terminal can arrive first.
     # Collect both regardless of order.
     ack = terminal = None
     deadline = time.time() + 15
@@ -313,9 +327,66 @@ def test_isolated_call_and_cancel_kills_worker(runtime):
             terminal = m
     elapsed = time.time() - t0
     assert ack["result"]["cancelled"] is True
-    assert ack["result"]["status"] == "terminated", ack
+    # Both are documented outcomes (protocol-v1 §5, cancellation.md):
+    # "terminated" when the kill is confirmed inside the ack bound,
+    # "termination_in_progress" when it is not yet confirmed; under a
+    # starved loop the kill can still be running at the bound. The
+    # terminal frame is only sent after _kill_worker returns, so it is
+    # the authoritative proof the kill path ran to completion.
+    assert ack["result"]["status"] in (
+        "terminated",
+        "termination_in_progress",
+    ), ack
     assert terminal["error"]["code"] == proto.TASK_CANCELLED
     assert elapsed < 10, "worker should be terminated promptly, not at 60s"
+    if sys.platform != "win32":
+        # Terminal implies _kill_worker's proc.wait() returned, so the
+        # pid is already reaped — existence must fail, not just report a
+        # zombie.
+        with pytest.raises(ProcessLookupError):
+            os.kill(wpid, 0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIG_IGN is POSIX-only")
+def test_cancel_of_sigterm_ignoring_worker_still_kills(runtime, tmp_path):
+    """The worst case for the ack bound: the worker ignores SIGTERM, the
+    grace burns in full, SIGKILL finishes it. Either documented status is
+    legal; the pid must still be gone."""
+    runtime.recv()
+    pidfile = tmp_path / "worker.pid"
+    runtime.send(
+        call(
+            1,
+            "sigterm_ignoring_sleep",
+            task=1,
+            input={"seconds": 60, "pidfile": str(pidfile)},
+        )
+    )
+    deadline = time.time() + 15
+    while not pidfile.exists():
+        assert time.time() < deadline, "worker never spawned"
+        time.sleep(0.05)
+    wpid = int(pidfile.read_text().strip())
+    t0 = time.time()
+    runtime.send(proto.request(2, "cancel", {"task": 1}))
+    ack = terminal = None
+    deadline = time.time() + 15
+    while ack is None or terminal is None:
+        m = runtime.recv(timeout=max(0.1, deadline - time.time()))
+        if m.get("id") == 2:
+            ack = m
+        elif m.get("id") == 1:
+            terminal = m
+    elapsed = time.time() - t0
+    assert ack["result"]["cancelled"] is True
+    assert ack["result"]["status"] in (
+        "terminated",
+        "termination_in_progress",
+    ), ack
+    assert terminal["error"]["code"] == proto.TASK_CANCELLED
+    assert elapsed < 10, "SIGKILL should follow the grace, not the 60s sleep"
+    with pytest.raises(ProcessLookupError):
+        os.kill(wpid, 0)
 
 
 @pytest.mark.skipif(
