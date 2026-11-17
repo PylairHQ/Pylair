@@ -1,4 +1,7 @@
 name: Registry acceptance
+# Tooling sets dispatch_id to correlate this dispatch with the run it
+# produced; the bracketed suffix only renders when the id is present.
+run-name: "Registry acceptance${{ inputs.dispatch_id && format(' [{0}]', inputs.dispatch_id) || '' }}"
 
 # Scaffolds an app from the SHIPPED artifacts and proves the whole path:
 # npm install → uv sync → pylair build → --self-test (real bridge call
@@ -24,6 +27,16 @@ on:
         type: choice
         options: [pack, registry]
         default: pack
+      expect_version:
+        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.19)"
+        type: string
+        required: false
+        default: ""
+      dispatch_id:
+        description: "Optional correlation id echoed in the run name (set by release tooling, never required)"
+        type: string
+        required: false
+        default: ""
   push:
     paths:
       - "packages/client/**"
@@ -130,6 +143,45 @@ jobs:
           fi
           npm install
           uv sync
+
+      - name: Assert resolved package versions match expect_version
+        if: ${{ inputs.expect_version != '' }}
+        working-directory: app-under-test
+        env:
+          EXPECT: ${{ inputs.expect_version }}
+        # bash, not the Windows-default pwsh: a failed native command
+        # mid-block does not fail a pwsh step unless it's the last one.
+        shell: bash
+        run: |
+          # Input reaches the shell via env only — never ${{ }} inside
+          # run: (script-injection surface). Validate shape once.
+          if [[ "$EXPECT" == *$'\n'* || "$EXPECT" == *$'\r'* ]] || \
+             [[ ! "$EXPECT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid expect_version input: '$EXPECT'"
+            exit 1
+          fi
+
+          fail=0
+          check() { # $1 label, $2 resolved version
+            if [ "$2" != "$EXPECT" ]; then
+              echo "::error::$1 resolved to '$2' but expect_version is '$EXPECT' - the registry served something else"
+              fail=1
+            else
+              echo "$1 resolved to $2 as expected"
+            fi
+          }
+
+          check "@pylair/cli"    "$(node -p "require('./node_modules/@pylair/cli/package.json').version")"
+          check "@pylair/client" "$(node -p "require('./node_modules/@pylair/client/package.json').version")"
+          # create-pylair is the scaffolder, not an app dep — pack mode
+          # keeps the unpacked tarball under cp-src, registry mode asks
+          # npm what the @next tag resolved to.
+          if [ "$SOURCE" = pack ]; then
+            check "create-pylair" "$(node -p "require('../cp-src/package/package.json').version")"
+          else
+            check "create-pylair" "$(npm view create-pylair@next version)"
+          fi
+          exit $fail
 
       - name: Two-window capability — only when the resolved crate supports it
         working-directory: app-under-test/src-tauri
