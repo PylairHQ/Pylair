@@ -16,6 +16,10 @@ run-name: "Registry acceptance${{ inputs.dispatch_id && format(' [{0}]', inputs.
 #   source=registry: scaffold via `npx create-pylair@next` — post-publish
 #                    verification of what users actually get.
 #
+# Both jobs run in each mode: `acceptance` scaffolds a bridge app and
+# `wrap-acceptance` scaffolds a `--mode wrap` app per framework
+# (command, gradio, streamlit), mirroring ci.yml's wrap-acceptance.
+#
 # Registry-mode prerequisite: the pylair PyPI package and
 # tauri-plugin-pylair crate versions pinned by the scaffolder must
 # already be published — publish the crate first, then npm.
@@ -28,7 +32,7 @@ on:
         options: [pack, registry]
         default: pack
       expect_version:
-        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.20)"
+        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.21)"
         type: string
         required: false
         default: ""
@@ -408,3 +412,251 @@ jobs:
           if [ "$PYLAIR_WINB_CAP" = "1" ]; then
             env -i PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 "$ISOLATED/Contents/MacOS/$(basename "$APP" .app)"
           fi
+
+  # Wrap mode from the shipped artifacts: ci.yml's wrap-acceptance gives
+  # this proof for a checkout (--local); this job gives it for what users
+  # get: `create-pylair --mode wrap` from the packed tarball or registry
+  # @next, the same framework fixtures, `pylair build`, and the installed
+  # wrap self-test per OS (WebView2, WKWebView, WebKitGTK under xvfb).
+  # Pack mode still resolves the Python pin and the crate pin from the
+  # live registries; they must be published before either mode is green.
+  wrap-acceptance:
+    name: registry-wrap (${{ matrix.os }}, ${{ matrix.framework }}${{ matrix.build_shell && format('-{0}', matrix.build_shell) || '' }}, ${{ inputs.source || 'pack' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    env:
+      APP_DIR: wrap-app
+      APP_BIN: wrap-app
+      # Gradio embeds the page title in the config `GET /` serves; FastAPI
+      # serves the marker itself; Streamlit renders over a websocket, so its
+      # static shell (title "Streamlit") is what a GET can see.
+      MARKER: ${{ matrix.framework == 'streamlit' && 'Streamlit' || 'PYLAIR-WRAP-OK' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+        framework: [command, gradio, streamlit]
+        include:
+          # One bundle per OS is enough to install and run the app.
+          - os: ubuntu-22.04
+            bundles: deb
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: app
+          # The bridge matrix runs a second Windows leg under pwsh so
+          # System32 bsdtar ordering gets exercised on `pylair build`.
+          # One leg covers it here: os+framework match the matrix cell,
+          # so this merges build_shell onto the windows/command leg.
+          # That leg builds under pwsh, the other Windows legs on bash.
+          - os: windows-latest
+            framework: command
+            build_shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          # Only pack mode runs `pnpm install` in the workspace; in
+          # registry mode the store dir never exists and setup-node's
+          # post-job cache save fails the whole leg.
+          cache: ${{ (inputs.source || 'pack') == 'pack' && 'pnpm' || '' }}
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # One uv cache per leg: gradio and streamlit wheels are the
+          # slow part, and a FastAPI leg should not restore them.
+          cache-suffix: wrap-${{ matrix.os }}-${{ matrix.framework }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+      - name: Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build workspace packages
+        if: ${{ (inputs.source || 'pack') == 'pack' }}
+        # bash, not the Windows-default pwsh: a failed native command
+        # mid-block does not fail a pwsh step unless it's the last one.
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+
+      - name: npm-pack the packages the wrap app needs
+        if: ${{ (inputs.source || 'pack') == 'pack' }}
+        shell: bash
+        run: |
+          # A wrap app depends on @pylair/cli only (no @pylair/client,
+          # nothing talks to the bridge), plus create-pylair to scaffold.
+          # Workspace-relative paths: $RUNNER_TEMP is D:\... on Windows
+          # and GNU tar parses the drive colon as a remote host:file spec.
+          mkdir -p packs
+          PACKS=$(pwd)/packs
+          for p in packages/cli packages/create-pylair; do
+            (cd "$p" && npm pack --pack-destination "$PACKS" >/dev/null)
+          done
+          ls -la packs
+
+      - name: Scaffold the wrap app from the packed create-pylair tarball
+        if: ${{ (inputs.source || 'pack') == 'pack' }}
+        shell: bash
+        run: |
+          mkdir -p cp-src
+          # Plain tar: all paths are relative so there's no colon for
+          # GNU tar to misparse, and --force-local doesn't exist on
+          # macOS's BSD tar.
+          tar -xzf packs/create-pylair-*.tgz -C cp-src
+          node cp-src/package/dist/index.js "$APP_DIR" --mode wrap
+          node scripts/wrap-acceptance/prepare.mjs "$APP_DIR" ${{ matrix.framework }}
+
+      - name: Scaffold the wrap app from the registry (@next)
+        if: ${{ inputs.source == 'registry' }}
+        # bash: two native commands; pwsh would only report the last
+        # one's exit code.
+        shell: bash
+        run: |
+          npx -y create-pylair@next "$APP_DIR" --mode wrap
+          node scripts/wrap-acceptance/prepare.mjs "$APP_DIR" ${{ matrix.framework }}
+
+      - name: Install app deps
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: |
+          if [ "$SOURCE" = pack ]; then
+            # Tarball FIRST: the scaffolded @pylair/cli pin points at a
+            # version that isn't on the registry yet, so npm install 404s.
+            npm install ../packs/pylair-cli-*.tgz
+          fi
+          npm install
+          uv sync
+
+      - name: Assert resolved package versions match expect_version
+        if: ${{ inputs.expect_version != '' }}
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          EXPECT: ${{ inputs.expect_version }}
+        # bash, not the Windows-default pwsh: a failed native command
+        # mid-block does not fail a pwsh step unless it's the last one.
+        shell: bash
+        run: |
+          # Input reaches the shell via env only, never expression syntax
+          # inside run: (script-injection surface). Validate shape once.
+          if [[ "$EXPECT" == *$'\n'* || "$EXPECT" == *$'\r'* ]] || \
+             [[ ! "$EXPECT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid expect_version input: '$EXPECT'"
+            exit 1
+          fi
+
+          fail=0
+          check() { # $1 label, $2 resolved version
+            if [ "$2" != "$EXPECT" ]; then
+              echo "::error::$1 resolved to '$2' but expect_version is '$EXPECT' - the registry served something else"
+              fail=1
+            else
+              echo "$1 resolved to $2 as expected"
+            fi
+          }
+
+          check "@pylair/cli"    "$(node -p "require('./node_modules/@pylair/cli/package.json').version")"
+          # create-pylair is the scaffolder, not an app dep; pack mode
+          # keeps the unpacked tarball under cp-src, registry mode asks
+          # npm what the @next tag resolved to.
+          if [ "$SOURCE" = pack ]; then
+            check "create-pylair" "$(node -p "require('../cp-src/package/package.json').version")"
+          else
+            check "create-pylair" "$(npm view create-pylair@next version)"
+          fi
+          exit $fail
+
+      # The Rust side is the same for every framework, so an OS's legs
+      # share a cache, distinct from ci.yml's key since the resolved
+      # crate here is the published one, not a path dep.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: ${{ env.APP_DIR }}/src-tauri
+          shared-key: wrap-registry-${{ runner.os }}
+
+      - name: pylair build
+        if: ${{ !(runner.os == 'Windows' && matrix.build_shell == 'pwsh') }}
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: npx pylair build --bundles ${{ matrix.bundles }}
+
+      - name: pylair build (pwsh: System32 tar ordering)
+        if: ${{ runner.os == 'Windows' && matrix.build_shell == 'pwsh' }}
+        working-directory: ${{ env.APP_DIR }}
+        shell: pwsh
+        run: npx pylair build --bundles ${{ matrix.bundles }}
+
+      - name: Installed wrap self-test (Linux, clean container, xvfb)
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          DEB=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
+          dpkg -x "$DEB" /tmp/approot
+          for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
+          # Bare ubuntu:22.04: no Python, no framework, no GUI libs beyond
+          # what the installed app needs. The REAL app runs under xvfb and
+          # checks itself.
+          docker run --rm -e APP_BIN -e MARKER -v /tmp/approot:/r:ro ubuntu:22.04 bash -c '
+            set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
+            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
+            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
+            touch /tmp/wrap-restart-trigger
+            export PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger
+            timeout 600 xvfb-run -a /r/usr/bin/$APP_BIN 2>&1 | tee /tmp/wrap-self-test.log
+            grep -q "wrap-self-test: ok" /tmp/wrap-self-test.log'
+
+      - name: Installed wrap self-test (macOS)
+        if: runner.os == 'macOS'
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          APP="$PWD/$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)"
+          touch /tmp/wrap-restart-trigger
+          # A clean environment, run from outside the checkout (as the
+          # bridge leg does): no Python on PATH, nothing of the project
+          # visible.
+          cd /tmp
+          env -i HOME="$HOME" PATH=/usr/bin:/bin \
+            PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 \
+            PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger \
+            perl -e 'alarm 600; exec @ARGV' "$APP/Contents/MacOS/$APP_BIN" 2>&1 | tee /tmp/wrap-self-test.log
+          grep -q "wrap-self-test: ok" /tmp/wrap-self-test.log
+
+      - name: Installed wrap self-test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.APP_DIR }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $i = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $i) { Write-Error 'nsis installer not found'; exit 1 }
+          $inst = Start-Process -FilePath $i.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($inst.ExitCode -ne 0) { Write-Error "nsis install exit $($inst.ExitCode)"; exit 1 }
+          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" `
+                -Recurse -Filter "$env:APP_BIN.exe" -Depth 3 -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+          if (-not $exe) { Write-Error "installed $env:APP_BIN.exe not found"; exit 1 }
+          $trigger = Join-Path $env:TEMP 'wrap-restart-trigger'
+          Set-Content -Path $trigger -Value 'x'
+          $env:PYLAIR_SELF_TEST_WRAP = $env:MARKER
+          $env:PYLAIR_SELF_TEST_WRAP_RESTART = '1'
+          $env:PYLAIR_SELF_TEST_WRAP_CRASH = '1'
+          $env:PYLAIR_RESTART_TRIGGER = $trigger
+          # A GUI-subsystem exe: redirect so the verdict lands in the log,
+          # and wait on the process handle for the real exit code.
+          $out = Join-Path $env:TEMP 'wrap-st-out.txt'
+          $err = Join-Path $env:TEMP 'wrap-st-err.txt'
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP `
+                -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+          $done = $p.WaitForExit(600000)
+          Get-Content $out,$err -ErrorAction SilentlyContinue
+          if (-not $done) { $p.Kill(); Write-Error 'wrap self-test timed out'; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "wrap self-test exit $($p.ExitCode)"; exit 1 }
+          if (-not (Select-String -Path $out -Pattern 'wrap-self-test: ok' -Quiet)) {
+            Write-Error 'no "wrap-self-test: ok" verdict in the output'; exit 1
+          }
