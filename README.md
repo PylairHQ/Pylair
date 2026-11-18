@@ -15,7 +15,7 @@ Release candidate. `pylair` and `pylair-ollama` are on PyPI,
 Install RCs with **exact pins**, not `--pre`:
 
 ```sh
-pip install pylair==0.1.0rc10 pylair-ollama==0.1.0rc3
+pip install pylair==0.1.0rc11 pylair-ollama==0.1.0rc3
 ```
 
 `--pre` opts *every* package in the install into prereleases. It can
@@ -23,8 +23,8 @@ pull your dependencies into unstable versions and break for reasons
 unrelated to this project. Exact pins avoid that.
 
 Each package versions independently across registries: the numbers
-won't match (`pylair` at `0.1.0rc10`, npm packages at `0.1.0-rc.20`, the
-crate at `0.1.0-rc.15`). Check each registry for its latest RC.
+won't match (`pylair` at `0.1.0rc11`, npm packages at `0.1.0-rc.21`, the
+crate at `0.1.0-rc.16`). Check each registry for its latest RC.
 
 Try it:
 
@@ -57,8 +57,9 @@ npx pylair wrap app.py     # turns an existing project into a wrap app
 npx pylair dev
 ```
 
-or `npx create-pylair my-app --mode wrap` for a new one. Until the first
-release that ships wrap mode, both need `--local /path/to/pylair-repo`.
+or `npx create-pylair my-app --mode wrap` for a new one (`--local
+/path/to/pylair-repo` scaffolds against a checkout instead of the
+published packages).
 The Gradio and Streamlit adapters pin the loopback bind, `share=False`
 and telemetry off; `[tool.pylair.wrap]` is the config. Full guide,
 recipes and known limitations: [docs/wrap.md](docs/wrap.md).

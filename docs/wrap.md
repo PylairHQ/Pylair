@@ -17,7 +17,7 @@ front end over `@expose`d Python functions.
 ### A new project
 
 ```sh
-npx create-pylair my-app --mode wrap --local /path/to/pylair-checkout
+npx create-pylair my-app --mode wrap
 cd my-app
 npm install && uv sync
 npx pylair dev
@@ -28,10 +28,9 @@ You get a FastAPI + uvicorn sample app (`app/main.py`, `framework =
 `pylair dev` runs `tauri dev`: the window shows a local starting page
 until the server answers, then navigates to it.
 
-The `--local` flag is required for now: `create-pylair --mode wrap`
-refuses without it because wrap mode is not in the published packages
-yet. Once a release ships it, drop `--local` and the command works like
-the bridge scaffold.
+`--local /path/to/pylair-checkout` is still accepted: it points every
+dependency at a Pylair checkout instead of the published packages,
+which is how this repo scaffolds against itself.
 
 ### An existing project
 
@@ -47,8 +46,9 @@ framework from it when it can (gradio, streamlit), writes
 `[tool.pylair]` / `[tool.pylair.wrap]` into `pyproject.toml`, and adds
 the window shell, never overwriting a file that exists. A bare
 `app.py` with no manifest stops with the reason and offers `uv init`;
-Pylair never guesses dependencies from imports. The same `--local`
-gate applies, since it runs `create-pylair --mode wrap` under the hood.
+Pylair never guesses dependencies from imports. It runs
+`create-pylair --mode wrap` under the hood, so `--local` works the
+same way here.
 
 ```text
 pylair wrap [entry.py] [--framework command|gradio|streamlit]
@@ -300,6 +300,6 @@ status table.
 - **Supported majors are gradio 5.x and streamlit 1.x.** Other majors
   log a warning and still run; a missing framework is a clean error,
   not a traceback.
-- **`create-pylair --mode wrap` needs `--local` until the first release
-  that ships wrap mode** (it ships with 0.1.0); `pylair wrap` inherits
-  the same gate because it runs the scaffolder.
+- **Navigation is locked to the exact app origin.** Other pages cannot
+  be reached in the window; external `http`/`https`/`mailto` links open
+  in the system browser and any other scheme is refused.

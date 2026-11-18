@@ -23,24 +23,25 @@ It shipped per-function permissions (PR 88): `fn_scope` command scopes,
 `PermissionDeniedError`, and the `build`/`doctor` capability checks.
 
 rc.21 train is in progress, the wrap-mode release (W1 to W4, PRs 92 to
-96). This PR bumps only the things that must publish first: the crate
-to `0.1.0-rc.16` and `pylair` to `0.1.0-rc.11` (dashed in pyproject,
-the form `release.yml` expects; `pylair-ollama` is unchanged at
-`0.1.0-rc.3`). The pins PR follows: npm trio `0.1.0-rc.21`, scaffold
-pins, the default template `Cargo.lock` regenerated against the
-published crate, a `Cargo.lock` for the wrap template, and
-`WRAP_IN_PUBLISHED_VERSIONS` flipped to true.
+96). The crate `0.1.0-rc.16` is on crates.io and `pylair` `0.1.0rc11`
+is on PyPI (`pylair-ollama` unchanged at `0.1.0-rc.3`). This pins PR
+moves everything else: npm trio `0.1.0-rc.21`, scaffold pins
+(`tauri-plugin-pylair = "=0.1.0-rc.16"`, `pylair==0.1.0rc11`), both
+template `Cargo.lock` files regenerated against the published crate
+(the wrap template gets one for the first time), and
+`WRAP_IN_PUBLISHED_VERSIONS` flipped to true so `--local` is no longer
+needed for wrap scaffolds.
 
 | Package | Version in the repo | rc.21 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.16` | next to publish |
-| `pylair` (PyPI) | `0.1.0-rc.11` | next to publish |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.16` | published |
+| `pylair` (PyPI) | `0.1.0-rc.11` | published |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.20` | pins PR bumps to `0.1.0-rc.21` |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.21` | next to publish |
 
-Remaining order for rc.21: crate then PyPI `pylair` publishes, then the
-pins PR, pack-mode acceptance green on it, the npm trio under `--tag
-next`, then registry acceptance with `source=registry`.
+Remaining order for rc.21: pack-mode acceptance green on this commit,
+then the npm trio under `--tag next`, then registry acceptance with
+`source=registry`.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
@@ -123,12 +124,11 @@ needs: config, CLI, the window.
 
 Before the 0.1.0 train can ship wrap mode:
 
-- `create-pylair --mode wrap` and `pylair wrap` refuse to run without
-  `--local` until `WRAP_IN_PUBLISHED_VERSIONS` in
-  `packages/create-pylair/src/scaffold.ts` is flipped to true: every
-  published version before rc.21 lacks wrap mode. The rc.21 publishes
-  give the scaffolded packages wrap; flip it in the pins-PR commit that
-  bumps the pins.
+- `create-pylair --mode wrap` and `pylair wrap` refused `--local`-less
+  runs until the rc.21 pins PR flipped `WRAP_IN_PUBLISHED_VERSIONS` in
+  `packages/create-pylair/src/scaffold.ts`: versions before rc.21 lack
+  wrap mode. The flag stays for future template features that outrun
+  the published versions.
 - The crate gained a dependency (`rfd`, Save As dialog), so the default
   template's `Cargo.lock` regenerates in the usual post-publish step, and the
   wrap template ships no `Cargo.lock` yet: generate and commit one after the
