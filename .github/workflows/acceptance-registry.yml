@@ -586,7 +586,7 @@ jobs:
         shell: bash
         run: npx pylair build --bundles ${{ matrix.bundles }}
 
-      - name: pylair build (pwsh: System32 tar ordering)
+      - name: "pylair build (pwsh: System32 tar ordering)"
         if: ${{ runner.os == 'Windows' && matrix.build_shell == 'pwsh' }}
         working-directory: ${{ env.APP_DIR }}
         shell: pwsh
