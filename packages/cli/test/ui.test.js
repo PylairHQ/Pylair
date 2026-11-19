@@ -7,6 +7,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { findArtifacts } from "../dist/build/artifacts.js";
+import { runTool } from "../dist/build/util.js";
 import { detectCaps, formatDuration, formatSize, stripAnsi, symbolsFor, truncate, Ui } from "../dist/ui/index.js";
 import { stripPlain, parseBuildArgs } from "../dist/cli.js";
 
@@ -389,6 +390,51 @@ describe("--plain on the command line", () => {
     assert.match(r.stdout, /^ +> file +pyproject\.toml$/m);
     assert.match(r.stdout, /^ +> fix +run this inside a pylair app/m);
     assert.match(r.stdout, /\n\n\d+ problem\(s\) found\n$/);
+  });
+});
+
+describe("folded tool output", () => {
+  const noisy = ["-e", "for (let i = 1; i <= 3; i++) console.log('line ' + i); console.error('warn from tool'); process.exit(Number(process.env.EXIT || 0))"];
+
+  test("fancy: nothing is streamed, the live line shows the last output line", async () => {
+    const h = harness(caps({ env: { LANG: "en_GB.UTF-8" } }));
+    const seen = [];
+    await h.ui.step("install deps", async (s) => {
+      const orig = s.progress;
+      s.progress = (t) => (seen.push(t), orig(t));
+      await runTool(h.ui, process.execPath, noisy, process.cwd(), { step: s });
+    });
+    assert.ok(seen.includes("line 3"), JSON.stringify(seen));
+    assert.ok(!stripAnsi(h.text()).includes("line 1\n"), "output is folded, not printed");
+    assert.equal(h.errText(), "");
+  });
+
+  test("fancy: a failing tool dumps its whole log, then the step fails", async () => {
+    const h = harness(caps({ stdoutIsTTY: false, env: { FORCE_COLOR: "1" } }));
+    process.env.EXIT = "3";
+    try {
+      await assert.rejects(
+        h.ui.step("build installer", (s) => runTool(h.ui, process.execPath, noisy, process.cwd(), { step: s })),
+        /exited 3/,
+      );
+    } finally {
+      delete process.env.EXIT;
+    }
+    assert.match(h.errText(), /line 1[\s\S]*line 2[\s\S]*line 3[\s\S]*warn from tool/);
+    assert.match(stripAnsi(h.text()), /build installer/);
+  });
+
+  test("plain and --verbose stream through (nothing captured, nothing dumped)", async () => {
+    for (const [c, verbose] of [[plainCaps(), false], [caps({ env: { LANG: "en_GB.UTF-8" } }), true]]) {
+      const h = harness(c);
+      await h.ui.step("x", (s) => runTool(h.ui, process.execPath, ["-e", "0"], process.cwd(), { step: s, verbose }));
+      assert.equal(h.errText(), "");
+    }
+  });
+
+  test("a tool that cannot start is reported as such", async () => {
+    const h = harness(plainCaps());
+    await assert.rejects(runTool(h.ui, "pylair-no-such-tool", [], process.cwd()), /failed to start/);
   });
 });
 

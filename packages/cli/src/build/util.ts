@@ -27,10 +27,10 @@ export interface RunToolOptions {
 
 /** Run a tool and wait for it.
  *
- * Plain output, `--verbose`, or no live terminal: the tool inherits our
- * stdio and streams exactly as before. Fancy output on a TTY: the tool's
- * output is folded into the running step's single progress line, and the
- * whole captured log is printed only if the tool fails. */
+ * Plain output or `--verbose`: the tool inherits our stdio and streams
+ * exactly as before. Fancy output: the tool's output is captured and shown as
+ * the running step's single progress line (on a live terminal), and the whole
+ * captured log is printed only if the tool fails. */
 export async function runTool(
   ui: Ui,
   cmd: string,
@@ -39,7 +39,7 @@ export async function runTool(
   o: RunToolOptions = {},
 ): Promise<void> {
   const label = `${cmd} ${args.join(" ")}`;
-  const fold = ui.caps.animate && !o.verbose && o.step !== undefined;
+  const fold = ui.caps.fancy && !o.verbose && o.step !== undefined;
   const child = spawn(cmd, args, {
     cwd,
     env: o.env ?? process.env,

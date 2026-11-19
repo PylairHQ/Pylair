@@ -93,8 +93,7 @@ export interface BuildOptions {
 }
 
 const UNSIGNED_WARNING =
-  "UNSIGNED BUILD: this bundle is not code-signed or notarized, so macOS Gatekeeper and " +
-  "Windows SmartScreen will warn users. To sign, see docs/build.md#signing";
+  "UNSIGNED BUILD: Gatekeeper and SmartScreen will warn users (see docs/build.md#signing)";
 
 export async function build(opts: BuildOptions): Promise<void> {
   const { appDir } = opts;
