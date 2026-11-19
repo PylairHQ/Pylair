@@ -31,7 +31,7 @@ Naming lives in `product.json` — read it in tooling, never hard-code.
 | `integrations/ollama` | optional `pylair-ollama` package (never a core dependency) |
 | `scripts/` | `dogfood-windows.ps1` — lifecycle containment dogfood |
 | `spikes/` | `m0-packaging`, `w0-wrap` — throwaway spikes kept for evidence |
-| `.github/workflows/` | `ci.yml`, `acceptance-registry.yml`, `publish-crates.yml`, `release.yml` (PyPI), `publish-npm.yml` |
+| `.github/workflows/` | `ci.yml`, `acceptance-registry.yml`, `m0-spike.yml` (weekly + manual), `publish-crates.yml`, `release.yml` (PyPI), `publish-npm.yml` |
 
 ## Toolchain (all pinned in-repo)
 
@@ -43,8 +43,29 @@ tests spawn the real runtime).
 
 ## Build / lint / test — exactly what CI runs
 
-CI is `.github/workflows/ci.yml` (three OSes per leg: `ubuntu-22.04`,
-`windows-latest`, `macos-latest`). Local commands are identical.
+CI is `.github/workflows/ci.yml` (three OSes: `ubuntu-22.04`,
+`windows-latest`, `macos-latest`). Local commands are identical. The layout
+is built around the macOS runner limit (about five at a time):
+
+- **Linux and Windows** get one job per suite (JS, Rust, Python, wrap
+  adapters, Python edge) and, for wrap acceptance, one job per framework.
+- **macOS** gets ONE job per kind of work: `macOS checks` runs the JS,
+  Rust, Python and wrap-adapters suites in sequence (each suite is a step
+  named for it, each runs even if an earlier one failed, and the job fails
+  at the end if any did), and `wrap acceptance (macos-latest)` builds,
+  installs and self-tests command, gradio and streamlit in sequence
+  (`scripts/wrap-acceptance/run-macos.sh`). The bridge `acceptance` job
+  keeps its two macOS legs. Python edge does not run on macOS.
+- **Docs-only changes** (`docs/**`, root `*.md`/`LICENSE*`, `.github/*.md`;
+  `scripts/ci-changes.mjs`)
+  skip the heavy jobs. The five branch-protection checks (JS and Rust on
+  ubuntu, Rust, Python on windows and ubuntu: ruleset `protect-main`) are
+  gated step by step so they still report under their own names; a
+  job-level `if` on a matrix job would leave a required check pending
+  forever. If you add a required check, gate it the same way.
+- `m0-spike.yml` (the M0 installer spike) runs weekly and on demand only.
+- `acceptance-registry.yml` runs Linux and Windows legs on push and the
+  full matrix, macOS included, on `workflow_dispatch` (the release train).
 
 **JS (all `packages/*`):**
 
@@ -158,7 +179,9 @@ from packed tarballs (`source=pack`, default) or the live registry
   publishes land (hence the train order).
 - **macOS legs starve.** `macos-latest` runners queue and crawl; a slow
   or late-starting macOS leg is normal capacity starvation, not a
-  failure signal — wait before declaring a leg dead.
+  failure signal, so wait before declaring a leg dead. That is why macOS
+  work is consolidated into few jobs (see the CI layout above): add macOS
+  coverage as a step in an existing macOS job, not as a new job.
 - The second Windows leg under `pwsh` in acceptance-registry exists to
   catch tar-ordering bugs (git-bash resolves GNU tar, pwsh resolves
   System32 bsdtar). Don't merge it away.

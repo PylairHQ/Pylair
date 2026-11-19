@@ -224,7 +224,27 @@ proofs. The IPC probe and navigation policy remain W2.
 Test notes: `python/pylair/tests/test_wrap_adapters.py` plus the fixture
 apps under `tests/wrap_apps/`; they need `uv sync --group wrap` and skip
 without it, so the default suite stays light. CI runs them in the
-`wrap-adapters` leg on all three OSes.
+`wrap-adapters` leg on Linux and Windows and as a suite of the `macOS
+checks` job on macOS.
+
+## CI layout (macOS runner diet)
+
+macOS runners are capped at about five at a time, and a push used to ask
+for sixteen (eleven in `ci.yml`, five in `acceptance-registry.yml`), so
+jobs queued for fifteen minutes and timed out. Coverage is unchanged;
+jobs were moved and merged (details in AGENTS.md, "Build / lint / test"):
+
+- `ci.yml`: one `macOS checks` job (JS, Rust, Python, wrap-adapters suites
+  in sequence) and one `wrap acceptance (macos-latest)` job (three
+  frameworks in sequence); Linux and Windows keep one job per suite or
+  framework. Python edge dropped macOS. The M0 spike is its own workflow,
+  weekly and on demand.
+- A `changes` job skips the heavy jobs for docs-only changes. Required
+  checks are gated per step so they keep reporting (see AGENTS.md).
+- `acceptance-registry.yml`: push runs Linux and Windows only; a manual
+  dispatch keeps the whole matrix. A `plan` job builds the matrices.
+- If macOS legs still starve, the next lever is the bridge `acceptance`
+  job's two macOS legs (scaffold, reference), which were left as they were.
 
 ## Release order
 

@@ -23,6 +23,35 @@ env:
   UV_PYTHON: "3.12"
 
 jobs:
+  # Docs-only changes (docs/**, root *.md / LICENSE*, .github/*.md) skip the
+  # heavy jobs. Markdown outside those places (package READMEs, template
+  # files, the PyPI long description) ships and counts as code. The filter
+  # is scripts/ci-changes.mjs (unit-tested here); anything it cannot prove is
+  # docs-only counts as code. Jobs that are branch-protection checks (JS, Rust
+  # and Python on ubuntu and windows) are gated STEP by step, so they still run,
+  # report under their real names and pass: a job skipped by a job-level `if`
+  # with a matrix reports under the unexpanded matrix name, and the required
+  # check would wait forever. Jobs that are not required use a job-level `if`.
+  changes:
+    name: Changes
+    runs-on: ubuntu-22.04
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Unit-test the change filter
+        run: node --test scripts/ci-changes.test.mjs
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: node scripts/ci-changes.mjs
+
   # Every third-party `uses:` must be a 40-hex commit sha, and the sha
   # must resolve to a commit — annotated-tag object shas pin nothing.
   action-pins:
@@ -49,19 +78,25 @@ jobs:
 
   js:
     name: JS (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        # macOS runs these suites in the single "macOS checks" job below.
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.code == 'true'
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        if: needs.changes.outputs.code == 'true'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        if: needs.changes.outputs.code == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        if: needs.changes.outputs.code == 'true'
         with:
           # cli codegen tests spawn `python -m pylair.codegen`;
           # pylair needs 3.12+ (PEP 695 syntax)
@@ -69,58 +104,76 @@ jobs:
       # `pylair build --stage-only` on a scaffolded wrap app (cli tests) locks
       # with uv and stages the bundled interpreter; it skips itself without uv.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        if: needs.changes.outputs.code == 'true'
         with:
           enable-cache: false
       - run: pnpm install --frozen-lockfile
+        if: needs.changes.outputs.code == 'true'
       - run: pnpm build
+        if: needs.changes.outputs.code == 'true'
       - run: pnpm typecheck
+        if: needs.changes.outputs.code == 'true'
       - run: pnpm test
+        if: needs.changes.outputs.code == 'true'
 
   rust:
     name: Rust (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.code == 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        if: needs.changes.outputs.code == 'true'
         with:
           toolchain: "1.92.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: needs.changes.outputs.code == 'true'
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        if: needs.changes.outputs.code == 'true'
         with:
           # e2e tests spawn the real runtime; pylair needs 3.12+
           # (PEP 695 syntax). Matches the bundled-runtime version class.
           python-version: "3.12"
       - name: Linux Tauri dependencies
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.code == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: cargo fmt --check
+        if: needs.changes.outputs.code == 'true'
       - run: cargo clippy --all-targets -- -D warnings
+        if: needs.changes.outputs.code == 'true'
       - run: cargo build
+        if: needs.changes.outputs.code == 'true'
       - run: cargo test
+        if: needs.changes.outputs.code == 'true'
 
   python:
     name: Python (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.code == 'true'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        if: needs.changes.outputs.code == 'true'
         with:
           enable-cache: true
       # bash everywhere: pwsh doesn't abort a step when a native command
       # mid-block exits non-zero — a failed `ruff format --check` was
       # masked by a later `pytest` pass (CI #91 Windows leg). bash runs -e.
       - working-directory: python/pylair
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
           uv sync --frozen
@@ -128,6 +181,7 @@ jobs:
           uv run ruff format --check src tests
           uv run pytest -q
       - working-directory: integrations/ollama
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
           uv sync --frozen
@@ -137,6 +191,7 @@ jobs:
       # W0 wrap spike: the launcher's kill_tree must reap a SIGTERM-ignoring
       # grandchild (process group on posix, taskkill /T on Windows).
       - working-directory: spikes/w0-wrap
+        if: needs.changes.outputs.code == 'true'
         run: uv run --no-project python test_kill_tree.py
 
   # W3 wrap adapters: real Gradio and Streamlit apps through the launcher.
@@ -144,11 +199,13 @@ jobs:
   # python leg stays light; this leg is the only place they install.
   wrap-adapters:
     name: Wrap adapters (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -167,8 +224,12 @@ jobs:
   # pinned-3.12 venv can't be reused and hide the signal.
   # continue-on-error means this job can never block a merge — it is NOT
   # a required check; failures surface only in its logs/annotations.
+  # Not run on macOS: it is an early-warning signal, and the macOS runners
+  # are the scarce ones.
   python-edge:
     name: Python edge (newest CPython, non-blocking, ${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     env:
@@ -176,7 +237,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -196,25 +257,18 @@ jobs:
           uv run ruff format --check src tests
           uv run pytest -q
 
-  # M0 feasibility spike: build installers bundling python-build-standalone
-  # + a uv-locked env on all three OSes, then prove the bundled payload runs
-  # with no system Python. See spikes/m0-packaging/README.md.
-  m0-spike:
-    name: M0 installer (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            bundles: "appimage,deb"
-          - os: windows-latest
-            bundles: "nsis"
-          - os: macos-latest
-            bundles: "app,dmg"
-    defaults:
-      run:
-        working-directory: spikes/m0-packaging
+  # macOS: ONE job for the js, rust, python and wrap-adapters suites. macOS
+  # runners are limited (about five at a time), and these four used to be four
+  # jobs, each queueing for one. Every suite runs even when an earlier one fails
+  # (`!cancelled()`: always, except when the run is cancelled), each is a step
+  # named for its suite, and the job fails at the end if any failed, so one run
+  # still reports every failing suite. Linux and Windows keep separate jobs.
+  macos-checks:
+    name: macOS checks
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
@@ -222,86 +276,76 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.92.0"
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          workspaces: spikes/m0-packaging/src-tauri
-      - name: Linux Tauri dependencies
-        if: runner.os == 'Linux'
+      - name: "JS suite: pnpm install, build, typecheck, test"
+        id: js
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: pnpm install --frozen-lockfile
-        working-directory: .
-      - name: Stage bundled resources (interpreter + locked env)
-        run: pnpm stage
-      - name: Verify staged payload before bundling
-        if: runner.os != 'Windows'
-        run: ./scripts/verify-bundled.sh src-tauri/resources
-      - name: Verify staged payload before bundling (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/verify-bundled.ps1 -Root src-tauri/resources
-      - name: Build installers
-        run: pnpm tauri build --bundles ${{ matrix.bundles }}
-      - name: Upload installer artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: m0-${{ matrix.os }}
-          path: spikes/m0-packaging/src-tauri/target/release/bundle/**
-          if-no-files-found: error
-      - name: Clean-machine check (bare ubuntu:22.04 container, no Python)
-        if: runner.os == 'Linux'
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm typecheck
+          pnpm test
+      - name: "Rust suite: fmt, clippy, build, test"
+        id: rust
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
-          # Extract the deb payload: no FUSE, no execution, deterministic —
-          # unlike running --appimage-extract on a shared runner.
-          DEB=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
-          echo "installer: $DEB"
-          dpkg -x "$DEB" /tmp/debroot
-          RESROOT=/tmp/debroot/usr/lib/m0-packaging-spike
-          ls "$RESROOT"
-          # Bare ubuntu:22.04 has no Python and none of the app's GUI libs —
-          # if the payload runs here, it runs on a clean machine.
-          for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
-          docker run --rm \
-            -v "$RESROOT:/bundle:ro" \
-            -v "$PWD/scripts/verify-bundled.sh:/verify.sh:ro" \
-            ubuntu:22.04 bash /verify.sh /bundle
-      - name: Clean-machine check (installed .app payload)
-        if: runner.os == 'macOS'
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo build
+          cargo test
+      - name: "Python suite: pylair, ollama integration, w0 spike"
+        id: python
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
-          APP=$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)
-          ./scripts/verify-bundled.sh "$APP/Contents/Resources"
-      - name: Clean-machine check (silent NSIS install + payload)
-        if: runner.os == 'Windows'
-        shell: pwsh
+          (cd python/pylair && uv sync --frozen && uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q)
+          (cd integrations/ollama && uv sync --frozen && uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q)
+          (cd spikes/w0-wrap && uv run --no-project python test_kill_tree.py)
+      - name: "Wrap adapters suite: gradio and streamlit through the launcher"
+        id: adapters
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
-          if (-not $installer) { Write-Error 'nsis installer not found'; exit 1 }
-          # Start-Process does not propagate the installer's exit code — a
-          # failed /S install would be silently masked. Check it explicitly.
-          $inst = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
-          if ($inst.ExitCode -ne 0) { Write-Error "nsis install exit $($inst.ExitCode)"; exit 1 }
-          # Locate the bundled interpreter wherever NSIS put the install dir.
-          $py = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles","${env:ProgramFiles(x86)}" `
-                -Recurse -Filter 'python.exe' -Depth 4 -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -like '*m0-packaging-spike*' } | Select-Object -First 1
-          if (-not $py) { Write-Error 'installed bundled python.exe not found'; exit 1 }
-          Write-Output "bundled interpreter: $($py.FullName)"
-          $resroot = Split-Path (Split-Path $py.FullName -Parent) -Parent
-          ./scripts/verify-bundled.ps1 -Root $resroot
+          cd python/pylair
+          uv sync --frozen --group wrap
+          uv run pytest tests/test_wrap_adapters.py -q
+      - name: Fail the job if any suite failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          JS: ${{ steps.js.outcome }}
+          RUST: ${{ steps.rust.outcome }}
+          PYTHON: ${{ steps.python.outcome }}
+          ADAPTERS: ${{ steps.adapters.outcome }}
+        run: |
+          failed=""
+          for s in JS RUST PYTHON ADAPTERS; do
+            [ "${!s}" = "success" ] || failed="$failed $s(${!s})"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::macOS suites that did not pass:$failed"
+            exit 1
+          fi
+          echo "all four macOS suites passed"
 
   # The one-command story, proven: scaffold a fresh app, build a native
   # installer bundling Python, install/extract on a clean machine, and call
   # the app's Python through the bundled interpreter — no system Python.
   acceptance:
     name: acceptance (${{ matrix.os }}, ${{ matrix.app }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     env:
       APP_DIR: ${{ matrix.app == 'reference' && 'examples/reference-app' || 'app-under-test' }}
@@ -584,6 +628,8 @@ jobs:
   # and macOS webviews. The bridge acceptance job above is untouched.
   wrap-acceptance:
     name: wrap acceptance (${{ matrix.os }}, ${{ matrix.framework }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     env:
@@ -596,7 +642,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        # macOS: see wrap-acceptance-macos below (one job, three frameworks).
+        os: [ubuntu-22.04, windows-latest]
         framework: [command, gradio, streamlit]
         include:
           # One bundle per OS is enough to install and run the app: the
@@ -605,8 +652,6 @@ jobs:
             bundles: deb
           - os: windows-latest
             bundles: nsis
-          - os: macos-latest
-            bundles: app
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
@@ -679,20 +724,6 @@ jobs:
             export PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger
             timeout 600 xvfb-run -a /r/usr/bin/$APP_BIN 2>&1 | tee /tmp/wrap-self-test.log
             grep -q "wrap-self-test: ok" /tmp/wrap-self-test.log'
-      - name: Installed wrap self-test (macOS)
-        if: runner.os == 'macOS'
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          APP="$PWD/$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)"
-          touch /tmp/wrap-restart-trigger
-          # A clean environment, run from outside the checkout (as the bridge
-          # leg does): no Python on PATH, nothing of the project visible.
-          cd /tmp
-          env -i HOME="$HOME" PATH=/usr/bin:/bin \
-            PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 \
-            PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger \
-            perl -e 'alarm 600; exec @ARGV' "$APP/Contents/MacOS/$APP_BIN" 2>&1 | tee /tmp/wrap-self-test.log
-          grep -q "wrap-self-test: ok" /tmp/wrap-self-test.log
       - name: Installed wrap self-test (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ env.APP_DIR }}
@@ -726,3 +757,81 @@ jobs:
           if (-not (Select-String -Path $out -Pattern 'wrap-self-test: ok' -Quiet)) {
             Write-Error 'no "wrap-self-test: ok" verdict in the output'; exit 1
           }
+
+  # macOS: ONE job builds, installs and self-tests command, gradio and
+  # streamlit in sequence (scripts/wrap-acceptance/run-macos.sh), because macOS
+  # runners are the scarce ones and this used to be three jobs. Each framework
+  # is its own step and runs even when an earlier one failed. The three builds
+  # share one Rust target dir, so tauri compiles once. This is the only proof
+  # of the WKWebView.
+  wrap-acceptance-macos:
+    name: wrap acceptance (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/wrap-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          cache-suffix: wrap-macos
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Build workspace packages (client + cli + scaffolder dists)
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+      # rust-cache wants a Cargo workspace to key on: scaffold one app now
+      # (run-macos.sh scaffolds each framework afresh; the shared target dir
+      # lives outside it).
+      - name: Scaffold an app for the Rust cache key
+        shell: bash
+        run: node packages/create-pylair/dist/index.js wrap-app --mode wrap --local .
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: wrap-app/src-tauri
+          shared-key: wrap-macOS
+      - name: "wrap acceptance: command (FastAPI)"
+        id: command
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos.sh command
+      - name: "wrap acceptance: gradio"
+        id: gradio
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos.sh gradio
+      - name: "wrap acceptance: streamlit"
+        id: streamlit
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos.sh streamlit
+      - name: Fail the job if any framework failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          COMMAND: ${{ steps.command.outcome }}
+          GRADIO: ${{ steps.gradio.outcome }}
+          STREAMLIT: ${{ steps.streamlit.outcome }}
+        run: |
+          failed=""
+          for f in COMMAND GRADIO STREAMLIT; do
+            [ "${!f}" = "success" ] || failed="$failed $f(${!f})"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::macOS wrap frameworks that did not pass:$failed"
+            exit 1
+          fi
+          echo "command, gradio and streamlit all passed on macOS"
