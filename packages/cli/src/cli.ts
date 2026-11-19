@@ -12,14 +12,20 @@ import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
 import { doctor } from "./doctor.js";
 import { loadManifest } from "./manifest.js";
+import { initUi, ui } from "./ui/index.js";
 import { initWrap } from "./wrap.js";
 import { WRAP_FRAMEWORKS, type WrapFramework } from "./wrapconfig.js";
 import { cliVersion } from "./version.js";
 
 function usage(): void {
-  console.log(`pylair — Pylair CLI
+  ui.line(`pylair: Pylair CLI
 
 Usage: pylair <command> [options]
+
+Options for every command:
+  --plain               Plain text: no colour, symbols, spinner or folded output
+                        (the default when output is not a terminal, in CI, with
+                        NO_COLOR set, or TERM=dumb; FORCE_COLOR=1 forces colour)
 
 Commands:
   dev       Run the app with supervised Python + hot reload
@@ -53,11 +59,13 @@ build options:
   --bundles <list>      Comma-separated bundle kinds passed to tauri build
   --skip-fetch          Reuse already-staged resources/python
   --stage-only          Stage and verify the bundle, stop before tauri build
+  --verbose             Stream uv and tauri output instead of folding it into
+                        one progress line (also passed on to tauri build)
   Any other flags are forwarded to tauri build, including the value
   after a --flag; everything after -- is forwarded verbatim.
 
   Builds are native-only: run on each target OS (no cross-compile).
-  Unsigned by default — set signing env vars for distribution builds.
+  Unsigned by default: set signing env vars for distribution builds.
 `);
 }
 
@@ -79,7 +87,7 @@ export function resolveAppDir(dir: string | undefined, cwd: string = process.cwd
 
 function findPython(): string {
   if (process.env.PYTHON) return process.env.PYTHON;
-  // Prefer the app venv (uv sync guarantees >=3.12) — system python3 may
+  // Prefer the app venv (uv sync guarantees >=3.12); system python3 may
   // be older than tomllib needs, or absent entirely on Windows.
   const venv = join(
     process.cwd(),
@@ -108,12 +116,14 @@ export function parseBuildArgs(rest: string[]): {
   bundles?: string;
   skipFetch: boolean;
   stageOnly: boolean;
+  verbose: boolean;
   tauriArgs: string[];
 } {
   let dir: string | undefined;
   let bundles: string | undefined;
   let skipFetch = false;
   let stageOnly = false;
+  let verbose = false;
   const tauriArgs: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -140,6 +150,8 @@ export function parseBuildArgs(rest: string[]): {
       stageOnly = true;
       continue;
     }
+    if (a === "--plain") continue; // ours (see stripPlain), never tauri's
+    if (a === "--verbose") verbose = true; // ours too, and still forwarded to tauri
     if (a.startsWith("--")) {
       tauriArgs.push(a);
       if (inline === undefined && i + 1 < rest.length && !rest[i + 1].startsWith("-"))
@@ -147,7 +159,7 @@ export function parseBuildArgs(rest: string[]): {
     }
   }
   if (bundles !== undefined) tauriArgs.push("--bundles", bundles);
-  return { dir, bundles, skipFetch, stageOnly, tauriArgs };
+  return { dir, bundles, skipFetch, stageOnly, verbose, tauriArgs };
 }
 
 /** Split `pylair wrap` / `pylair init` args. Everything after `--cmd` is the
@@ -192,7 +204,7 @@ export function parseWrapArgs(rest: string[]): {
 function codegen(argv: string[]): number {
   const module = argValue(argv, "--module", "-m");
   if (!module) {
-    console.error("pylair codegen: --module is required");
+    ui.error("pylair codegen: --module is required");
     return 2;
   }
   const out = argValue(argv, "--out", "-o") ?? "src/api.generated.ts";
@@ -205,18 +217,37 @@ function codegen(argv: string[]): number {
   if (check) {
     const stale = !existsSync(out) || readFileSync(out, "utf-8") !== ts;
     if (stale) {
-      console.error(`pylair codegen: ${out} is stale — re-run codegen`);
+      ui.error(`pylair codegen: ${out} is stale; re-run codegen`);
       return 1;
     }
     return 0;
   }
   writeFileSync(out, ts);
   const n = manifest.functions?.length ?? 0;
-  console.log(`pylair codegen: wrote ${out} (${n} functions)`);
+  ui.ok(`pylair codegen: wrote ${out} (${n} functions)`);
   return 0;
 }
 
-export function main(argv: string[]): number | Promise<number> {
+/** Drop the global `--plain` flag. It only counts before `--cmd` or a bare
+ * `--`: after those the arguments belong to the wrapped server command or to
+ * tauri, verbatim. */
+export function stripPlain(argv: string[]): { argv: string[]; plain: boolean } {
+  const stop = argv.findIndex((a) => a === "--cmd" || a === "--");
+  const head = stop === -1 ? argv : argv.slice(0, stop);
+  const tail = stop === -1 ? [] : argv.slice(stop);
+  const plain = head.includes("--plain");
+  return { argv: [...head.filter((a) => a !== "--plain"), ...tail], plain };
+}
+
+/** The one place a failed command is reported: `pylair <command>: message`. */
+function failed(command: string, e: unknown): number {
+  ui.error(`pylair ${command}: ${(e as Error).message}`);
+  return 1;
+}
+
+export function main(rawArgv: string[]): number | Promise<number> {
+  const { argv, plain } = stripPlain(rawArgv);
+  initUi(plain ? ["--plain"] : []);
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
     usage();
@@ -237,7 +268,7 @@ export function main(argv: string[]): number | Promise<number> {
             : "pass --mode wrap",
         );
     } catch (e) {
-      console.error(`pylair ${command}: ${(e as Error).message}`);
+      ui.error(`pylair ${command}: ${(e as Error).message}`);
       return 2;
     }
     return initWrap({
@@ -249,52 +280,43 @@ export function main(argv: string[]): number | Promise<number> {
       local: p.local,
     }).then(
       () => 0,
-      (e) => {
-        console.error(`pylair ${command}: ${(e as Error).message}`);
-        return 1;
-      },
+      (e) => failed(command, e),
     );
   }
   if (command === "codegen") {
     try {
       return codegen(rest);
     } catch (e) {
-      console.error(`pylair codegen: ${(e as Error).message}`);
-      return 1;
+      return failed("codegen", e);
     }
   }
   if (command === "build") {
-    const { dir, skipFetch, stageOnly, tauriArgs } = parseBuildArgs(rest);
+    const { dir, skipFetch, stageOnly, verbose, tauriArgs } = parseBuildArgs(rest);
     return build({
       appDir: resolveAppDir(dir),
       tauriArgs,
       skipFetch,
       stageOnly,
+      verbose,
     }).then(
       () => 0,
-      (e) => {
-        console.error(`pylair build: ${(e as Error).message}`);
-        return 1;
-      },
+      (e) => failed("build", e),
     );
   }
   if (command === "dev") {
     const dir = resolveAppDir(argValue(rest, "--dir"));
     return dev({ appDir: dir }).then(
       (code) => code,
-      (e) => {
-        console.error(`pylair dev: ${(e as Error).message}`);
-        return 1;
-      },
+      (e) => failed("dev", e),
     );
   }
   if (command === "doctor") {
     const dir = resolveAppDir(argValue(rest, "--dir"));
     return doctor(dir).then((code) => code);
   }
-  console.error(`pylair: unknown command '${command}'. Run 'pylair --help'.`);
+  ui.error(`pylair: unknown command '${command}'. Run 'pylair --help'.`);
   return 1;
 }
 
-// The executable entry is bin.ts — importing this module must not run
+// The executable entry is bin.ts; importing this module must not run
 // the CLI (tests import parseBuildArgs/main directly).

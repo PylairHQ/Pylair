@@ -15,6 +15,7 @@ import {
 import type { IncomingMessage } from "node:http";
 import { get } from "node:https";
 import { basename, resolve } from "node:path";
+import { ui } from "../ui/index.js";
 
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
@@ -225,7 +226,7 @@ export function download(
             // download — and it may recover, so the ticker keeps running.
             ticker = setInterval(() => {
               try {
-                (opts?.progress ?? console.error)(progressLine(offset + got, total));
+                (opts?.progress ?? ((l: string) => ui.dump(`${l}\n`)))(progressLine(offset + got, total));
               } catch {
                 /* cosmetic: swallow and keep going */
               }
@@ -329,7 +330,7 @@ export async function downloadWithRetry(
   const attempts = opts?.attempts ?? DOWNLOAD_ATTEMPTS;
   const sleep =
     opts?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const log = opts?.log ?? ((line: string) => console.warn(line));
+  const log = opts?.log ?? ((line: string) => ui.warn(line, { bare: true }));
   for (let attempt = 1; ; attempt++) {
     try {
       return await download(url, to, { resume: true, state, ...opts });
@@ -383,22 +384,23 @@ export async function ensureTarball(
 ): Promise<void> {
   const cached = existsSync(tarball);
   if (!cached) {
-    console.log(`fetching ${basename(tarball)}`);
+    ui.status(`fetching ${basename(tarball)}`);
     await dl(url, tarball);
   } else {
-    console.log(`using cached ${basename(tarball)}`);
+    ui.status(`using cached ${basename(tarball)}`);
   }
   if (sha256File(tarball) === want) return;
   if (!cached)
     throw new Error(
       `SHA256 mismatch for ${basename(tarball)}: got ${sha256File(tarball)}, ` +
-        `want ${want} — refusing to bundle`,
+        `want ${want}; refusing to bundle`,
     );
   // A cached-but-corrupt file is the dropped-partial failure mode: one
   // retry, then refuse.
-  console.warn(
-    `cached ${basename(tarball)} failed its SHA256 — ` +
+  ui.warn(
+    `cached ${basename(tarball)} failed its SHA256; ` +
       `deleting ${tarball} and re-downloading once`,
+    { bare: true },
   );
   rmSync(tarball, { force: true });
   await dl(url, tarball);
@@ -406,6 +408,6 @@ export async function ensureTarball(
   if (got !== want)
     throw new Error(
       `SHA256 mismatch for ${basename(tarball)} after re-download: got ${got}, ` +
-        `want ${want} — refusing to bundle (cache file: ${tarball})`,
+        `want ${want}; refusing to bundle (cache file: ${tarball})`,
     );
 }

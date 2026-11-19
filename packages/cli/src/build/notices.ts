@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { ui } from "../ui/index.js";
 
 /** Shipped bundles must carry the licenses of what they embed. Collects:
  *  pylair's own dual license, the interpreter's license tree (PSF license
@@ -63,7 +64,7 @@ export function stageNotices(resources: string, pylairDir: string): string {
         "they ship upstream in the python/licenses directory of each\n" +
         "python-build-standalone release.\n",
     );
-    console.warn("warning: no license files found under resources/python — wrote placeholder NOTICE");
+    ui.warn("warning: no license files found under resources/python; wrote a placeholder NOTICE");
   }
   index.push("python/ — bundled CPython interpreter (PSF-2.0) and its vendored deps");
 
@@ -96,7 +97,7 @@ export function stageNotices(resources: string, pylairDir: string): string {
         // Copyleft is legal to ship but app authors deserve to know they
         // bundled it — warn, never block.
         if (/\b(a?lgpl|gpl)[ -]?v?\d/i.test(lines.join(" ")))
-          console.warn(`warning: bundled wheel ${e.name} declares a copyleft license`);
+          ui.warn(`warning: bundled wheel ${e.name} declares a copyleft license`);
         if (lines.length) {
           mkdirSync(join(out, pkg), { recursive: true });
           writeFileSync(join(out, pkg, "METADATA-LICENSE.txt"), lines.join("\n") + "\n");
@@ -110,6 +111,6 @@ export function stageNotices(resources: string, pylairDir: string): string {
     }
   }
   writeFileSync(join(out, "INDEX.txt"), index.join("\n") + "\n");
-  console.log(`third-party notices: pylair, python interpreter, ${wheels} wheel(s)`);
+  ui.status(`third-party notices: pylair, python interpreter, ${wheels} wheel(s)`);
   return out;
 }

@@ -2,13 +2,13 @@
  * export the lock with uv, and install site-packages through the bundled
  * interpreter (native wheels only). */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { x as untar } from "tar";
 import { ensureTarball } from "./download.js";
 import { PBS_SHA256, PBS_TAG, PBS_VERSIONS, hostTriple } from "./pbs.js";
-import { isWin } from "./util.js";
+import { ui, type StepHandle } from "../ui/index.js";
+import { isWin, runTool } from "./util.js";
 
 export async function fetchPython(
   resources: string,
@@ -18,7 +18,7 @@ export async function fetchPython(
   const ver = PBS_VERSIONS[versionClass];
   if (!ver)
     throw new Error(
-      `python-version "${versionClass}" not available — supported: ${Object.keys(PBS_VERSIONS).join(", ")}`,
+      `python-version "${versionClass}" not available (supported: ${Object.keys(PBS_VERSIONS).join(", ")})`,
     );
   const triple = hostTriple();
   const asset = `cpython-${ver}+${PBS_TAG}-${triple}-install_only_stripped.tar.gz`;
@@ -94,7 +94,19 @@ export function uvPipInstallArgs(
   return args;
 }
 
-export function stageEnv(resources: string, python: string, appDir: string, reqs: string, cacheDir: string) {
+export interface StageEnvOptions {
+  step?: StepHandle;
+  verbose?: boolean;
+}
+
+export async function stageEnv(
+  resources: string,
+  python: string,
+  appDir: string,
+  reqs: string,
+  cacheDir: string,
+  o: StageEnvOptions = {},
+): Promise<void> {
   const target = join(resources, "site-packages");
   rmSync(target, { recursive: true, force: true });
   // dev uses `uv sync` (uv.lock) — build must install the SAME locked set,
@@ -105,24 +117,17 @@ export function stageEnv(resources: string, python: string, appDir: string, reqs
   let requireHashes = false;
   if (existsSync(lock)) {
     const exported = join(cacheDir, "requirements.exported.txt");
-    execFileSync("uv", uvExportArgs(exported), {
-      cwd: appDir,
-      stdio: "inherit",
-    });
+    await runTool(ui, "uv", uvExportArgs(exported), appDir, o);
     reqsFile = exported;
   } else if (!existsSync(reqs)) {
-    console.log(`no uv.lock and no ${reqs} — bundling stdlib only`);
+    ui.line(`no uv.lock and no ${reqs}: bundling stdlib only`);
     return;
   } else {
-    console.warn(
-      "warning: no uv.lock — building from requirements.txt; " +
+    ui.warn(
+      "warning: no uv.lock, building from requirements.txt; " +
         "the bundled env may drift from `pylair dev`'s env",
     );
     requireHashes = requirementsHaveHashes(readFileSync(reqs, "utf-8"));
   }
-  execFileSync(
-    "uv",
-    uvPipInstallArgs(python, target, reqsFile, requireHashes),
-    { cwd: appDir, stdio: "inherit" },
-  );
+  await runTool(ui, "uv", uvPipInstallArgs(python, target, reqsFile, requireHashes), appDir, o);
 }

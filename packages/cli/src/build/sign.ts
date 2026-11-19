@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ui } from "../ui/index.js";
 import { run } from "./util.js";
 
 // ── macOS ad-hoc signing ──────────────────────────────────────────────
@@ -75,7 +76,7 @@ export function adHocSign(tauriDir: string, productName: string): void {
 
   const err = codesignVerify(appPath);
   if (err) throw new Error(`ad-hoc signing produced an invalid bundle:\n${err}`);
-  console.log(`ad-hoc signed ${app} — ${machos.length} nested binaries, codesign --verify clean`);
+  ui.status(`ad-hoc signed ${app}: ${machos.length} nested binaries, codesign --verify clean`);
 
   // A dmg built in the same `tauri build` already captured the
   // PRE-signing .app — signing after bundling can't reach inside a
@@ -112,6 +113,6 @@ export function adHocSign(tauriDir: string, productName: string): void {
       rmSync(mount, { recursive: true, force: true });
     }
     if (inDmg) throw new Error(`${dmg} contains an invalidly-signed app:\n${inDmg}`);
-    console.log(`repackaged ${dmg} with the signed app — verified inside the image`);
+    ui.status(`repackaged ${dmg} with the signed app, verified inside the image`);
   }
 }

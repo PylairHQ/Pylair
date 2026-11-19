@@ -4,6 +4,7 @@
 import { cpSync } from "node:fs";
 import { relative } from "node:path";
 import { matchGlob } from "../glob.js";
+import { ui } from "../ui/index.js";
 
 /** Basename globs for files that look like secrets or credentials —
  * staged source must never carry them into an installer. */
@@ -58,7 +59,8 @@ export function stageSource(
   srcDir: string,
   dest: string,
   include: string[] = [],
-  warn: (msg: string) => void = console.warn,
+  warn: (msg: string) => void = (m) =>
+    /^\s/.test(m) ? ui.dump(`${m}\n`) : ui.warn(m, { bare: !m.startsWith("warning:") }),
   /** Top-level names to leave out entirely (a root source dir holding the
    * project's own `src-tauri`, `node_modules`...). Not reported as skipped. */
   exclude: string[] = [],
@@ -82,7 +84,7 @@ export function stageSource(
     warn(
       `warning: skipped ${skipped.length} secret-looking path(s) under ${srcDir}: ` +
         skipped.slice(0, 10).join(", ") +
-        (skipped.length > 10 ? ", …" : ""),
+        (skipped.length > 10 ? ", and more" : ""),
     );
     warn(`  to ship one deliberately, list it in [tool.pylair] include = ["path/under/source"]`);
   }
