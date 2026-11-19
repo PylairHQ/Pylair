@@ -22,26 +22,30 @@ trio at `0.1.0-rc.20` (`pylair` and `pylair-ollama` unchanged on PyPI).
 It shipped per-function permissions (PR 88): `fn_scope` command scopes,
 `PermissionDeniedError`, and the `build`/`doctor` capability checks.
 
-rc.21 train is in progress, the wrap-mode release (W1 to W4, PRs 92 to
-96). The crate `0.1.0-rc.16` is on crates.io and `pylair` `0.1.0rc11`
-is on PyPI (`pylair-ollama` unchanged at `0.1.0-rc.3`). This pins PR
-moves everything else: npm trio `0.1.0-rc.21`, scaffold pins
-(`tauri-plugin-pylair = "=0.1.0-rc.16"`, `pylair==0.1.0rc11`), both
-template `Cargo.lock` files regenerated against the published crate
-(the wrap template gets one for the first time), and
-`WRAP_IN_PUBLISHED_VERSIONS` flipped to true so `--local` is no longer
-needed for wrap scaffolds.
+rc.21 is published: the crate `0.1.0-rc.16` on crates.io, `pylair`
+`0.1.0rc11` on PyPI, and the npm trio at `0.1.0-rc.21`
+(`pylair-ollama` unchanged at `0.1.0-rc.3`). It shipped wrap mode (W1
+to W4, PRs 92 to 96, 99) and flipped `WRAP_IN_PUBLISHED_VERSIONS`, so
+`--local` is no longer needed for wrap scaffolds.
 
-| Package | Version in the repo | rc.21 state |
+rc.22 train is in progress, the drag-drop fix: wrap windows pass file
+drops to the page now that the plugin disables Tauri's native
+drag-drop handler (PR 100, `drag_drop_enabled = false` in
+`install_window`). PyPI is skipped this train: the crate
+`0.1.0-rc.17` publishes first, then a pins PR moves the npm trio to
+`0.1.0-rc.22`, the scaffold crate pin to `=0.1.0-rc.17`, and the
+template `Cargo.lock` files.
+
+| Package | Version in the repo | rc.22 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.16` | published |
-| `pylair` (PyPI) | `0.1.0-rc.11` | published |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.17` | next to publish |
+| `pylair` (PyPI) | `0.1.0-rc.11` | unchanged, skipped |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.21` | next to publish |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.21` | pins PR bumps to `0.1.0-rc.22` |
 
-Remaining order for rc.21: pack-mode acceptance green on this commit,
-then the npm trio under `--tag next`, then registry acceptance with
-`source=registry`.
+Remaining order for rc.22: the crate publish, then the pins PR,
+pack-mode acceptance green on it, the npm trio under `--tag next`,
+then registry acceptance with `source=registry`.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
