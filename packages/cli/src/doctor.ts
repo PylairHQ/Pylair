@@ -40,6 +40,98 @@ export function meetsMinPython(version: string, min: string): boolean {
   return maj > fmaj || (maj === fmaj && mi >= fmi);
 }
 
+/** The commands `nativeToolchain` consults. Injectable so tests stub the
+ * platform and every tool answer: `run` returns trimmed output on exit 0
+ * ("" counts: `pkg-config --exists` prints nothing), `null` on failure. */
+export interface NativeEnv {
+  platform: NodeJS.Platform;
+  run: (cmd: string, args: string[]) => string | null;
+  exists: (p: string) => boolean;
+  /** Names inside a directory, [] when unreadable. */
+  list: (dir: string) => string[];
+  env: NodeJS.ProcessEnv;
+}
+
+const MSVC_FIX =
+  'install "Desktop development with C++" via Visual Studio Installer, or repair it if an update is pending';
+
+/** The C/C++ toolchain `pylair build` needs on this OS, past cargo itself:
+ * MSVC build tools on Windows (found the way cc/find-msvc-tools finds them:
+ * vswhere at the standard Installer path, then a scan of the well-known
+ * install dirs, never PATH), Xcode Command Line Tools on macOS, a C compiler
+ * and the webkit2gtk-4.1 dev files Tauri links against on Linux. */
+export function nativeToolchain(e: NativeEnv): { ok: boolean; detail: string; fix?: string } {
+  if (e.platform === "win32") {
+    const pf86 = e.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+    const pf = e.env.ProgramFiles ?? "C:\\Program Files";
+    const vswhere = join(pf86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
+    let dir: string | undefined;
+    if (e.exists(vswhere)) {
+      const found = e.run(vswhere, [
+        "-utf8",
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-property",
+        "installationPath",
+      ]);
+      dir = found?.split(/\r?\n/).find((l) => l.trim());
+    }
+    // find-msvc-tools also scans the well-known layout; an install whose
+    // registration broke still builds, and still counts here.
+    let viaScan: string | undefined;
+    for (const root of [join(pf, "Microsoft Visual Studio", "2022"), join(pf86, "Microsoft Visual Studio", "2019"), join(pf86, "Microsoft Visual Studio", "2017")]) {
+      for (const ed of ["Enterprise", "Professional", "Community", "BuildTools", "Preview"]) {
+        const msvc = join(root, ed, "VC", "Tools", "MSVC");
+        if (e.list(msvc).some((v) => e.exists(join(msvc, v, "bin", "Hostx64", "x64", "link.exe")))) {
+          viaScan = join(root, ed);
+          break;
+        }
+      }
+      if (viaScan) break;
+    }
+    if (dir) return { ok: true, detail: `MSVC build tools at ${dir}` };
+    if (viaScan)
+      return { ok: true, detail: `MSVC build tools at ${viaScan} (vswhere does not see it; the install may need repair)` };
+    return {
+      ok: false,
+      detail: "no MSVC C++ build tools found (link.exe missing)",
+      fix: MSVC_FIX,
+    };
+  }
+  if (e.platform === "darwin") {
+    const p = e.run("xcode-select", ["-p"]);
+    return p
+      ? { ok: true, detail: `Xcode command line tools at ${p}` }
+      : { ok: false, detail: "Xcode command line tools not found", fix: "run `xcode-select --install`" };
+  }
+  if (e.platform !== "linux")
+    return { ok: true, detail: `${e.platform}: no toolchain requirements known` };
+
+  const cc = e.run("cc", ["--version"]) ?? e.run("gcc", ["--version"]) ?? e.run("clang", ["--version"]);
+  const hasPkgConfig = e.run("pkg-config", ["--version"]) !== null;
+  const gtk = hasPkgConfig && e.run("pkg-config", ["--exists", "webkit2gtk-4.1"]) !== null;
+  const missing: string[] = [];
+  const pkgs: string[] = [];
+  if (!cc) {
+    missing.push("a C compiler (cc/gcc/clang)");
+    pkgs.push("build-essential");
+  }
+  if (!hasPkgConfig) {
+    missing.push("pkg-config");
+    pkgs.push("pkg-config", "libwebkit2gtk-4.1-dev");
+  } else if (!gtk) {
+    missing.push("webkit2gtk-4.1 dev files");
+    pkgs.push("libwebkit2gtk-4.1-dev");
+  }
+  if (missing.length)
+    return { ok: false, detail: `missing: ${missing.join(", ")}`, fix: `sudo apt-get install -y ${pkgs.join(" ")}` };
+  const gtkVer = e.run("pkg-config", ["--modversion", "webkit2gtk-4.1"]);
+  return { ok: true, detail: `${cc?.split("\n")[0]} + webkit2gtk-4.1 ${gtkVer ?? "found"}` };
+}
+
 /** Wrap-mode checks. `add` records one line each. Exported for tests. */
 export function wrapChecks(
   appDir: string,
@@ -185,6 +277,20 @@ export async function doctor(appDir: string): Promise<number> {
   add("node", true, process.version);
   const cargoVer = probe("cargo", ["--version"]);
   add("rust/cargo", !!cargoVer, cargoVer ?? "not found", { fix: "install Rust: https://rustup.rs" });
+  const tc = nativeToolchain({
+    platform: platform(),
+    run: probe,
+    exists: existsSync,
+    list: (d) => {
+      try {
+        return readdirSync(d);
+      } catch {
+        return [];
+      }
+    },
+    env: process.env,
+  });
+  add("native toolchain", tc.ok, tc.detail, tc.fix ? { fix: tc.fix } : undefined);
 
   let triple = "unsupported";
   try {
