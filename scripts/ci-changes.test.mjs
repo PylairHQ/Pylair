@@ -10,11 +10,10 @@ test("documentation paths", () => {
     "README.md",
     "HANDOFF.md",
     "AGENTS.md",
-    "packages/cli/README.md",
-    "python/pylair/README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
-    "packages/cli/LICENSE-MIT",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/ISSUE_TEMPLATE/bug.md",
     "docs\\build.md",
   ])
     assert.ok(isDocsPath(p), p);
@@ -33,6 +32,11 @@ test("everything else is code, including look-alikes", () => {
     "notes.md.py",
     "templates/README.md.tmpl",
     "xLICENSE",
+    "packages/cli/README.md",
+    "packages/cli/LICENSE-MIT",
+    "python/pylair/README.md",
+    "packages/create-pylair/templates/default/README.md",
+    "packages/create-pylair/templates/wrap/ui/README.md",
   ])
     assert.ok(!isDocsPath(p), p);
 });
@@ -41,6 +45,8 @@ test("a change needs the full suite unless EVERY file is documentation", () => {
   assert.equal(needsCode(["docs/a.md", "README.md"]), false);
   assert.equal(needsCode(["docs/a.md", "packages/cli/src/cli.ts"]), true);
   assert.equal(needsCode(["docs/a.md", ".github/workflows/ci.yml"]), true);
+  assert.equal(needsCode(["docs/a.md", "packages/create-pylair/templates/default/README.md"]), true);
+  assert.equal(needsCode(["docs/a.md", "python/pylair/README.md"]), true);
   assert.equal(needsCode([]), true, "an empty diff is not provably docs-only");
 });
 

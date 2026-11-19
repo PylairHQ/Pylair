@@ -56,7 +56,8 @@ is built around the macOS runner limit (about five at a time):
   installs and self-tests command, gradio and streamlit in sequence
   (`scripts/wrap-acceptance/run-macos.sh`). The bridge `acceptance` job
   keeps its two macOS legs. Python edge does not run on macOS.
-- **Docs-only changes** (`docs/**`, `*.md`, `LICENSE*`; `scripts/ci-changes.mjs`)
+- **Docs-only changes** (`docs/**`, root `*.md`/`LICENSE*`, `.github/*.md`;
+  `scripts/ci-changes.mjs`)
   skip the heavy jobs. The five branch-protection checks (JS and Rust on
   ubuntu, Rust, Python on windows and ubuntu: ruleset `protect-main`) are
   gated step by step so they still report under their own names; a

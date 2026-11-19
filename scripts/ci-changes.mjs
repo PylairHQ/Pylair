@@ -3,10 +3,13 @@
 // beyond documentation, so ci.yml can skip its heavy jobs for docs-only
 // changes. Writes `code=true|false` to $GITHUB_OUTPUT (and prints it).
 //
-// Docs-only means EVERY changed path is under docs/, is a Markdown file
-// (*.md, anywhere) or is a LICENSE* file. Anything else, an empty diff, a
-// manual or scheduled run, or any trouble working the diff out, is `code=true`:
-// when in doubt the full suite runs.
+// Docs-only means EVERY changed path is under docs/, is a *.md or LICENSE*
+// file at the repository root, or is a *.md file under .github/. Anything
+// else, an empty diff, a manual or scheduled run, or any trouble working
+// the diff out, is `code=true`: when in doubt the full suite runs.
+// Markdown elsewhere is NOT docs-only: package READMEs ship in the npm
+// tarballs, python/pylair/README.md is the PyPI long description, and
+// files under templates/ are copied verbatim into scaffolds.
 //
 // Environment (set by the workflow): EVENT, BASE_SHA, HEAD_SHA (pull
 // requests), BEFORE_SHA, AFTER_SHA (pushes).
@@ -19,7 +22,9 @@ import { pathToFileURL } from "node:url";
 export function isDocsPath(path) {
   const p = path.replace(/\\/g, "/");
   const base = p.slice(p.lastIndexOf("/") + 1);
-  return p.startsWith("docs/") || /\.md$/i.test(base) || /^LICENSE/.test(base);
+  if (p.startsWith("docs/")) return true;
+  if (!p.includes("/")) return /\.md$/i.test(base) || /^LICENSE/.test(base);
+  return p.startsWith(".github/") && /\.md$/i.test(base);
 }
 
 /** `true` when the change needs the full suite, `false` when it is docs only. */

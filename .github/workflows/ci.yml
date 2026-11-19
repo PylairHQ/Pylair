@@ -23,7 +23,9 @@ env:
   UV_PYTHON: "3.12"
 
 jobs:
-  # Docs-only changes (docs/**, *.md, LICENSE*) skip the heavy jobs. The filter
+  # Docs-only changes (docs/**, root *.md / LICENSE*, .github/*.md) skip the
+  # heavy jobs. Markdown outside those places (package READMEs, template
+  # files, the PyPI long description) ships and counts as code. The filter
   # is scripts/ci-changes.mjs (unit-tested here); anything it cannot prove is
   # docs-only counts as code. Jobs that are branch-protection checks (JS, Rust
   # and Python on ubuntu and windows) are gated STEP by step, so they still run,
