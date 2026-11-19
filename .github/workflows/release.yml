@@ -38,9 +38,11 @@ permissions:
 
 jobs:
   publish-pylair:
-    # A dry run always builds BOTH packages — packaging bugs shouldn't
-    # hide behind the selector until a real publish finds them.
-    if: ${{ inputs.dry_run || inputs.package == 'pylair' || inputs.package == 'both' }}
+    # The selector applies to dry runs too: a pylair-only dry run would
+    # otherwise also run publish-ollama, whose pyproject the single
+    # version input can never match. `both` still builds both, each
+    # checked against the same version input.
+    if: ${{ inputs.package == 'pylair' || inputs.package == 'both' }}
     environment: pypi
     runs-on: ubuntu-22.04
     permissions:
@@ -106,7 +108,7 @@ jobs:
           git push origin "pylair-v$VERSION"
 
   publish-ollama:
-    if: ${{ inputs.dry_run || inputs.package == 'pylair-ollama' || inputs.package == 'both' }}
+    if: ${{ inputs.package == 'pylair-ollama' || inputs.package == 'both' }}
     environment: pypi-ollama
     runs-on: ubuntu-22.04
     permissions:

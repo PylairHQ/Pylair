@@ -147,6 +147,14 @@ template, `pylair wrap`), with these findings from building them:
   dependency group). Anything else warns and still runs; a missing
   framework is a clean error, not a traceback.
 
+Post-release fix (rc.21 hand check): Tauri's native drag-drop handler is
+disabled on the wrap window (`wrap_window_config` sets
+`drag_drop_enabled = false` in `install_window`). The handler's only job
+is emitting `DragDropEvent`s over IPC, which a wrapped page cannot use,
+and on Windows it replaces WebView2's handler so an HTML5 drop never
+reached the page. A config flag, not a builder call, so the window unit
+test can pin it. Bridge windows keep the handler: bridge pages use IPC.
+
 ## Gates
 
 Done-gates for *declaring wrap mode done* (not for starting W1):

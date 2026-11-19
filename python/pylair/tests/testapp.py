@@ -101,11 +101,19 @@ def sync_sleep(seconds: float) -> str:
     return "slept"
 
 
+def _write_pidfile(path: str, pid: int) -> None:
+    """Publish a pid atomically: a reader polling `exists()` must never
+    see the empty file `open(path, "w")` leaves before the write lands."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.write(str(pid))
+    os.replace(tmp, path)
+
+
 @expose(isolated=True)
 def isolated_sleep(seconds: float, pidfile: str | None = None) -> str:
     if pidfile:
-        with open(pidfile, "w") as f:
-            f.write(str(os.getpid()))
+        _write_pidfile(pidfile, os.getpid())
     time.sleep(seconds)
     return "slept"
 
@@ -118,8 +126,7 @@ def sigterm_ignoring_sleep(seconds: float, pidfile: str | None = None) -> str:
 
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if pidfile:
-        with open(pidfile, "w") as f:
-            f.write(str(os.getpid()))
+        _write_pidfile(pidfile, os.getpid())
     time.sleep(seconds)
     return "slept"
 
@@ -170,8 +177,7 @@ def orphan_maker(pidfile: str) -> str:
             ),
         ]
     )
-    with open(pidfile, "w") as f:
-        f.write(str(proc.pid))
+    _write_pidfile(pidfile, proc.pid)
     time.sleep(600)
     return "never"
 

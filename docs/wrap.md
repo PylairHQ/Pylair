@@ -88,6 +88,12 @@ capability grants a remote url. `docs/build.md` has the pipeline.
   keyboard shortcuts, so a full-page navigation can never strand you.
 - The wrapped page is sent none of the runtime's lifecycle events
   (`pylair://state`, `pylair://stderr`).
+- **HTML5 drag-and-drop works**: dropping a file onto a drop zone in the
+  page behaves like a browser. Tauri's native drag-drop handler, which
+  turns drops into `DragDropEvent`s over IPC, is disabled on the wrap
+  window; a wrapped page cannot use IPC anyway, and on Windows the
+  handler swallows the drop before the page sees it. The file picker
+  and any other input routes are unaffected.
 
 ## Downloads, links and navigation
 

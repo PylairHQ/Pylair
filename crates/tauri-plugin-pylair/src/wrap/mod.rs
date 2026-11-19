@@ -423,7 +423,7 @@ pub(crate) fn install_window<R: Runtime>(
         Some(cfg) if !cfg.create => {
             let on_dl = ui.clone();
             let on_win = ui.clone();
-            tauri::WebviewWindowBuilder::from_config(app, &cfg)?
+            tauri::WebviewWindowBuilder::from_config(app, &wrap_window_config(cfg))?
                 .on_download(move |webview, event| downloads::handle(&on_dl, webview, event))
                 .on_new_window(move |url, _features| {
                     on_win.new_window(&url);
@@ -481,6 +481,18 @@ pub(crate) fn ipc_probe_script() -> Option<String> {
     std::env::var_os("PYLAIR_SELF_TEST_WRAP").map(|_| selftest::PROBE_JS.to_string())
 }
 
+/// The `WindowConfig` a wrap window is built from: the app's own
+/// `windows[*]` entry with the native drag-drop handler off. Tauri
+/// installs a handler that turns file drops into `DragDropEvent`s emitted
+/// over IPC; a wrapped page cannot use IPC, and on Windows the handler
+/// replaces WebView2's so an HTML5 drop never reaches the page.
+fn wrap_window_config(
+    mut cfg: tauri::utils::config::WindowConfig,
+) -> tauri::utils::config::WindowConfig {
+    cfg.drag_drop_enabled = false;
+    cfg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +513,20 @@ mod tests {
         let rt =
             WrapRuntime::parse(&GOOD.replace("120}", "120,\"downloads\":\"downloads\"}")).unwrap();
         assert_eq!(rt.downloads, DownloadMode::Downloads);
+    }
+
+    #[test]
+    fn the_wrap_window_disables_tauris_native_drag_drop_handler() {
+        // Enabled by default; the handler only exists to emit
+        // DragDropEvents over IPC a wrapped page cannot use, and on
+        // Windows it replaces WebView2's so an HTML5 drop never reaches
+        // the page.
+        assert!(tauri::utils::config::WindowConfig::default().drag_drop_enabled);
+        let cfg = wrap_window_config(tauri::utils::config::WindowConfig::default());
+        assert!(
+            !cfg.drag_drop_enabled,
+            "wrap windows disable the native handler so HTML5 drag-and-drop reaches the page"
+        );
     }
 
     #[test]
