@@ -48,6 +48,13 @@ on:
       - "packages/create-pylair/**"
       - ".github/workflows/acceptance-registry.yml"
 
+# A newer push to the same ref cancels the older push run (as ci.yml does).
+# Manual dispatches get a group of their own: the release train dispatches this
+# workflow for pack and for registry mode, and one must never cancel another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  cancel-in-progress: true
+
 # Scaffold + build + self-test on a clean machine — read-only by design.
 permissions:
   contents: read
@@ -59,21 +66,46 @@ env:
   UV_PYTHON: "3.12"
 
 jobs:
+  # macOS runners are the scarce ones (about five at a time), and this workflow
+  # alone used to ask for five on every push. On push only the Linux and
+  # Windows legs run; a manual dispatch (the release train, before a publish)
+  # keeps the full matrix, both macOS legs and the macOS wrap legs included.
+  # The matrices are built here because a job-level `if` cannot see `matrix`:
+  # a macOS leg that is "skipped" step by step would still occupy a runner.
+  plan:
+    name: Plan the matrices
+    runs-on: ubuntu-22.04
+    outputs:
+      acceptance: ${{ steps.m.outputs.acceptance }}
+      wrap: ${{ steps.m.outputs.wrap }}
+    steps:
+      - id: m
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          ACCEPTANCE='{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"windows-latest","build_shell":"pwsh"},{"os":"macos-latest"},{"os":"macos-15-intel"}]}'
+          WRAP='{"os":["ubuntu-22.04","windows-latest","macos-latest"],"framework":["command","gradio","streamlit"],"include":[{"os":"ubuntu-22.04","bundles":"deb"},{"os":"windows-latest","bundles":"nsis"},{"os":"macos-latest","bundles":"app"},{"os":"windows-latest","framework":"command","build_shell":"pwsh"}]}'
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            ACCEPTANCE=$(jq -c '.include |= map(select(.os | startswith("macos") | not))' <<<"$ACCEPTANCE")
+            WRAP=$(jq -c '.os |= map(select(startswith("macos") | not)) | .include |= map(select(.os | startswith("macos") | not))' <<<"$WRAP")
+          fi
+          echo "acceptance=$(jq -c . <<<"$ACCEPTANCE")" >> "$GITHUB_OUTPUT"
+          echo "wrap=$(jq -c . <<<"$WRAP")" >> "$GITHUB_OUTPUT"
+          echo "event: $EVENT"
+          jq . <<<"$ACCEPTANCE"
+          jq . <<<"$WRAP"
+
   acceptance:
     name: registry-acceptance (${{ matrix.os }}${{ matrix.build_shell && format('-{0}', matrix.build_shell) || '' }}, ${{ inputs.source || 'pack' }})
+    needs: plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-22.04}
-          - {os: windows-latest}
-          # A second Windows leg under pwsh: git-bash resolves GNU tar,
-          # pwsh resolves System32 bsdtar — both PATH orderings get tested
-          # so tool-variance bugs can't come back unnoticed.
-          - {os: windows-latest, build_shell: pwsh}
-          - {os: macos-latest}
-          - {os: macos-15-intel}
+      # Built by `plan`. The full matrix (dispatch): ubuntu, windows, a second
+      # Windows leg under pwsh (git-bash resolves GNU tar, pwsh resolves
+      # System32 bsdtar: both PATH orderings get tested so tool-variance bugs
+      # cannot come back unnoticed), macos-latest and macos-15-intel.
+      matrix: ${{ fromJSON(needs.plan.outputs.acceptance) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
@@ -422,6 +454,7 @@ jobs:
   # live registries; they must be published before either mode is green.
   wrap-acceptance:
     name: registry-wrap (${{ matrix.os }}, ${{ matrix.framework }}${{ matrix.build_shell && format('-{0}', matrix.build_shell) || '' }}, ${{ inputs.source || 'pack' }})
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     env:
@@ -433,25 +466,12 @@ jobs:
       MARKER: ${{ matrix.framework == 'streamlit' && 'Streamlit' || 'PYLAIR-WRAP-OK' }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
-        framework: [command, gradio, streamlit]
-        include:
-          # One bundle per OS is enough to install and run the app.
-          - os: ubuntu-22.04
-            bundles: deb
-          - os: windows-latest
-            bundles: nsis
-          - os: macos-latest
-            bundles: app
-          # The bridge matrix runs a second Windows leg under pwsh so
-          # System32 bsdtar ordering gets exercised on `pylair build`.
-          # One leg covers it here: os+framework match the matrix cell,
-          # so this merges build_shell onto the windows/command leg.
-          # That leg builds under pwsh, the other Windows legs on bash.
-          - os: windows-latest
-            framework: command
-            build_shell: pwsh
+      # Built by `plan`: os x framework, one bundle per OS (enough to install
+      # and run the app), and a pwsh build leg for windows/command (the bridge
+      # matrix runs a second Windows leg under pwsh so System32 bsdtar
+      # ordering gets exercised on `pylair build`; one leg covers it here, the
+      # other Windows legs build on bash). macOS only on manual dispatch.
+      matrix: ${{ fromJSON(needs.plan.outputs.wrap) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
