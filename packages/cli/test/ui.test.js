@@ -151,6 +151,7 @@ describe("symbols", () => {
 function harness(c) {
   const out = [];
   const err = [];
+  const seq = [];
   let now = 0;
   const timers = [];
   const clock = {
@@ -158,8 +159,8 @@ function harness(c) {
     setInterval: (fn) => (timers.push(fn), timers.length),
     clearInterval: () => {},
   };
-  const ui = new Ui(c, { out: (s) => out.push(s), err: (s) => err.push(s) }, clock);
-  return { ui, out, err, advance: (ms) => (now += ms), tick: () => timers.forEach((f) => f()), text: () => out.join(""), errText: () => err.join("") };
+  const ui = new Ui(c, { out: (s) => (out.push(s), seq.push(s)), err: (s) => (err.push(s), seq.push(s)) }, clock);
+  return { ui, out, err, advance: (ms) => (now += ms), tick: () => timers.forEach((f) => f()), text: () => out.join(""), errText: () => err.join(""), merged: () => seq.join("") };
 }
 
 const plainCaps = () => caps({ stdoutIsTTY: false });
@@ -420,8 +421,18 @@ describe("folded tool output", () => {
     } finally {
       delete process.env.EXIT;
     }
-    assert.match(h.errText(), /line 1[\s\S]*line 2[\s\S]*line 3[\s\S]*warn from tool/);
-    assert.match(stripAnsi(h.text()), /build installer/);
+    // stdout and stderr interleave at the OS's choice: the dump holds every
+    // line, stdout lines keep their order, and the dump lands before the
+    // step's failure mark.
+    const dump = stripAnsi(h.errText());
+    for (const l of ["line 1", "line 2", "line 3", "warn from tool"])
+      assert.ok(dump.includes(l), `dump is missing ${JSON.stringify(l)}: ${dump}`);
+    const [i1, i2, i3] = ["line 1", "line 2", "line 3"].map((l) => dump.indexOf(l));
+    assert.ok(i1 < i2 && i2 < i3, `stdout lines out of order in the dump: ${dump}`);
+    const merged = h.merged();
+    const failAt = merged.indexOf("build installer");
+    assert.ok(failAt !== -1, "the step's failure mark is missing");
+    assert.ok(merged.indexOf("warn from tool") < failAt, "the dump must land before the step fails");
   });
 
   test("plain and --verbose stream through (nothing captured, nothing dumped)", async () => {
