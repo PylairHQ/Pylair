@@ -15,9 +15,9 @@ const BINARY = new Set([".png", ".ico", ".icns"]);
  * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
 export const PINS = {
   py: "pylair==0.1.0rc11",
-  js: "0.1.0-rc.21",
-  cli: "0.1.0-rc.21",
-  rs: `tauri-plugin-pylair = "=0.1.0-rc.16"`,
+  js: "0.1.0-rc.22",
+  cli: "0.1.0-rc.22",
+  rs: `tauri-plugin-pylair = "=0.1.0-rc.17"`,
 } as const;
 
 /**

@@ -48,11 +48,11 @@ test("scaffolds a complete app skeleton", () => {
   assert.match(py, /app-module = "backend\.app"/);
   assert.match(py, /pylair==0\.1\.0rc11/);
   const pkg = readFileSync(join(app, "package.json"), "utf8");
-  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.21"/);
-  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.21"/);
+  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.22"/);
+  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.22"/);
   const lock = readFileSync(join(app, "src-tauri/Cargo.lock"), "utf8");
   assert.match(lock, /name = "my-app"/);
-  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.16"/);
+  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.17"/);
   // Tripwire: the shipped lock must carry exactly the crate version the
   // scaffold pins in Cargo.toml, or a registry-mode build re-resolves.
   const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
