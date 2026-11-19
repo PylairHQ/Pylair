@@ -1818,15 +1818,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "__APP_NAME__"
-version = "0.1.0"
-dependencies = [
- "tauri",
- "tauri-build",
- "tauri-plugin-pylair",
-]
-
-[[package]]
 name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3230,9 +3221,9 @@ dependencies = [
 
 [[package]]
 name = "tao"
-version = "0.37.2"
+version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5777b06fe6435126ae8d816eba269e050e1e10d302cf5461e9c49eccabc3548"
+checksum = "02ca9c0ce2a2fd70dc4ef4449ca5e8d30e6fa0db111cd8008594602a06a68371"
 dependencies = [
  "bitflags 2.13.2",
  "block2",
@@ -3418,9 +3409,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.16"
+version = "0.1.0-rc.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "591fae3d6a23ccdd094b0331237b52669b43cc7b76600dfe40cfed5d69547489"
+checksum = "2b0a66732b4e8401b8424ebe676effeaf69a90ec1f580351d7de82414a9e347b"
 dependencies = [
  "async-trait",
  "dunce",
@@ -4555,6 +4546,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "__APP_NAME__"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-pylair",
+]
 
 [[package]]
 name = "writeable"

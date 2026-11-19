@@ -371,7 +371,7 @@ describe("pylair wrap: initialising a project", () => {
     for (const f of ["src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "ui/index.html", "ui/restarting.html"])
       assert.ok(existsSync(join(d, f)), `missing ${f}`);
     const cargo = readFileSync(join(d, "src-tauri/Cargo.toml"), "utf-8");
-    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.16"/);
+    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.17"/);
   });
 
   test("the CLI command itself: exit codes and messages", () => {
