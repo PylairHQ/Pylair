@@ -14,27 +14,26 @@ const BINARY = new Set([".png", ".ico", ".icns"]);
 /** The registry versions a scaffolded app pins. Bump together with the
  * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
 export const PINS = {
-  py: "pylair==0.1.0rc10",
-  js: "0.1.0-rc.20",
-  cli: "0.1.0-rc.20",
-  rs: `tauri-plugin-pylair = "=0.1.0-rc.15"`,
+  py: "pylair==0.1.0rc11",
+  js: "0.1.0-rc.21",
+  cli: "0.1.0-rc.21",
+  rs: `tauri-plugin-pylair = "=0.1.0-rc.16"`,
 } as const;
 
 /**
  * Wrap mode needs the crate (`Builder::wrap`) and the `pylair.wrap`
- * launcher, neither of which is in the versions pinned above. Until the
- * release train publishes them and flips this to true (with the pins
- * bumped), a registry-mode wrap scaffold would build an app that cannot
- * compile, so it is refused with the way forward. `--local` always works:
- * it points every dependency at a checkout that has wrap mode.
+ * launcher. The rc.21 train published them (crate `0.1.0-rc.16`,
+ * `pylair==0.1.0rc11`), so this is true and registry-mode wrap
+ * scaffolds work without `--local`. The flag stays for future
+ * template features that outrun the published versions.
  */
-export const WRAP_IN_PUBLISHED_VERSIONS = false;
+export const WRAP_IN_PUBLISHED_VERSIONS = true;
 
 export function wrapUnavailable(local: string | undefined): string | undefined {
   if (local || WRAP_IN_PUBLISHED_VERSIONS) return undefined;
   return (
-    "wrap mode is not in the published Pylair packages yet (it ships with 0.1.0). " +
-    "Until then scaffold against a checkout: --local /path/to/pylair-repo"
+    "wrap mode is not in the published Pylair packages yet. " +
+    "Scaffold against a checkout instead: --local /path/to/pylair-repo"
   );
 }
 

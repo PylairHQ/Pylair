@@ -46,13 +46,13 @@ test("scaffolds a complete app skeleton", () => {
     assert.ok(gi.includes(line), `.gitignore missing "${line}"`);
   const py = readFileSync(join(app, "pyproject.toml"), "utf8");
   assert.match(py, /app-module = "backend\.app"/);
-  assert.match(py, /pylair==0\.1\.0rc10/);
+  assert.match(py, /pylair==0\.1\.0rc11/);
   const pkg = readFileSync(join(app, "package.json"), "utf8");
-  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.20"/);
-  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.20"/);
+  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.21"/);
+  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.21"/);
   const lock = readFileSync(join(app, "src-tauri/Cargo.lock"), "utf8");
   assert.match(lock, /name = "my-app"/);
-  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.15"/);
+  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.16"/);
   // Tripwire: the shipped lock must carry exactly the crate version the
   // scaffold pins in Cargo.toml, or a registry-mode build re-resolves.
   const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
@@ -104,13 +104,24 @@ test("no args fails loudly when stdin is not a TTY", () => {
 
 const REPO = fileURLToPath(new URL("../../..", import.meta.url));
 
-test("--mode wrap needs --local until wrap mode is published", () => {
+test("--mode wrap works without --local since wrap mode is published", () => {
   const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
   const res = scaffold(["w-app", "--mode", "wrap"], dir);
-  assert.equal(res.status, 1);
-  assert.match(res.stderr, /wrap mode is not in the published Pylair packages yet/);
-  assert.match(res.stderr, /--local/);
-  assert.ok(!existsSync(join(dir, "w-app")), "a refused scaffold must create nothing");
+  assert.equal(res.status, 0, res.stderr);
+  const app = join(dir, "w-app");
+  const py = readFileSync(join(app, "pyproject.toml"), "utf8");
+  assert.match(py, /mode = "wrap"/);
+  assert.match(py, /pylair==0\.1\.0rc11/);
+  // Same tripwire as the bridge scaffold: the shipped lock must carry
+  // exactly the crate version the wrap Cargo.toml pins.
+  const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
+  const pinned = cargo.match(/tauri-plugin-pylair = "=([^"]+)"/);
+  assert.ok(pinned, "scaffolded wrap Cargo.toml has no exact tauri-plugin-pylair pin");
+  const lock = readFileSync(join(app, "src-tauri/Cargo.lock"), "utf8");
+  assert.ok(
+    lock.includes(`name = "tauri-plugin-pylair"\nversion = "${pinned[1]}"\n`),
+    `wrap template Cargo.lock does not carry the pinned crate ${pinned[1]}`,
+  );
   rmSync(dir, { recursive: true });
 });
 
@@ -126,6 +137,7 @@ test("--mode wrap --local scaffolds a wrap app with no React and no remote capab
     "ui/restarting.html",
     "ui/status.js",
     "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
     "src-tauri/tauri.conf.json",
     "src-tauri/capabilities/default.json",
     "src-tauri/src/lib.rs",

@@ -361,17 +361,17 @@ describe("pylair wrap: initialising a project", () => {
     assert.ok(!readFileSync(join(noent, "pyproject.toml"), "utf-8").includes("tool.pylair"), "a refused init must not edit pyproject.toml");
   });
 
-  test("until wrap mode is published, the scaffolder refuses and nothing is written", async () => {
+  test("wrap mode is published: without --local the scaffolder writes the shell with registry pins", async () => {
     const d = tmp("gate");
     writeFileSync(join(d, "pyproject.toml"), '[project]\nname = "a"\nversion = "0"\n');
     writeFileSync(join(d, "app.py"), "");
-    const before = readFileSync(join(d, "pyproject.toml"), "utf-8");
-    await assert.rejects(
-      withEnv(() => initWrap({ appDir: d, entry: "app.py", framework: "gradio", log: quiet })),
-      /not in the published Pylair packages yet/,
-    );
-    assert.equal(readFileSync(join(d, "pyproject.toml"), "utf-8"), before);
-    assert.deepEqual(readdirSync(d).sort(), ["app.py", "pyproject.toml"]);
+    const r = await withEnv(() => initWrap({ appDir: d, entry: "app.py", framework: "gradio", log: quiet }));
+    assert.equal(r.config.framework, "gradio");
+    assert.equal(loadConfig(d).mode, "wrap");
+    for (const f of ["src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "ui/index.html", "ui/restarting.html"])
+      assert.ok(existsSync(join(d, f)), `missing ${f}`);
+    const cargo = readFileSync(join(d, "src-tauri/Cargo.toml"), "utf-8");
+    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.16"/);
   });
 
   test("the CLI command itself: exit codes and messages", () => {
