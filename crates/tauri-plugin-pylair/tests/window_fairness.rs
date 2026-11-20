@@ -140,12 +140,13 @@ async fn one_owner_starves_the_other_of_task_slots() {
     h.shutdown().await;
 }
 
-/// Same as FAKE_HOLDS_TASKS, but the child exits half a second after
-/// consuming two call frames - it dies mid-service with tasks still in
-/// flight, and the delay keeps the in-flight window pollable before
-/// the crash.
-const FAKE_DIES_AFTER_TWO: &str = r#"
-import sys, struct, json, time
+/// Same as FAKE_HOLDS_TASKS, but the child exits after consuming a
+/// third call frame. The test controls the crash timing entirely by
+/// when it sends that call: the first two register and hold their
+/// task slots for as long as the test needs, with no sleep anywhere
+/// in the assertion path.
+const FAKE_DIES_AFTER_THREE: &str = r#"
+import sys, struct, json
 def w(o):
     b = json.dumps(o).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
@@ -162,9 +163,7 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
     else:
         calls += 1
-        if calls >= 2:
-            time.sleep(0.5)
-            break  # die holding both tasks
+        if calls >= 3: break  # die holding the tasks
 "#;
 
 /// hello, then immediate exit: every generation dies before it can
@@ -225,17 +224,17 @@ async fn in_queue_returns_to_zero_after_restart_fail_fast() {
     // shutdown() below cuts the sleep short.
     c.backoff_base = Duration::from_secs(30);
     c.backoff_cap = Duration::from_secs(30);
-    let h = spawn_h(spec(FAKE_DIES_AFTER_TWO), c, ev);
+    let h = spawn_h(spec(FAKE_DIES_AFTER_THREE), c, ev);
     wait_state(&h, State::Ready).await;
 
     let mut held = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         held.push(
             h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
                 .expect("admitted"),
         );
     }
-    // The child eats both calls and exits -> crash -> Restarting.
+    // The child eats the third call and exits -> crash -> Restarting.
     wait_state(&h, State::Restarting).await;
 
     let err = h
@@ -281,7 +280,7 @@ async fn in_flight_resets_across_a_crash() {
     let (ev, _rx) = mpsc::channel(64);
     let mut c = fast_config();
     c.backoff_base = Duration::from_millis(50);
-    let h = spawn_h(spec(FAKE_DIES_AFTER_TWO), c, ev);
+    let h = spawn_h(spec(FAKE_DIES_AFTER_THREE), c, ev);
     wait_state(&h, State::Ready).await;
 
     let mut held = Vec::new();
@@ -291,10 +290,17 @@ async fn in_flight_resets_across_a_crash() {
                 .expect("admitted"),
         );
     }
+    // The fixture holds both tasks for as long as we let it: in_flight
+    // stays at 2 until the third call frame arrives and kills the
+    // child. No sleep anywhere in the path.
     assert!(
         eventually(|| h.fairness_snapshot().usage(Some("win-a")).1 == 2).await,
         "both calls must register before the crash: {:?}",
         h.fairness_snapshot()
+    );
+    held.push(
+        h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+            .expect("the crash trigger is just another admitted call"),
     );
 
     // Crash -> Session::drop ends the generation at TEARDOWN, inside
