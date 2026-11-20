@@ -75,6 +75,27 @@ fn spec(script: &str) -> SpawnSpec {
     }
 }
 
+/// A spec whose script gets an extra argv[1] - the gate file path for
+/// FAKE_HELLO_GATE.
+fn spec_argv(script: &str, arg: &std::path::Path) -> SpawnSpec {
+    let mut s = spec(script);
+    s.args.push(arg.to_string_lossy().into_owned());
+    s
+}
+
+/// A path that does not exist yet; the test creates it to signal the
+/// fixture.
+fn temp_gate() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "pylair-fair-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
 fn fast_config() -> SupervisorConfig {
     let mut c = SupervisorConfig::default();
     c.hello_timeout = Duration::from_secs(5);
@@ -89,6 +110,11 @@ fn fast_config() -> SupervisorConfig {
 async fn wait_state(h: &Handle, want: State) {
     let mut rx = h.subscribe_state();
     timeout(T, async {
+        // A watch receiver only sees values published after subscribe;
+        // check the current state first or a fast transition is missed.
+        if *rx.borrow() == want {
+            return;
+        }
         while rx.changed().await.is_ok() {
             if *rx.borrow() == want {
                 return;
@@ -164,6 +190,33 @@ while True:
     else:
         calls += 1
         if calls >= 3: break  # die holding the tasks
+"#;
+
+/// Withholds `hello` until a gate file exists, then answers every
+/// call. While the gate is closed the actor serves no commands, so
+/// calls accumulate in the supervisor queue exactly as long as the
+/// test wants - queue admission is provable without a single sleep
+/// in the assertion path.
+const FAKE_HELLO_GATE: &str = r#"
+import sys, struct, json, os, time
+gate = sys.argv[1]
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+while not os.path.exists(gate):
+    time.sleep(0.02)
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[{"name":"hold","kind":"sync"}]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+    else:
+        w({"jsonrpc":"2.0","id": m["id"],"result": {"ok": True}})
 "#;
 
 /// hello, then immediate exit: every generation dies before it can
@@ -313,5 +366,210 @@ async fn in_flight_resets_across_a_crash() {
         "in_flight must zero at session teardown, not the next spawn: {:?}",
         h.fairness_snapshot()
     );
+    h.shutdown().await;
+}
+
+/// The queue-share check (PR 2): with win-a and win-b live and
+/// max_queued_commands = 8, win-b's idle reservation is one slot, so
+/// win-a's ceiling is 7 - its eighth call is refused `window_share`,
+/// while win-b's call still fits. Once hello lands every admitted
+/// call answers and in_queue drains to nothing.
+#[tokio::test]
+async fn queue_flood_is_refused_at_window_share_not_the_global_cap() {
+    let gate = temp_gate();
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.hello_timeout = Duration::from_secs(30);
+    c.limits = Limits::default().with_max_queued_commands(8);
+    let h = spawn_h(spec_argv(FAKE_HELLO_GATE, &gate), c, ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+
+    let mut held = Vec::new();
+    for _ in 0..7 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("within a's share"),
+        );
+    }
+    let refused = h
+        .call_task("hold", json!({}), Some("win-a".into()), Some(false))
+        .err()
+        .expect("a is over its reserved-share ceiling");
+    assert_eq!(refused.code, proto::LIMIT_EXCEEDED);
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["max"].as_u64()),
+        Some(7)
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["window"].as_str()),
+        Some("win-a")
+    );
+
+    // b has queued nothing: its call is admitted to the queue even
+    // though a is over share.
+    held.push(
+        h.call_task("hold", json!({}), Some("win-b".into()), Some(false))
+            .expect("b's share is untouched"),
+    );
+
+    // Open the gate: hello -> Ready -> every queued call is answered.
+    std::fs::write(&gate, b"1").unwrap();
+    wait_state(&h, State::Ready).await;
+    for ct in held {
+        let v = ct
+            .result
+            .await
+            .expect("call delivered")
+            .expect("call answered");
+        assert_eq!(v, json!({"ok": true}));
+    }
+    // Live windows keep their owner entries; the counters drain.
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 0)
+            && h.fairness_snapshot().usage(Some("win-b")) == (0, 0))
+        .await,
+        "in_queue and in_flight must drain to nothing: {:?}",
+        h.fairness_snapshot()
+    );
+    let _ = std::fs::remove_file(&gate);
+    h.shutdown().await;
+}
+
+/// Single-window parity: the only live window fills the queue to the
+/// GLOBAL cap and the refusal is `max_queued_commands`, never
+/// `window_share` - identical to today.
+#[tokio::test]
+async fn single_window_fills_the_global_cap_and_sees_max_queued_commands() {
+    let gate = temp_gate();
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.hello_timeout = Duration::from_secs(30);
+    c.limits = Limits::default().with_max_queued_commands(8);
+    let h = spawn_h(spec_argv(FAKE_HELLO_GATE, &gate), c, ev);
+    h.fairness_join_window("win-a");
+
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a lone window keeps the whole queue"),
+        );
+    }
+    let refused = h
+        .call_task("hold", json!({}), Some("win-a".into()), Some(false))
+        .err()
+        .expect("the global cap still binds");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_queued_commands"),
+        "a lone window must see today's error, not window_share"
+    );
+
+    std::fs::write(&gate, b"1").unwrap();
+    wait_state(&h, State::Ready).await;
+    for ct in held {
+        ct.result.await.unwrap().unwrap();
+    }
+    let _ = std::fs::remove_file(&gate);
+    h.shutdown().await;
+}
+
+/// The host-side bucket: while `None` holds queued work it is live and
+/// shares the queue by the same rule - and `window` is null in the
+/// error. Once it drains it stops being live entirely.
+#[tokio::test]
+async fn host_bucket_shares_while_busy_and_stops_reserving_when_idle() {
+    let gate = temp_gate();
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.hello_timeout = Duration::from_secs(30);
+    c.limits = Limits::default().with_max_queued_commands(8);
+    let h = spawn_h(spec_argv(FAKE_HELLO_GATE, &gate), c, ev);
+    h.fairness_join_window("win-a");
+
+    let mut held = Vec::new();
+    for _ in 0..7 {
+        held.push(
+            h.call_task("hold", json!({}), None, Some(false))
+                .expect("the host bucket shares the queue like a window"),
+        );
+    }
+    let refused = h
+        .call_task("hold", json!({}), None, Some(false))
+        .err()
+        .expect("the host bucket hits its ceiling too");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert!(
+        refused.data.as_ref().is_some_and(|d| d["window"].is_null()),
+        "the host bucket is reported as window: null"
+    );
+
+    std::fs::write(&gate, b"1").unwrap();
+    wait_state(&h, State::Ready).await;
+    for ct in held {
+        ct.result.await.unwrap().unwrap();
+    }
+    assert!(
+        eventually(|| !h.fairness_snapshot().is_live(None)).await,
+        "an idle host bucket must stop reserving: {:?}",
+        h.fairness_snapshot()
+    );
+    let _ = std::fs::remove_file(&gate);
+    h.shutdown().await;
+}
+
+/// `per_window_fairness = false` skips the share check entirely: the
+/// same flood produces today's exact outcome - whoever queues last
+/// sees `max_queued_commands`.
+#[tokio::test]
+async fn fairness_off_is_exactly_todays_outcome() {
+    let gate = temp_gate();
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.hello_timeout = Duration::from_secs(30);
+    c.limits = Limits::default()
+        .with_max_queued_commands(8)
+        .with_per_window_fairness(false);
+    let h = spawn_h(spec_argv(FAKE_HELLO_GATE, &gate), c, ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("no share check: the global cap is the only bound"),
+        );
+    }
+    for owner in [Some("win-a".to_string()), Some("win-b".to_string()), None] {
+        let refused = h
+            .call_task("hold", json!({}), owner, Some(false))
+            .err()
+            .expect("the global cap binds everyone identically");
+        assert_eq!(
+            refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+            Some("max_queued_commands")
+        );
+    }
+
+    std::fs::write(&gate, b"1").unwrap();
+    wait_state(&h, State::Ready).await;
+    for ct in held {
+        ct.result.await.unwrap().unwrap();
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().owners.is_empty()).await,
+        "disabled fairness counts nothing at all: {:?}",
+        h.fairness_snapshot()
+    );
+    let _ = std::fs::remove_file(&gate);
     h.shutdown().await;
 }

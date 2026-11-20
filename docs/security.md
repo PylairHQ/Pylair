@@ -356,8 +356,20 @@ Two more bounded paths matter:
   `loop_stale_ms` as a diagnostic; `loop_stall_kill` (off by default)
   makes a long stall fatal for apps that prefer it.
 
-Known gap: limits are per-runtime, not per-window — a webview that floods
-the bridge can starve other windows of the same runtime.
+The command queue is additionally split per caller (per-window fairness,
+decisions 0005): each live window keeps a guaranteed minimum share of
+`max_queued_commands`, and a caller over its share ceiling is refused
+before the command enters the queue: `LIMIT_EXCEEDED` with
+`data: {"limit": "window_share", "max": <ceiling>, "window": "<label>"}`
+(`window` is `null` for host-side calls, which follow the same rule only
+while they hold work). A lone caller still fills the whole queue and sees
+`max_queued_commands` at the global cap; the split is admission-only, so
+nothing already queued or running is affected.
+`PYLAIR_PER_WINDOW_FAIRNESS=0` restores the pure global cap.
+
+Known gap: task slots and stream resources are still per-runtime, not
+per-window. A webview that holds every task slot can still starve other
+windows' calls until the rest of decisions 0005 lands.
 
 ## 7. Process boundaries and orphan prevention
 

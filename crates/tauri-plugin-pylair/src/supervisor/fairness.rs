@@ -43,15 +43,16 @@ struct Counts {
     in_flight: u64,
 }
 
-/// Which counter feeds `in_use` for a ceiling check. Enforcement lands
-/// in PR 2; today only the unit tests compute ceilings.
-#[cfg(test)]
+/// Which counter feeds `in_use` for a ceiling check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Resource {
-    /// Queued commands: an admission occupies a queue slot and then a
-    /// task slot, so `in_use = in_queue + in_flight`.
-    QueuedCommands,
+    /// Queued commands: an admission occupies one queue slot, so
+    /// `in_use = in_queue`. In-flight work does not hold queue slots
+    /// and must not eat a busy window's queue reservation.
+    Queue,
     /// In-flight tasks (plain calls, streams, isolated workers).
+    /// Task-slot enforcement is PR 3; today only tests read it.
+    #[cfg(test)]
     Tasks,
 }
 
@@ -89,11 +90,38 @@ impl Fairness {
         }
     }
 
-    /// Handle side: a Call/CallStream is about to `try_send`.
+    /// Handle side: a Call/CallStream is about to `try_send` (test
+    /// setup only - production goes through `try_admit_queue`, which
+    /// checks first).
+    #[cfg(test)]
     pub(crate) fn admit_queue(&mut self, owner: &Option<String>) {
         if self.enabled {
             self.owners.entry(owner.clone()).or_default().in_queue += 1;
         }
+    }
+
+    /// Queue admission (decisions 0005, PR 2): the share check and the
+    /// charge in one operation under the caller's lock. `Err(ceiling)`
+    /// carries the owner's current ceiling for the `window_share`
+    /// error. A ceiling that reaches the global cap never refuses -
+    /// then the queue-full path still produces today's
+    /// `max_queued_commands` error, which is what keeps a
+    /// single-window app identical.
+    pub(crate) fn try_admit_queue(
+        &mut self,
+        owner: &Option<String>,
+        cap: usize,
+    ) -> Result<(), usize> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let ceiling = self.ceiling_of(owner, Resource::Queue, cap);
+        let c = self.owners.entry(owner.clone()).or_default();
+        if ceiling < cap && c.in_queue as usize >= ceiling {
+            return Err(ceiling);
+        }
+        c.in_queue += 1;
+        Ok(())
     }
 
     /// The dequeued command freed its queue slot.
@@ -166,32 +194,24 @@ impl Fairness {
         }
     }
 
-    #[cfg(test)]
     fn live_count(&self) -> usize {
         self.live_windows.len() + usize::from(self.is_live(&None))
     }
 
-    #[cfg(test)]
     fn in_use(&self, owner: &Option<String>, resource: Resource) -> usize {
         let Some(c) = self.owners.get(owner) else {
             return 0;
         };
         (match resource {
-            Resource::QueuedCommands => c.in_queue + c.in_flight,
+            Resource::Queue => c.in_queue,
+            #[cfg(test)]
             Resource::Tasks => c.in_flight,
         }) as usize
     }
 
     /// `ceiling(owner, cap)` under the decisions-0005 formula: the cap
     /// minus, per OTHER live owner, `max(0, min_reserve - in_use)`.
-    /// Used only by tests in PR 1 - enforcement lands in PR 2/3.
-    #[cfg(test)]
-    pub(crate) fn ceiling_for(
-        &self,
-        owner: &Option<String>,
-        resource: Resource,
-        cap: usize,
-    ) -> usize {
+    fn ceiling_of(&self, owner: &Option<String>, resource: Resource, cap: usize) -> usize {
         let others = self
             .owners
             .keys()
@@ -202,6 +222,13 @@ impl Fairness {
             .filter(|o| o != owner && self.is_live(o))
             .map(|o| self.in_use(&o, resource));
         ceiling(cap, self.live_count(), others)
+    }
+
+    /// `ceiling_for` for tests; production goes through
+    /// `try_admit_queue`.
+    #[cfg(test)]
+    fn ceiling_for(&self, owner: &Option<String>, resource: Resource, cap: usize) -> usize {
+        self.ceiling_of(owner, resource, cap)
     }
 
     fn prune(&mut self, owner: &Option<String>) {
@@ -262,7 +289,6 @@ pub(super) fn release_queued(fair: &FairnessRef, cmd: &Command) {
 /// that costs an idle window far less than an equal split, and never
 /// more than one. Past `live > cap` the equal split floors at 0 and
 /// reservations collapse - the global cap then rules alone.
-#[cfg(test)]
 fn min_reserve(cap: usize, live: usize) -> usize {
     if live == 0 {
         return 0;
@@ -273,7 +299,6 @@ fn min_reserve(cap: usize, live: usize) -> usize {
 /// `ceiling(A)`: `cap` minus, per OTHER live owner,
 /// `max(0, min_reserve - in_use)` - a window's existing holdings are
 /// its reservation, so a window past its minimum reserves nothing.
-#[cfg(test)]
 fn ceiling(cap: usize, live: usize, others_in_use: impl Iterator<Item = usize>) -> usize {
     let reserved: usize = others_in_use
         .map(|u| min_reserve(cap, live).saturating_sub(u))
@@ -447,17 +472,60 @@ mod tests {
     }
 
     #[test]
-    fn queue_usage_includes_in_flight() {
+    fn queue_usage_counts_only_the_queue() {
         let mut f = on();
         f.join_window("a");
         f.join_window("b");
+        // a has one queued command: b's ceiling = 64 - (8 - 1) = 57
         f.admit_queue(&Some("a".into()));
+        assert_eq!(f.ceiling_for(&Some("b".into()), Resource::Queue, 64), 57);
+        // a's in-flight work is not queue usage: it must not eat b's
+        // queue reservation
         f.note_started(&Some("a".into()));
-        // b's queue ceiling subtracts min_reserve - in_use(a) = 8 - 2 = 6
-        assert_eq!(
-            f.ceiling_for(&Some("b".into()), Resource::QueuedCommands, 64),
-            58
-        );
+        assert_eq!(f.ceiling_for(&Some("b".into()), Resource::Queue, 64), 57);
+    }
+
+    #[test]
+    fn try_admit_refuses_past_the_ceiling() {
+        let mut f = on();
+        f.join_window("a");
+        f.join_window("b");
+        let a = Some("a".to_string());
+        // live = 2, cap = 8 -> min_reserve = 1; a's ceiling is 7
+        for _ in 0..7 {
+            assert_eq!(f.try_admit_queue(&a, 8), Ok(()));
+        }
+        assert_eq!(f.try_admit_queue(&a, 8), Err(7));
+        // b still fits: a is past its minimum so it reserves nothing
+        assert_eq!(f.try_admit_queue(&Some("b".into()), 8), Ok(()));
+    }
+
+    #[test]
+    fn a_ceiling_at_the_cap_never_refuses() {
+        // One live owner: ceiling == cap, so the share check never
+        // fires - the global queue-full error stays the only refusal.
+        let mut f = on();
+        f.join_window("a");
+        let a = Some("a".to_string());
+        for _ in 0..8 {
+            assert_eq!(f.try_admit_queue(&a, 8), Ok(()));
+        }
+        assert_eq!(f.try_admit_queue(&a, 8), Ok(()));
+        f.release_queue(&a); // the unsent ninth releases its charge
+        assert_eq!(f.owners[&a].in_queue, 8);
+    }
+
+    #[test]
+    fn disabled_admits_and_counts_nothing() {
+        let mut f = Fairness {
+            enabled: false,
+            owners: HashMap::new(),
+            live_windows: HashSet::new(),
+        };
+        for _ in 0..64 {
+            assert_eq!(f.try_admit_queue(&Some("a".into()), 8), Ok(()));
+        }
+        assert!(f.owners.is_empty());
     }
 
     #[test]
