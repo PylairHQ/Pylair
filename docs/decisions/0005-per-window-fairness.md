@@ -1,11 +1,11 @@
 # 0005: Per-window fairness for runtime limits
 
 Status: accepted, implemented (PRs #111-#114, #115; the spike's
-reservation model was revised after review). The spike's
+reservation model was revised after review). §3 amended by 0006's PR 0:
+the live set joins on calls, not any command. The spike's
 `tests/window_fairness.rs` grew into the implementation's regression
 suite; the installed two-window self-test proves the real-webview path
-(win-b subscribes through `WindowRegistry`, joins the live set and gets
-its share).
+(win-b's `b_ping` call joins the live set and gets its share).
 
 ## Question
 
@@ -136,27 +136,33 @@ and the queue is the Handle/actor boundary:
 
 ## 3. Definition of "live window"
 
-**Chosen: the `WindowRegistry.subscribed` set** (`registry.rs:12`) -
-windows that have invoked at least one Pylair command and still exist -
-**plus the `owner: None` host bucket, counted as live only while it has
-queued or in-flight work.**
+**Chosen: the `WindowRegistry` live set - windows that have called
+Python and still exist** - a window joins on its first
+`python_call`/`python_call_stream` invocation
+(`WindowRegistry::subscribe_live`, `registry.rs:45`), *before* that
+call's admission check, and leaves on `drop_label` - **plus the
+`owner: None` host bucket, counted as live only while it has queued or
+in-flight work.**
 
-> Amended by decisions 0006: the live set joins on `python_call` /
-> `python_call_stream` invocation, not on any bridge command - event
-> subscription and fairness liveness were split so observer windows
-> reserve nothing (0006 §3; the code lands as its PR 0).
+> Amended by decisions 0006 (landed as its PR 0): the live set joins on
+> `python_call`/`python_call_stream` invocation, not on any bridge
+> command - event subscription and fairness liveness were split so
+> observer windows (state/health pollers, cancel, shutdown) receive
+> events but reserve nothing.
 
-- The window set already exists and is already maintained:
-  `subscribed()` runs before every command (`commands.rs:21` - *before*
-  the call, so a window's first call always joins before its admission
-  check); `drop_label` fires on `WindowEvent::Destroyed`
-  (`builder.rs:283`) and on `emit_to` failure against a dead window
-  (`handle_emit_failure`, `registry.rs:65`).
+- The window set is maintained at two sites with two meanings:
+  `subscribed()` runs before every command and marks the window an
+  event subscriber only; `subscribe_live()` runs only in
+  `python_call_impl`/`python_call_stream_impl` (`commands.rs:36`,
+  `:103` - *before* dispatch, so a window's first call joins before its
+  admission check); `drop_label` fires on `WindowEvent::Destroyed`
+  (`builder.rs:288`) and on `emit_to` failure against a dead window
+  (`handle_emit_failure`, `registry.rs:90`) and leaves both sets.
 - First-call semantics come out right: a window that has never called
-  reserves nothing except its `min_reserve` once subscribed - and it
-  subscribes before its first admission check, so its guarantee applies
-  to the very first call. An over-share hog stops being admitted until
-  it drains below its new ceiling; joining never preempts.
+  reserves nothing at all; its first call joins the live set before
+  its admission check, so its guarantee applies to the very first call.
+  An over-share hog stops being admitted until it drains below its new
+  ceiling; joining never preempts.
 - "Every webview whose capability includes pylair" is not obtainable
   host-side: capability resolution happens inside Tauri's invoke
   machinery - the plugin only sees a `CommandScope` *inside* an
@@ -165,11 +171,14 @@ queued or in-flight work.**
   wasted capacity, since a reservation is exactly what cannot be
   borrowed.
 - Wrap mode fits naturally: the wrap window is remote content - it
-  never invokes `python_call`, never subscribes, reserves nothing
-  (`builder.rs:226` gates events to it separately anyway).
-- **The `None` bucket is different from a window.** A subscribed window
-  is a live UI that might call at any instant - its minimum must be held
-  open continuously or the guarantee is meaningless. A host-side caller
+  never invokes `python_call`, so it never joins the live set (its
+  event-only subscription via `install_setup`, `wrap/mod.rs`, is
+  exactly the observer case the split exists for) and reserves nothing
+  (`builder.rs:231` gates events to it separately anyway).
+- **The `None` bucket is different from a window.** A live window is a
+  UI that has called Python and might call again at any instant - its
+  minimum must be held open continuously or the guarantee is
+  meaningless. A host-side caller
   (`owner: None`, e.g. `selftest.rs:68` and builder-API users) has no
   persistent consumer: if it holds nothing, nothing needs reserving.
   So `None` counts as live only while `in_queue + in_flight > 0` for the
