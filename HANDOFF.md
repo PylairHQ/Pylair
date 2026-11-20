@@ -28,23 +28,28 @@ rc.21 is published: the crate `0.1.0-rc.16` on crates.io, `pylair`
 to W4, PRs 92 to 96, 99) and flipped `WRAP_IN_PUBLISHED_VERSIONS`, so
 `--local` is no longer needed for wrap scaffolds.
 
-rc.22 train is in progress, the drag-drop fix: wrap windows pass file
-drops to the page now that the plugin disables Tauri's native
-drag-drop handler (PR 100, `drag_drop_enabled = false` in
-`install_window`). PyPI is skipped this train: the crate
-`0.1.0-rc.17` is on crates.io, and this pins PR moves the npm trio to
-`0.1.0-rc.22`, the scaffold crate pin to `=0.1.0-rc.17`, and both
-template `Cargo.lock` files (regenerated against the published
-crate).
+rc.22 is published: the crate `0.1.0-rc.17` on crates.io and the npm
+trio at `0.1.0-rc.22` (`pylair` and `pylair-ollama` unchanged on PyPI).
+It shipped the wrap-window drag-drop fix (PR 100, `drag_drop_enabled =
+false` in `install_window`), atomic pidfile writes, and the CI
+docs-only narrowing (PR 103).
 
-| Package | Version in the repo | rc.22 state |
+rc.23 train is in progress, npm only: it ships the CLI output redesign
+(PR 105, including the doctor native-toolchain check and the shared
+`ui/` module), the hdiutil retry (PR 106) and the create-pylair
+prompts + wrap framework variants (PR 107). Nothing under `crates/` or
+`python/` changed, so the crate stays `0.1.0-rc.17`, `pylair` stays
+`0.1.0rc11`, and there is no crate or PyPI publish and no template
+`Cargo.lock` change.
+
+| Package | Version in the repo | rc.23 state |
 |---|---|---|
 | `tauri-plugin-pylair` (crate) | `0.1.0-rc.17` | published |
 | `pylair` (PyPI) | `0.1.0-rc.11` | unchanged, skipped |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.22` | next to publish |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.23` | next to publish |
 
-Remaining order for rc.22: pack-mode acceptance green on this commit,
+Remaining order for rc.23: pack-mode acceptance green on this commit,
 then the npm trio under `--tag next`, then registry acceptance with
 `source=registry`.
 
@@ -169,6 +174,20 @@ Merged since rc.17 (d7daaaf):
 - PR 84: bundled CPython bump to python-build-standalone `20261110`
   (`3.12.16` / `3.13.18`); RUSTSEC-2024-0370 disclosed in
   `docs/security.md`; release checklist now checks the PBS pin.
+- PR 98, 99, 101, 102: rc.20 to rc.22 train commits (bumps, pins,
+  template `Cargo.lock` regenerations).
+- PR 100: wrap windows accept file drops (native drag-drop disabled);
+  atomic pidfile writes.
+- PR 103: docs-only CI detection narrowed so shipped Markdown does not
+  skip the suite.
+- PR 105: CLI output redesign, shared `ui/` module, `pylair doctor`
+  native-toolchain check (vswhere on Windows, `xcode-select` on macOS,
+  `cc` + `webkit2gtk-4.1` on Linux).
+- PR 106: `hdiutil` retries on transient resource-busy failures during
+  dmg repackaging.
+- PR 107: create-pylair wordmark + TTY prompts, wrap framework
+  variants, `pylair wrap`/`init` framework prompts; `ui/` shared by
+  build-time copy so create-pylair stays dependency-free.
 
 - PR 88: per-function permissions (crate `fn_scope`, client
   `PermissionDeniedError`, CLI capability checks, self-test

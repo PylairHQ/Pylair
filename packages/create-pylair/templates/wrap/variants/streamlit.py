@@ -1,6 +1,6 @@
-"""Streamlit acceptance fixture. Streamlit renders the page over a websocket,
-so `GET /` is the static shell, whose title is "Streamlit": that is the marker
-the self-test checks for this framework."""
+# A minimal Streamlit app wrapped as a desktop app by Pylair. It exists
+# so `npx pylair dev` opens a real window out of the box; replace it
+# with your own app (PYLAIR-WRAP-OK is only a smoke-test marker).
 
 import streamlit as st
 
