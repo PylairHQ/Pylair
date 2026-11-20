@@ -583,7 +583,7 @@ jobs:
                 echo "stderr-delivery skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
-              if grep -q "health.*skipped" "$f"; then
+              if grep -q "\"health\":\"skipped" "$f"; then
                 echo "health skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
@@ -596,6 +596,9 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: ${{ env.APP_DIR }}
         run: |
+          # pipefail: the webview self-test tees its log below — without
+          # it a failing app exit is masked by tee's 0 (bug since ea00496).
+          set -eo pipefail
           APP=$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)
           env -i HOME="$HOME" PATH=/usr/bin:/bin "$APP/Contents/MacOS/$APP_BIN" --self-test
           env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_GUI=1 "$APP/Contents/MacOS/$APP_BIN"
