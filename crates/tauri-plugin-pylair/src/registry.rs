@@ -1,22 +1,39 @@
 use crate::{Handle, StderrDelivery};
 use tauri::{Manager, Runtime};
 
+use crate::supervisor::fairness::FairnessRef;
+
 /// Managed state holding the supervisor handle.
 pub struct PyRuntime(pub Handle);
 
 /// Which webviews may receive runtime events, and which webview owns each
 /// streaming task. Nothing is broadcast to all windows: P1-8 — an app with
 /// two webviews must not leak one window's streams into the other.
+/// Also the live-window set for per-window fairness (decisions 0005):
+/// a subscribed window is live until it is dropped.
 #[derive(Default)]
 pub struct WindowRegistry {
     subscribed: std::collections::HashSet<String>,
+    /// The supervisor's shared fairness map, wired by the builder.
+    /// Absent in tests that build a bare registry.
+    fairness: Option<FairnessRef>,
 }
 
 impl WindowRegistry {
+    /// Attach the supervisor's fairness map so `subscribe`/`drop_label`
+    /// maintain the live set (builder wiring only).
+    pub(crate) fn set_fairness(&mut self, fairness: FairnessRef) {
+        self.fairness = Some(fairness);
+    }
+
     /// Mark a webview as an event subscriber (every bridge command does this
     /// for the invoking window; exposed for tests and explicit opt-in).
+    /// Joining subscribers also join the fairness live set.
     pub fn subscribe(&mut self, label: &str) {
         self.subscribed.insert(label.to_string());
+        if let Some(fair) = &self.fairness {
+            fair.lock().unwrap().join_window(label);
+        }
     }
 
     /// Delivery targets for runtime-wide events (state, stderr, exposes).
@@ -42,9 +59,13 @@ impl WindowRegistry {
     }
 
     /// Forget dead windows (an emit_to that failed to deliver, or an
-    /// explicit WindowEvent::Destroyed).
+    /// explicit WindowEvent::Destroyed). Leaving subscribers also
+    /// leave the fairness live set.
     pub(super) fn drop_label(&mut self, label: &str) {
         self.subscribed.remove(label);
+        if let Some(fair) = &self.fairness {
+            fair.lock().unwrap().leave_window(label);
+        }
     }
 }
 

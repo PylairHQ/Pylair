@@ -72,9 +72,9 @@ impl SpawnSpec {
 
 /// Enforceable ceilings on input, output and concurrency (RC.8A). Every
 /// overload returns `LIMIT_EXCEEDED` naming the limit in `data.limit` —
-/// nothing is allowed to grow without bound. Limits are per RUNTIME, not
-/// per window: one busy webview can exhaust a shared cap and starve the
-/// others (no fairness — Known limitations).
+/// nothing is allowed to grow without bound. Limits are per runtime;
+/// `per_window_fairness` adds a guaranteed minimum per live window on
+/// top (docs/decisions/0005-per-window-fairness.md).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Limits {
@@ -102,6 +102,12 @@ pub struct Limits {
     /// Isolated worker processes in flight at once (enforced Python-side).
     /// Default `PYLAIR_MAX_ISOLATED_WORKERS` or 8.
     pub max_isolated_workers: usize,
+    /// Guaranteed-minimum fairness across webview owners
+    /// (docs/decisions/0005): every live window keeps a small reserved
+    /// minimum of the shared caps and may borrow the rest. A
+    /// single-window app behaves exactly as before. Default
+    /// `PYLAIR_PER_WINDOW_FAIRNESS` or true; `0`/`false`/`off` disables.
+    pub per_window_fairness: bool,
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -116,6 +122,18 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Bool env knob: unset -> `default`; `0`/`false`/`off` (any case) ->
+/// false; anything else -> true.
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Err(_) => default,
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off"
+        ),
+    }
 }
 
 /// `PYLAIR_HELLO_TIMEOUT_MS` default and supported window. A cold
@@ -195,6 +213,7 @@ impl Default for Limits {
             max_stream_credit: env_u64("PYLAIR_MAX_STREAM_CREDIT", 4096),
             max_queued_commands: env_usize("PYLAIR_MAX_QUEUED_COMMANDS", 64),
             max_isolated_workers: env_usize("PYLAIR_MAX_ISOLATED_WORKERS", 8),
+            per_window_fairness: env_bool("PYLAIR_PER_WINDOW_FAIRNESS", true),
         }
     }
 }
@@ -291,6 +310,10 @@ impl Limits {
     }
     pub fn with_max_isolated_workers(mut self, v: usize) -> Self {
         self.max_isolated_workers = v;
+        self
+    }
+    pub fn with_per_window_fairness(mut self, v: bool) -> Self {
+        self.per_window_fairness = v;
         self
     }
 }

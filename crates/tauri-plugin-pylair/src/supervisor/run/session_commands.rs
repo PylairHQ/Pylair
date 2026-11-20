@@ -51,6 +51,7 @@ impl Session<'_> {
                 let _ = task_out.send(task);
                 self.pending.insert(id, PendingKind::Call(respond));
                 self.task_of_call.insert(id, task);
+                self.sup.fair.lock().unwrap().note_started(&owner);
                 self.tasks.insert(
                     task,
                     TaskMeta {
@@ -161,6 +162,7 @@ impl Session<'_> {
                 let _ = task_out.send(Ok(task));
                 self.pending.insert(id, PendingKind::Stream(items));
                 self.task_of_call.insert(id, task);
+                self.sup.fair.lock().unwrap().note_started(&owner);
                 self.tasks.insert(
                     task,
                     TaskMeta {
@@ -372,6 +374,7 @@ impl Session<'_> {
             &mut self.tasks,
             &mut self.task_of_call,
             &mut self.done_tasks,
+            &self.sup.fair,
         )
         .await;
         fail_all(&mut self.pending, proto::RUNTIME_UNAVAILABLE, "shutdown").await;

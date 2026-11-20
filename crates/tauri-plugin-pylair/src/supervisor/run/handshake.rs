@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::time::timeout;
 
 use super::super::config::{RuntimeEvent, RuntimeKind, State};
+use super::super::fairness::release_queued;
 use super::super::handle::{Command, ShutdownOutcome};
 use super::{fail_command_fast, kill_and_reap, ChildIo, ExitCause, Supervisor};
 use crate::protocol::{self as proto, InMsg};
@@ -187,7 +188,13 @@ impl Supervisor {
                         return ControlFlow::Break(ExitCause::CleanShutdown);
                     }
                     Some(Command::Retry | Command::CancelOwned { .. }) => {}
-                    Some(c) => fail_command_fast(c, "web runtime is starting"),
+                    Some(c) => {
+                        // A dequeued command always frees its queue
+                        // slot, even when it is fail-fasted
+                        // (decisions 0005).
+                        release_queued(&self.fair, &c);
+                        fail_command_fast(c, "web runtime is starting");
+                    }
                 },
                 _ = &mut deadline => {
                     kill_and_reap(&mut io).await;

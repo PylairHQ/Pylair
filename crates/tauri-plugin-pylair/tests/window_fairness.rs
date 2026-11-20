@@ -139,3 +139,173 @@ async fn one_owner_starves_the_other_of_task_slots() {
 
     h.shutdown().await;
 }
+
+/// Same as FAKE_HOLDS_TASKS, but the child exits half a second after
+/// consuming two call frames - it dies mid-service with tasks still in
+/// flight, and the delay keeps the in-flight window pollable before
+/// the crash.
+const FAKE_DIES_AFTER_TWO: &str = r#"
+import sys, struct, json, time
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[{"name":"hold","kind":"sync"}]}})
+calls = 0
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+    else:
+        calls += 1
+        if calls >= 2:
+            time.sleep(0.5)
+            break  # die holding both tasks
+"#;
+
+/// hello, then immediate exit: every generation dies before it can
+/// serve anything, so the crash-loop breaker parks the supervisor.
+const FAKE_DIES_AFTER_HELLO: &str = r#"
+import sys, struct, json
+b = json.dumps({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}}).encode()
+sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+"#;
+
+/// Counters settle on the actor's own schedule; poll instead of
+/// sleeping a fixed time.
+async fn eventually(cond: impl Fn() -> bool) -> bool {
+    timeout(T, async {
+        loop {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// PR-1 counting: in_queue is charged at try_send and released at the
+/// recv() site, so after a burst it is 0 and the debt sits in
+/// in_flight.
+#[tokio::test]
+async fn in_queue_returns_to_zero_after_a_burst() {
+    let (ev, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_HOLDS_TASKS), fast_config(), ev);
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("admitted under the global cap"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 4)).await,
+        "queue debt must drain into in_flight: {:?}",
+        h.fairness_snapshot()
+    );
+    h.shutdown().await;
+}
+
+/// A call dequeued while the supervisor sleeps between respawns is
+/// fail-fasted AND frees its queue slot (release happens at recv(),
+/// not at dispatch).
+#[tokio::test]
+async fn in_queue_returns_to_zero_after_restart_fail_fast() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    // A long backoff holds the Restarting state open deterministically;
+    // shutdown() below cuts the sleep short.
+    c.backoff_base = Duration::from_secs(30);
+    c.backoff_cap = Duration::from_secs(30);
+    let h = spawn_h(spec(FAKE_DIES_AFTER_TWO), c, ev);
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("admitted"),
+        );
+    }
+    // The child eats both calls and exits -> crash -> Restarting.
+    wait_state(&h, State::Restarting).await;
+
+    let err = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("calls fail fast while the runtime restarts");
+    assert_eq!(err.code, proto::RUNTIME_UNAVAILABLE);
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")).0 == 0).await,
+        "the fail-fasted call must release its queue slot: {:?}",
+        h.fairness_snapshot()
+    );
+    h.shutdown().await;
+}
+
+/// Same release rule inside the failed-park loop: once the breaker
+/// parks the supervisor, calls fail fast and owe nothing.
+#[tokio::test]
+async fn in_queue_returns_to_zero_after_failed_park() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.breaker_crashes = 2;
+    let h = spawn_h(spec(FAKE_DIES_AFTER_HELLO), c, ev);
+    wait_state(&h, State::Failed).await;
+
+    let err = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("a parked runtime fails calls fast");
+    assert_eq!(err.code, proto::RUNTIME_UNAVAILABLE);
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")).0 == 0).await,
+        "the fail-fasted call must release its queue slot: {:?}",
+        h.fairness_snapshot()
+    );
+    h.shutdown().await;
+}
+
+/// in_flight is per-generation: a crash kills the Session and its task
+/// map, so the next Ready reports the owner idle again.
+#[tokio::test]
+async fn in_flight_resets_across_a_crash() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.backoff_base = Duration::from_millis(50);
+    let h = spawn_h(spec(FAKE_DIES_AFTER_TWO), c, ev);
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("admitted"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")).1 == 2).await,
+        "both calls must register before the crash: {:?}",
+        h.fairness_snapshot()
+    );
+
+    // Crash -> Session::drop ends the generation at TEARDOWN, inside
+    // the restart backoff and before any respawn: the dead
+    // generation's tasks never inflate in_use. The fixture holds every
+    // task it is given, so in_flight can only reach 0 via the
+    // generation reset - the poll IS the assertion.
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 0)).await,
+        "in_flight must zero at session teardown, not the next spawn: {:?}",
+        h.fairness_snapshot()
+    );
+    h.shutdown().await;
+}

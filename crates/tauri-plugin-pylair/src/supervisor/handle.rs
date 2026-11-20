@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
 use super::config::{Limits, RuntimeKind, State};
+use super::fairness::{release_queued, FairnessRef, FairnessSnapshot};
 use super::stream::{stream_pair, StreamRx, StreamSink};
 use crate::protocol::{self as proto, ErrorObj};
 
@@ -132,6 +133,9 @@ pub struct Handle {
     /// before the navigation committed and belong to the dead document.
     pub(super) next_task: Arc<AtomicU64>,
     pub(super) limits: Arc<Limits>,
+    /// Per-window accounting shared with the actor
+    /// (docs/decisions/0005). Counting only - nothing is refused.
+    pub(super) fair: FairnessRef,
 }
 
 impl Handle {
@@ -187,6 +191,10 @@ impl Handle {
     ) -> Result<CallTask, ErrorObj> {
         let (rtx, rrx) = oneshot::channel();
         let (ttx, trx) = oneshot::channel();
+        // Fairness admission bookkeeping: a queue slot is charged here
+        // and released when the actor dequeues the command (decisions
+        // 0005, PR 1: counting only - never refused).
+        self.fair.lock().unwrap().admit_queue(&owner);
         self.cmd
             .try_send(Command::Call {
                 fn_name: fn_name.into(),
@@ -196,9 +204,15 @@ impl Handle {
                 task_out: ttx,
                 owner,
             })
-            .map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => self.queue_err(),
-                mpsc::error::TrySendError::Closed(_) => stopped_err(),
+            .map_err(|e| {
+                // Unsent: the command comes back, so does its charge.
+                let full = matches!(e, mpsc::error::TrySendError::Full(_));
+                release_queued(&self.fair, &e.into_inner());
+                if full {
+                    self.queue_err()
+                } else {
+                    stopped_err()
+                }
             })?;
         Ok(CallTask {
             task: trx,
@@ -237,6 +251,7 @@ impl Handle {
             self.limits.stream_buffer_bytes_total as u64,
         );
         let (task_tx, task_rx) = oneshot::channel();
+        self.fair.lock().unwrap().admit_queue(&owner);
         self.cmd
             .try_send(Command::CallStream {
                 fn_name: fn_name.into(),
@@ -246,9 +261,14 @@ impl Handle {
                 task_out: task_tx,
                 owner,
             })
-            .map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => self.queue_err(),
-                mpsc::error::TrySendError::Closed(_) => stopped_err(),
+            .map_err(|e| {
+                let full = matches!(e, mpsc::error::TrySendError::Full(_));
+                release_queued(&self.fair, &e.into_inner());
+                if full {
+                    self.queue_err()
+                } else {
+                    stopped_err()
+                }
             })?;
         let task = task_rx.await.map_err(|_| stopped_err())??;
         Ok((task, items_rx))
@@ -315,6 +335,19 @@ impl Handle {
     /// `cancel_owner_before`. Read cheap: a shared atomic.
     pub fn task_watermark(&self) -> u64 {
         self.next_task.load(Ordering::Relaxed)
+    }
+
+    /// The shared fairness map, for `WindowRegistry` to maintain the
+    /// live set (builder wiring).
+    pub(crate) fn fairness(&self) -> FairnessRef {
+        self.fair.clone()
+    }
+
+    /// A copy of the fairness counters - the only observability
+    /// integration tests get into the map (decisions 0005, PR 1).
+    #[doc(hidden)]
+    pub fn fairness_snapshot(&self) -> FairnessSnapshot {
+        self.fair.lock().unwrap().snapshot()
     }
 
     /// Cancel every task `owner` allocated BEFORE `before` — used when a
