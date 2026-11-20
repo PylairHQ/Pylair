@@ -242,11 +242,7 @@ impl Session<'_> {
                         self.sup.health.lock().unwrap().note_pong(
                             p["seq"].as_u64(),
                             stale,
-                            self.io
-                                .pings_sent
-                                .load(Ordering::Relaxed)
-                                .saturating_sub(self.pongs_received)
-                                as u32,
+                            self.sup.config.ping_interval,
                         );
                         match classify_pong(stale, self.sup.config.loop_stall_kill) {
                             PongVerdict::StallKill => {

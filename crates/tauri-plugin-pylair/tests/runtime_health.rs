@@ -99,6 +99,27 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
 "#;
 
+/// Pongs every ping, but slower than the 50ms tick: each pong lands
+/// just after the NEXT ping went out. The newest ping is in flight,
+/// not missed — the miss count at pong arrival must be 0, not 1.
+const FAKE_SLOW_PONG: &str = r#"
+import sys, struct, json, time
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        time.sleep(0.06)
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
 /// Reads every frame so the pipe never backpressures, answers
 /// shutdown, and NEVER pongs: missed pings climb at tick cadence until
 /// the kill path trips.
@@ -325,6 +346,31 @@ async fn missing_pongs_report_missing_then_kill() {
         last.detail.contains("missed pongs"),
         "detail should name the wedge: {:?}",
         last.detail
+    );
+}
+
+/// A pong slower than the ping interval still answers every ping: the
+/// ping queued just before it lands is in flight, not missed, so at
+/// the pong the transport verdict is `ok` with `missed_pongs == 0`
+/// (the #120-review counting fix). Between pongs the tick correctly
+/// reports one in-flight miss — the assertion reads the pong-arrival
+/// instant, which `rtt_ms.is_some()` guarantees.
+#[tokio::test]
+async fn a_pong_after_the_next_ping_is_not_a_miss() {
+    let mut c = fast_config();
+    c.missed_pongs_to_kill = 1000; // state may flap; never kill the worker
+    let (events, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_SLOW_PONG), c, events);
+    wait_state(&h, State::Ready).await;
+    assert!(
+        eventually(|| {
+            let s = h.health(None);
+            s.liveness.transport == "ok"
+                && s.liveness.missed_pongs == 0
+                && s.liveness.rtt_ms.is_some()
+        })
+        .await,
+        "a pong landing after the next ping went out must not read as a miss"
     );
 }
 

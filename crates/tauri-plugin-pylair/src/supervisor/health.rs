@@ -141,16 +141,22 @@ impl HealthShared {
         }
     }
 
-    /// A pong arrived: stamp its age/RTT/loop staleness and the
-    /// miss count it just settled.
-    pub(super) fn note_pong(&mut self, seq: Option<u64>, loop_stale: Duration, missed: u32) {
+    /// A pong arrived: stamp its age/RTT/loop staleness and recount
+    /// the misses — only pings queued at least `interval` ago count,
+    /// so the ping sent just before a slow pong is in flight, not
+    /// missed.
+    pub(super) fn note_pong(&mut self, seq: Option<u64>, loop_stale: Duration, interval: Duration) {
         let now = Instant::now();
         self.last_pong_at = Some(now);
         self.last_rtt = seq
             .and_then(|s| self.ping_sent.remove(&s))
             .map(|sent| now.saturating_duration_since(sent));
         self.last_loop_stale = Some(loop_stale);
-        self.missed_pongs = missed;
+        self.missed_pongs = self
+            .ping_sent
+            .values()
+            .filter(|t| now.saturating_duration_since(**t) >= interval)
+            .count() as u32;
     }
 
     /// Generation teardown (`Session::drop`): the per-generation
