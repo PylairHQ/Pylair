@@ -448,8 +448,11 @@ jobs:
 
           # Per-window fairness self-test (decisions 0005): `hold`
           # occupies a task slot until cancelled; `holds_active` is the
-          # rendezvous win-b polls before probing its own share.
+          # rendezvous win-b polls before probing its own share. `b_ping`
+          # is win-b's liveness mark (the call itself subscribes it), so
+          # `b_seen` >= 1 proves win-b is live before the flood starts.
           _holds_active = 0
+          _b_seen = 0
 
 
           @expose
@@ -466,6 +469,18 @@ jobs:
           @expose
           def holds_active() -> int:
               return _holds_active
+
+
+          @expose
+          def b_ping() -> int:
+              global _b_seen
+              _b_seen += 1
+              return _b_seen
+
+
+          @expose
+          def b_seen() -> int:
+              return _b_seen
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a

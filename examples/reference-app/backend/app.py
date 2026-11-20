@@ -122,3 +122,22 @@ async def hold(seconds: float = 30.0) -> str:
 @expose
 def holds_active() -> int:
     return _holds_active
+
+
+# `b_ping` is win-b's liveness mark: the call itself is the bridge command
+# that subscribes win-b to the fairness live set, so `b_seen` >= 1 on the
+# main window is deterministic proof win-b holds a live entry before the
+# flood — no event, no timing (CI appends the same functions).
+_b_seen = 0
+
+
+@expose
+def b_ping() -> int:
+    global _b_seen
+    _b_seen += 1
+    return _b_seen
+
+
+@expose
+def b_seen() -> int:
+    return _b_seen

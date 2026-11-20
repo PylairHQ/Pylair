@@ -95,6 +95,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   let nextTask = 1;
   let heldN = 0;
   let holdCalls = 0;
+  let bSeen = 0;
   const later = (f) => setTimeout(f, 0);
   return {
     calls,
@@ -127,6 +128,22 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           // The fairness fixture; absent means FUNCTION_NOT_FOUND.
           if (fairness) onEvent({ task, done: true, result: heldN });
           else onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+        } else if (fnName === "b_seen") {
+          if (fairness) {
+            // win-b's ping lands between main's polls: first read sees
+            // 0, every later read sees >= 1.
+            if (bSeen === 0) later(() => { bSeen = 1; });
+            onEvent({ task, done: true, result: bSeen });
+          } else {
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          }
+        } else if (fnName === "b_ping") {
+          if (fairness) {
+            bSeen += 1;
+            onEvent({ task, done: true, result: bSeen });
+          } else {
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          }
         } else if (fnName === "hold") {
           holdCalls += 1;
           heldN += 1;
@@ -154,7 +171,6 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       return { task, protocol: 2 };
     },
     async listen(event, cb) {
-      if (event === "pylair://selftest-b-live") later(() => cb({}));
       if (event === "pylair://selftest-b")
         later(() =>
           cb({
@@ -258,9 +274,8 @@ test("flag set: the window-fairness leg passes when the share refusal and b-prob
 
 test("flag set: a refused flood that names the global cap fails window-fairness", { timeout: 20_000 }, async () => {
   const m = await import(pathToFileURL(join(dist, "index.js")).href);
-  // win-b never goes live (no b-live event), so main would be refused on
-  // the GLOBAL cap, never window_share — but here bLive is answered and
-  // the bridge still refuses with the global cap: the check must fail.
+  // win-b is live (b_seen answers) but the bridge still refuses with the
+  // GLOBAL cap rather than window_share — the check must fail.
   const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
     fairness: true,
     fairnessProbe: { ok: true },

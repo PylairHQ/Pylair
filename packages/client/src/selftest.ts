@@ -141,12 +141,6 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   }>((res) => {
     void ipc().then((b) => b.listen("pylair://selftest-b", res));
   });
-  // win-b joins the fairness live set with its first bridge command and
-  // emits this right after. Until it lands, a lone main would see the
-  // GLOBAL cap in the flood below, never window_share.
-  const bLive = new Promise<void>((res) => {
-    void ipc().then((b) => b.listen("pylair://selftest-b-live", () => res()));
-  });
 
   // The owner proves it still receives runtime stderr on its own window,
   // while the intruder proves it receives none. log_stderr fires first so
@@ -237,7 +231,18 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
       }
       throw e;
     }
-    await within(bLive, 30_000, "win-b live signal");
+    // win-b must be LIVE before the flood — a lone main would be refused
+    // on the global cap, never window_share. `b_seen` is the proof: the
+    // intruder's `b_ping` call is itself the bridge command that
+    // subscribes it, so a nonzero count means win-b already holds a live
+    // entry. Poll Python state, not an event — an emit can arrive before
+    // this window's listener exists and is gone forever.
+    for (let i = 0; ; i++) {
+      const seen = await within(call<number>("b_seen", {}), 15_000, "b_seen");
+      if (seen > 0) break;
+      if (i === 119) throw new Error("win-b never pinged (b_seen stayed 0)");
+      await sleep(500);
+    }
     const ac = new AbortController();
     const held: Promise<unknown>[] = [];
     try {
@@ -396,14 +401,15 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
 
   // Wait until the runtime is up so task 2 (the owner's stream) is live.
   // Every python_state invoke also SUBSCRIBES this window, which joins it
-  // to the fairness live set — the live signal tells main the flood can
-  // start (emitted per poll so a late main listener still catches it).
+  // to the fairness live set — the `b_ping` call below is the observable
+  // mark main polls before it floods (Python state, not an emit: an emit
+  // can arrive before main's listener exists and is gone forever).
   for (let i = 0; i < 120; i++) {
     const s = await invoke<string>("plugin:pylair|python_state").catch(() => "");
-    void emitTo("main", "pylair://selftest-b-live").catch(() => {});
     if (s === "ready") break;
     await sleep(500);
   }
+  await call<number>("b_ping", {}).catch(() => -1);
 
   // Mid-stream forgeries at task 2: plain emit, emitTo("main"), terminal.
   void emit("pylair://stream", { task: 2, seq: 999, value: "FORGED-BY-B", done: false }).catch(
