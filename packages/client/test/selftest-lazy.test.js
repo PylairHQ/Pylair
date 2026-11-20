@@ -90,20 +90,64 @@ const DENIED = { denied: true, code: -32050, fn: "add", window: "win-b" };
 
 function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture = true, opts = {}) {
   const { fairness = false, fairnessProbe = { ok: true, value: "hello" } } = opts;
+  // "ok" (default): the crate carries python_health. "missing": an old
+  // crate — Tauri rejects the invoke before the plugin runs (a plain
+  // string, no numeric code). "error": the plugin answers a coded
+  // ErrorObj — always a real failure, never a skip.
+  const { health = "ok" } = opts;
   const calls = [];
+  const listens = [];
   const cancelHooks = new Map();
   let nextTask = 1;
   let heldN = 0;
   let holdCalls = 0;
   let bSeen = 0;
   const later = (f) => setTimeout(f, 0);
+  const CELL = { in_use: 0, ceiling: 3, cap: 4 };
   return {
     calls,
+    listens,
     async invoke(cmd, args) {
       calls.push({ cmd, args });
       if (cmd === "plugin:pylair|python_cancel") {
         cancelHooks.get(args.task)?.();
         return "cancelled";
+      }
+      if (cmd === "plugin:pylair|python_health") {
+        if (health === "missing")
+          throw new Error("pylair.python_health not allowed. Command not found");
+        if (health === "error") throw { code: -32000, message: "health blew up" };
+        return {
+          version: 1,
+          kind: "bridge",
+          state: "ready",
+          in_state_ms: 1000,
+          generation: 1,
+          uptime_ms: 1000,
+          restarts: {
+            crashes_in_window: 0,
+            breaker: { crashes: 0, window_ms: 60_000 },
+            backoff_ms: 0,
+            last_exit: null,
+          },
+          liveness: {
+            last_pong_age_ms: 12,
+            rtt_ms: 11,
+            missed_pongs: 0,
+            missed_pongs_to_kill: 3,
+            loop_stale_ms: 0,
+            transport: "ok",
+            loop: "ok",
+          },
+          load: { tasks: 0, streams: 0, isolated: 0, queued: 0, stream_bytes_total: 0 },
+          self: {
+            window: "main",
+            tasks: CELL,
+            streams: CELL,
+            queued: CELL,
+            isolated: CELL,
+          },
+        };
       }
       return null;
     },
@@ -171,6 +215,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       return { task, protocol: 2 };
     },
     async listen(event, cb) {
+      listens.push(event);
       if (event === "pylair://selftest-b")
         later(() =>
           cb({
@@ -209,12 +254,15 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "call",
     "cancel",
     "window-fairness",
+    "health",
     "event-scoping",
     "fn-permission",
   ]);
   assert.equal(ok, true, JSON.stringify(checks));
   assert.match(checks["stderr-delivery"], /^skipped: /);
   assert.match(checks["window-fairness"], /^skipped: /);
+  assert.equal(checks["health"], "ok");
+  assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
   assert.equal(checks["fn-permission"], "ok");
 });
 
@@ -298,4 +346,41 @@ test("flag set: a refused flood that names the global cap fails window-fairness"
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, false);
   assert.match(checks["window-fairness"], /^FAIL: .*max_concurrent_tasks/);
+});
+
+test("flag set: a crate without python_health skips health, never fails", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { health: "missing" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(
+    checks["health"],
+    "skipped: resolved plugin predates python_health",
+    JSON.stringify(checks),
+  );
+  assert.ok(!b.listens.includes("pylair://health"), "no subscription on a missing command");
+  assert.equal(ok, true, JSON.stringify(checks));
+});
+
+test("flag set: a coded python_health rejection fails, never skips", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { health: "error" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false);
+  assert.match(checks["health"], /^FAIL: /);
 });

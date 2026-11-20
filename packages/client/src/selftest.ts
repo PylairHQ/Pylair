@@ -9,7 +9,7 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, LimitExceededError, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
+import { call, health, LimitExceededError, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
 import { CMD, ipc, liveTasks } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
@@ -309,6 +309,49 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   });
   if (!fairnessArmed && checks["window-fairness"] === "ok")
     checks["window-fairness"] = "skipped: backend has no hold/holds_active fixture";
+  // Runtime health (docs/decisions/0006): python_health is a host
+  // command, not a Python fixture — the resolved crate carries it from
+  // rc.19 on, so the invoke itself is the probe. An old crate rejects
+  // it before the plugin ever runs (Tauri: "not allowed. Command not
+  // found" — a plain string), which is a clean skip on pack/registry
+  // legs and a failure on --local ones (CI greps this verdict). A
+  // {code:number} rejection is the plugin's own ErrorObj answer —
+  // always a real failure.
+  let healthArmed = true;
+  await run("health", async () => {
+    const snap = await within(
+      health().catch((e: unknown) => {
+        const o = e as { code?: unknown } | null;
+        if (o && typeof o === "object" && typeof o.code === "number") throw e;
+        healthArmed = false;
+        return null;
+      }),
+      15_000,
+      "health",
+    );
+    if (snap === null) return;
+    if (snap.version !== 1)
+      throw new Error(`health version ${JSON.stringify(snap.version)}, expected 1`);
+    if (snap.state !== "ready") throw new Error(`state "${snap.state}", expected "ready"`);
+    if (snap.liveness.transport !== "ok")
+      throw new Error(`liveness.transport "${snap.liveness.transport}", expected "ok"`);
+    if (typeof snap.load?.tasks !== "number")
+      throw new Error("health snapshot carries no load block");
+    // `self` is the calling window's own row — "main" here; null only
+    // when the deployment runs without per-window fairness (§4).
+    if (snap.self !== null && snap.self.window !== "main")
+      throw new Error(
+        `health self named window ${JSON.stringify(snap.self.window)}, expected "main"`,
+      );
+    // The event half: subscribe + unlisten through the real bridge must
+    // complete cleanly. A steady-state runtime emits nothing (events
+    // fire on verdict transitions only), so no payload is observable
+    // here — shape is covered by the Rust runtime_health suite.
+    const unlisten = await within(onHealth(() => {}), 15_000, "onHealth subscribe");
+    await unlisten();
+  });
+  if (!healthArmed && checks["health"] === "ok")
+    checks["health"] = "skipped: resolved plugin predates python_health";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
