@@ -444,6 +444,28 @@ jobs:
           @expose
           def fn_permissions_fixture() -> None:
               return None
+
+
+          # Per-window fairness self-test (decisions 0005): `hold`
+          # occupies a task slot until cancelled; `holds_active` is the
+          # rendezvous win-b polls before probing its own share.
+          _holds_active = 0
+
+
+          @expose
+          async def hold(seconds: float = 30.0) -> str:
+              global _holds_active
+              _holds_active += 1
+              try:
+                  await asyncio.sleep(seconds)
+                  return "held"
+              finally:
+                  _holds_active -= 1
+
+
+          @expose
+          def holds_active() -> int:
+              return _holds_active
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a
@@ -530,9 +552,11 @@ jobs:
             # bridge (Tauri ACL, event routing): typed call, ordered stream,
             # cancellation. Exit code 0 only if all pass.
             echo "── webview self-test: deb"
-            PYLAIR_SELF_TEST_WEBVIEW=1 timeout 120 xvfb-run -a /r/usr/bin/$APP_BIN | tee /tmp/wst-deb.log
+            # PYLAIR_MAX_TASKS=4 keeps the window-fairness flood small
+            # (main's ceiling is 3 of 4 with two live windows).
+            PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/$APP_BIN | tee /tmp/wst-deb.log
             echo "── webview self-test: appimage"
-            PYLAIR_SELF_TEST_WEBVIEW=1 timeout 120 xvfb-run -a ./squashfs-root/AppRun | tee /tmp/wst-appimage.log
+            PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a ./squashfs-root/AppRun | tee /tmp/wst-appimage.log
             # --local legs always resolve a crate with stderr scoping and
             # the fixture is always appended above — a "skipped" verdict
             # here means the probe silently stopped running. Skips are
@@ -557,7 +581,7 @@ jobs:
           env -i HOME="$HOME" PATH=/usr/bin:/bin "$APP/Contents/MacOS/$APP_BIN" --self-test
           env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_GUI=1 "$APP/Contents/MacOS/$APP_BIN"
           # Webview self-test through the real bridge, run from outside the checkout.
-          cd /tmp && env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 "$GITHUB_WORKSPACE/$APP_DIR/$APP/Contents/MacOS/$APP_BIN" | tee /tmp/wst.log
+          cd /tmp && env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 "$GITHUB_WORKSPACE/$APP_DIR/$APP/Contents/MacOS/$APP_BIN" | tee /tmp/wst.log
           # --local always resolves a crate with stderr scoping — a
           # "skipped" verdict here means the probe silently stopped
           # running (legitimate only on pack/registry legs).
@@ -591,6 +615,7 @@ jobs:
           # and the stderr-delivery skip-check can read it (a GUI exe's
           # output otherwise never reaches the runner log).
           $env:PYLAIR_SELF_TEST_WEBVIEW = '1'
+          $env:PYLAIR_MAX_TASKS = '4'
           $out = Join-Path $env:TEMP 'wst-out.txt'
           $err = Join-Path $env:TEMP 'wst-err.txt'
           $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP `
@@ -608,6 +633,7 @@ jobs:
           # WindowDestroyed on the main thread — the rc.3 window-close panic
           # was found by manual dogfood; cover it in CI on every leg.
           $env:PYLAIR_SELF_TEST_WEBVIEW = $null
+          $env:PYLAIR_MAX_TASKS = $null
           $env:PYLAIR_SELF_TEST_WINDOW_CLOSE = '1'
           $wc = Start-Process -FilePath $exe.FullName -PassThru
           if (-not $wc.WaitForExit(120000)) { $wc.Kill(); Write-Error 'window-close self-test timed out'; exit 1 }

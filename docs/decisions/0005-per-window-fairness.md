@@ -1,8 +1,11 @@
 # 0005: Per-window fairness for runtime limits
 
-Status: accepted (2026-11-20; reservation model revised after review).
-This spike carried no implementation; `tests/window_fairness.rs` is
-throwaway proof the starvation is real and deterministic.
+Status: accepted, implemented (PRs #111-#114, #115; the spike's
+reservation model was revised after review). The spike's
+`tests/window_fairness.rs` grew into the implementation's regression
+suite; the installed two-window self-test proves the real-webview path
+(win-b subscribes through `WindowRegistry`, joins the live set and gets
+its share).
 
 ## Question
 
