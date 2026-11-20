@@ -19,6 +19,7 @@ import {
   type WrapFramework,
 } from "./scaffold.js";
 import { detectProcessCaps, type Caps } from "./ui/caps.js";
+import { Ui, paint } from "./ui/index.js";
 import { PromptCancelled, askSelect, askText, interactive, type PromptIo } from "./ui/prompts.js";
 import { scaffolderVersion } from "./version.js";
 import { wordmark } from "./wordmark.js";
@@ -109,7 +110,7 @@ export async function run(argv: string[], io: RunIo): Promise<number> {
         { value: "streamlit", label: "Streamlit" },
       ]);
 
-    return scaffold(name, mode, framework, argv, io, cwd, fail);
+    return scaffold(name, mode, framework, argv, io, cwd, caps, fail);
   } catch (e) {
     if (e instanceof PromptCancelled) {
       out("cancelled.");
@@ -159,6 +160,7 @@ function scaffold(
   argv: string[],
   io: RunIo,
   cwd: string,
+  caps: Caps,
   fail: (msg: string) => number,
 ): number {
   const identifier = argValue(argv, "--identifier") ?? `com.example.${name.replace(/-/g, "")}`;
@@ -190,25 +192,31 @@ function scaffold(
   if (!statSync(join(dest, "src-tauri/tauri.conf.json")).isFile())
     return fail("template produced no tauri.conf.json (internal error)");
 
-  io.output.write(
-    mode === "wrap"
-      ? `Created ${name}/ (wrap, ${framework})\n\n` +
-          `Next:\n` +
-          `  cd ${name}\n` +
-          `  npm install         # or pnpm install\n` +
-          `  uv sync             # python env (https://docs.astral.sh/uv/)\n` +
-          `  npx pylair dev      # your web app in a native window, with reload\n` +
-          `  npx pylair build    # native installer with bundled python\n` +
-          `  npx pylair doctor   # diagnose environment any time\n\n`
-      : `Created ${name}/ (bridge)\n\n` +
-          `Next:\n` +
-          `  cd ${name}\n` +
-          `  npm install         # or pnpm install\n` +
-          `  uv sync             # python env (https://docs.astral.sh/uv/)\n` +
-          `  npx pylair dev      # supervised dev: python hot reload + vite\n` +
-          `                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n` +
-          `  npx pylair build    # native installer with bundled python\n` +
-          `  npx pylair doctor   # diagnose environment any time\n\n`,
-  );
+  // The outro prints through the shared ui: a success line, then the Next
+  // commands with the command accented and the comment muted. Plain caps
+  // leave every byte of the block it has always printed.
+  const u = new Ui(caps, { out: (s) => io.output.write(s), err: (s) => io.error.write(s) });
+  const next: [cmd: string, note: string][] = [
+    [`cd ${name}`, ""],
+    ["npm install", "# or pnpm install"],
+    ["uv sync", "# python env (https://docs.astral.sh/uv/)"],
+    [
+      "npx pylair dev",
+      mode === "wrap" ? "# your web app in a native window, with reload" : "# supervised dev: python hot reload + vite",
+    ],
+    ...(mode === "wrap" ? [] : ([["", "# (pnpm users: pnpm pylair dev / pnpm pylair build)"]] as [string, string][])),
+    ["npx pylair build", "# native installer with bundled python"],
+    ["npx pylair doctor", "# diagnose environment any time"],
+  ];
+  u.ok(`Created ${name}/ (${mode === "wrap" ? `wrap, ${framework}` : "bridge"})`);
+  u.line();
+  u.line(paint(caps, "bold", "Next:"));
+  for (const [cmd, note] of next)
+    u.line(
+      note
+        ? `  ${paint(caps, "accent", cmd.padEnd(20))}${paint(caps, "muted", note)}`
+        : `  ${paint(caps, "accent", cmd)}`,
+    );
+  u.line();
   return 0;
 }

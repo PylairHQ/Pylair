@@ -208,6 +208,71 @@ describe("interactive prompts fill only the missing answers", () => {
   });
 });
 
+describe("the finished output matches the console", () => {
+  test("fancy: resolved prompt lines and a styled outro", async () => {
+    const cwd = tmp();
+    const p = io({ cwd, tty: true, caps: FANCY });
+    drive(p, [
+      { when: /project name/, send: "f-app\n" },
+      { when: /what are you building\?/, send: "\r" }, // first option: bridge
+    ]);
+    assert.equal(await run([], p), 0);
+    const shown = p.plain();
+    // every answered prompt resolves the same way: mark, label, answer
+    assert.match(shown, /✔ project name: f-app/);
+    assert.match(shown, /✔ what are you building\? a new UI that calls Python/);
+    assert.doesNotMatch(shown, /\?:/, "a label ending in '?' gains no colon");
+    assert.match(shown, /✔ Created f-app\/ \(bridge\)/);
+    // styled outro: commands in accent, comments muted, a bold Next header
+    const raw = p.text();
+    assert.match(raw, /\u001b\[36m *npm install/);
+    assert.match(raw, /\u001b\[90m# or pnpm install\u001b\[39m/);
+    assert.match(raw, /\u001b\[1mNext:\u001b\[22m/);
+  });
+
+  test("fancy ASCII: the same flow in the [ok] symbol set, no non-ASCII bytes", async () => {
+    const cwd = tmp();
+    const p = io({ cwd, tty: true, caps: FANCY_ASCII });
+    drive(p, [
+      { when: /project name/, send: "a-app\n" },
+      { when: /what are you building\?/, send: "\r" },
+    ]);
+    assert.equal(await run([], p), 0);
+    const shown = p.plain();
+    assert.match(shown, /\[ok\] project name: a-app/);
+    assert.match(shown, /\[ok\] what are you building\? a new UI that calls Python/);
+    assert.match(shown, /\[ok\] Created a-app\/ \(bridge\)/);
+    for (const ch of p.text())
+      assert.ok(ch.codePointAt(0) < 128, `non-ASCII byte in ASCII output: ${JSON.stringify(ch)}`);
+  });
+
+  test("plain TTY: numbered select, resolved lines, and the legacy outro verbatim", async () => {
+    const cwd = tmp();
+    const p = io({ cwd, tty: true, caps: PLAIN });
+    drive(p, [
+      { when: /project name/, send: "p-app\n" },
+      { when: /choose 1-2/, send: "1\n" }, // first option: bridge
+    ]);
+    assert.equal(await run([], p), 0);
+    const shown = p.plain();
+    assert.match(shown, /1\) a new UI that calls Python/);
+    // askText: no resolved line in plain mode - the typed answer is already on screen
+    assert.equal(p.text().split("project name: p-app").length - 1, 1);
+    assert.match(shown, /\[ok\] what are you building\? a new UI that calls Python/);
+    const tail =
+      "Created p-app/ (bridge)\n\n" +
+      "Next:\n" +
+      "  cd p-app\n" +
+      "  npm install         # or pnpm install\n" +
+      "  uv sync             # python env (https://docs.astral.sh/uv/)\n" +
+      "  npx pylair dev      # supervised dev: python hot reload + vite\n" +
+      "                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n" +
+      "  npx pylair build    # native installer with bundled python\n" +
+      "  npx pylair doctor   # diagnose environment any time\n\n";
+    assert.ok(p.text().endsWith(tail), "plain mode keeps the block byte for byte");
+  });
+});
+
 describe("Ctrl+C at any prompt exits cleanly and writes nothing", () => {
   test("cancelled at the name prompt", async () => {
     const cwd = tmp();
