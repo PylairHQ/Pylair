@@ -16,7 +16,8 @@ import {
 } from "../dist/wrapconfig.js";
 import { commandModule, smokeImports, STAGED_APP } from "../dist/wrapbuild.js";
 import { parseWrapArgs, parseBuildArgs } from "../dist/cli.js";
-import { initWrap, inferFramework, requirementsToDependencies, wrapToml, NO_MANIFEST_HELP } from "../dist/wrap.js";
+import { initWrap, inferFramework, requirementsToDependencies, splitCmd, wrapToml, NO_MANIFEST_HELP } from "../dist/wrap.js";
+import { PromptCancelled } from "../dist/ui/prompts.js";
 import { wrapChecks } from "../dist/doctor.js";
 import { build } from "../dist/build.js";
 
@@ -372,6 +373,86 @@ describe("pylair wrap: initialising a project", () => {
       assert.ok(existsSync(join(d, f)), `missing ${f}`);
     const cargo = readFileSync(join(d, "src-tauri/Cargo.toml"), "utf-8");
     assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.17"/);
+  });
+
+  test("an uninferred framework is asked for on a TTY, then its entry file", async () => {
+    const d = tmp("promptfw");
+    writeFileSync(join(d, "pyproject.toml"), '[project]\nname = "a"\nversion = "0"\ndependencies = ["fastapi>=0.115"]\n');
+    writeFileSync(join(d, "app.py"), "import gradio\n");
+    let askedFramework = false;
+    let askedEntry = false;
+    const r = await withEnv(() =>
+      initWrap({
+        appDir: d,
+        chooseFramework: async () => ((askedFramework = true), "gradio"),
+        askEntry: async () => ((askedEntry = true), "app.py"),
+        local: REPO,
+        log: quiet,
+      }),
+    );
+    assert.equal(askedFramework, true, "the framework prompt must run when nothing is inferrable");
+    assert.equal(askedEntry, true, "a non-command framework with no entry must ask for one");
+    assert.equal(r.config.framework, "gradio");
+    assert.equal(r.config.entry, "app.py");
+    assert.match(readFileSync(join(d, "pyproject.toml"), "utf-8"), /framework = "gradio"/);
+  });
+
+  test("a declined framework prompt keeps the flag error", async () => {
+    const d = tmp("decline");
+    writeFileSync(join(d, "pyproject.toml"), '[project]\ndependencies = ["fastapi"]\n');
+    await assert.rejects(
+      initWrap({ appDir: d, chooseFramework: async () => undefined, log: quiet }),
+      /pass --framework command\|gradio\|streamlit/,
+    );
+    assert.deepEqual(readdirSync(d), ["pyproject.toml"], "nothing may be written");
+  });
+
+  test("a cancelled prompt throws PromptCancelled before any file is written", async () => {
+    const d = tmp("cancelwrap");
+    writeFileSync(join(d, "pyproject.toml"), '[project]\ndependencies = ["fastapi"]\n');
+    await assert.rejects(
+      initWrap({
+        appDir: d,
+        chooseFramework: async () => {
+          throw new PromptCancelled();
+        },
+        log: quiet,
+      }),
+      PromptCancelled,
+    );
+    assert.deepEqual(readdirSync(d), ["pyproject.toml"], "Ctrl+C must write nothing");
+  });
+
+  test("a prompted command framework is asked for its server argv, not an entry", async () => {
+    const d = tmp("cmdprompt");
+    writeFileSync(join(d, "pyproject.toml"), '[project]\ndependencies = ["fastapi"]\n');
+    let askedEntry = false;
+    const r = await withEnv(() =>
+      initWrap({
+        appDir: d,
+        chooseFramework: async () => "command",
+        askEntry: async () => ((askedEntry = true), undefined),
+        askCmd: async () => ["python", "-m", "srv", "--port", "{port}"],
+        local: REPO,
+        log: quiet,
+      }),
+    );
+    assert.equal(askedEntry, false, "command mode runs a server argv, not an entry file");
+    assert.equal(r.config.framework, "command");
+    assert.deepEqual(r.config.cmd, ["python", "-m", "srv", "--port", "{port}"]);
+    assert.match(readFileSync(join(d, "pyproject.toml"), "utf-8"), /cmd = \[/);
+  });
+
+  test("splitCmd honors quoting and whitespace", () => {
+    assert.deepEqual(splitCmd("python -m uvicorn main:app --port {port}"), [
+      "python", "-m", "uvicorn", "main:app", "--port", "{port}",
+    ]);
+    assert.deepEqual(splitCmd('python "dir with space/app.py" --flag'), [
+      "python", "dir with space/app.py", "--flag",
+    ]);
+    assert.deepEqual(splitCmd("  uvicorn   main:app  "), ["uvicorn", "main:app"]);
+    assert.deepEqual(splitCmd('run "" now'), ["run", "", "now"]);
+    assert.deepEqual(splitCmd(""), []);
   });
 
   test("the CLI command itself: exit codes and messages", () => {

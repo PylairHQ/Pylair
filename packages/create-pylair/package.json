@@ -31,7 +31,9 @@
     "LICENSE-APACHE"
   ],
   "scripts": {
+    "prebuild": "node scripts/sync-ui.mjs",
     "build": "tsc -p tsconfig.json",
+    "pretypecheck": "node scripts/sync-ui.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "pnpm build",
     "test": "node --test"

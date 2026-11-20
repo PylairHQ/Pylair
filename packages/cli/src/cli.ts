@@ -13,6 +13,7 @@ import { dev } from "./dev.js";
 import { doctor } from "./doctor.js";
 import { loadManifest } from "./manifest.js";
 import { initUi, ui } from "./ui/index.js";
+import { PromptCancelled } from "./ui/prompts.js";
 import { initWrap } from "./wrap.js";
 import { WRAP_FRAMEWORKS, type WrapFramework } from "./wrapconfig.js";
 import { cliVersion } from "./version.js";
@@ -280,7 +281,10 @@ export function main(rawArgv: string[]): number | Promise<number> {
       local: p.local,
     }).then(
       () => 0,
-      (e) => failed(command, e),
+      (e) =>
+        e instanceof PromptCancelled
+          ? (ui.line("cancelled."), 130)
+          : failed(command, e),
     );
   }
   if (command === "codegen") {

@@ -37,7 +37,47 @@ export function wrapUnavailable(local: string | undefined): string | undefined {
   );
 }
 
-export function substitutions(name: string, identifier: string, local?: string): Record<string, string> {
+export const WRAP_FRAMEWORKS = ["command", "gradio", "streamlit"] as const;
+export type WrapFramework = (typeof WRAP_FRAMEWORKS)[number];
+
+/** What a wrap-mode app needs per framework: the extra dependencies
+ * (pyproject and requirements.txt), the `[tool.pylair.wrap]` config line,
+ * and the sample app file for non-command frameworks (templates/wrap/
+ * variants/<sample> is written to app/app.py instead of app/main.py). The
+ * pins match scripts/wrap-acceptance/prepare.mjs, which turns the same
+ * scaffold into the acceptance app. */
+export interface WrapApp {
+  deps: string[];
+  reqs: string[];
+  run: string;
+  sample?: string;
+}
+export const WRAP_APPS: Record<WrapFramework, WrapApp> = {
+  command: {
+    deps: ['"fastapi>=0.115"', '"uvicorn>=0.30"'],
+    reqs: ["fastapi>=0.115", "uvicorn>=0.30"],
+    run: 'cmd = ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "{port}"]',
+  },
+  gradio: {
+    deps: ['"gradio>=5,<6"'],
+    reqs: ["gradio>=5,<6"],
+    run: 'entry = "app.py"',
+    sample: "gradio.py",
+  },
+  streamlit: {
+    deps: ['"streamlit>=1,<2"'],
+    reqs: ["streamlit>=1,<2"],
+    run: 'entry = "app.py"',
+    sample: "streamlit.py",
+  },
+};
+
+export function substitutions(
+  name: string,
+  identifier: string,
+  local?: string,
+  framework: WrapFramework = "command",
+): Record<string, string> {
   const snake = name.replace(/-/g, "_").replace(/\W/g, "_");
   const subs: Record<string, string> = {
     __APP_NAME__: name,
@@ -60,6 +100,11 @@ export function substitutions(name: string, identifier: string, local?: string):
     subs.__PYLAIR_CLI__ = PINS.cli;
     subs.__PYLAIR_RS__ = PINS.rs;
   }
+  const app = WRAP_APPS[framework];
+  subs.__WRAP_FRAMEWORK__ = framework;
+  subs.__WRAP_RUN__ = app.run;
+  subs.__WRAP_DEPS__ = [`"${subs.__PYLAIR_PY__}"`, ...app.deps].join(", ");
+  subs.__WRAP_REQS__ = [subs.__PYLAIR_PY__, ...app.reqs].join("\n");
   return subs;
 }
 
