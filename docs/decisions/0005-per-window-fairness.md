@@ -99,20 +99,26 @@ and the queue is the Handle/actor boundary:
   `window_share` and never occupies a slot.
 - **In-queue release (actor side).** The actor decrements at every point
   `cmd_rx.recv()` returns `Some(_)`: the `select!` arm in
-  `run_child` (`run.rs:485`), `sleep_or_shutdown` (`run.rs:310`),
-  `park_failed` (`run.rs:424`). Three sites, all enumerated today.
-  `fail_command_fast` commands release the same way.
+  `run_child` (`run.rs:510`), `sleep_or_shutdown` (`run.rs:316`),
+  `park_failed` (`run.rs:433`), and `await_ready`
+  (`run/handshake.rs:169` - the Web-kind ready wait also serves the
+  channel and fail-fasts what it dequeues; missed in the first
+  enumeration, found by the PR 1 implementation). Four sites, all
+  enumerated today. `fail_command_fast` commands release the same way.
 - **In-flight admission (actor side).** The task cap lives in
   `Session::call`/`call_stream`, which already sees `owner`. Maintain a
   per-owner `in_flight` count alongside `self.tasks` - increment on
   `tasks.insert`, decrement on the three `tasks.remove` sites
-  (`session.rs:185`, `:313`; `run.rs:584` in `drain_exited_inbox`).
+  (`session.rs:192`, `:322`; `run.rs:610` in `drain_exited_inbox`).
 - **In-flight release on generation end.** `self.tasks` is per-session;
   a crash, wedge, dev restart or shutdown drops the whole map. The
-  per-owner counts must zero with it - one sweep in `run_child`
-  teardown. (This is the subtle one: shared-map counters would leak
-  across generations without it; counters maintained inside `Session`
-  die with the map for free.)
+  per-owner counts must zero with it - `Session::drop` sweeps
+  `in_flight` at teardown, not at the next `Session::new`, so a dead
+  generation's counts never survive into the restart backoff. Stale
+  `in_flight` would otherwise keep the `None` bucket live and shrink
+  the crashed owner's own reservation (its `in_use` reads high, so
+  `max(0, min_reserve - in_use)` reads low) - the unsafe direction for
+  any ceiling check a caller could hit during the backoff.
 - **Window close.** `WindowEvent::Destroyed` -> `cancel_owner`
   (`builder.rs:288`) -> tasks leave via the normal remove sites; nothing
   new needed. The window's queued commands drain and register, then the
@@ -325,7 +331,7 @@ Implementation PRs add, all under the revised formula:
    startup log. No enforcement yet - counters only, tests cover
    join/leave/reset and the `None` bucket's transient liveness.
 2. **Queue admission.** `in_queue` on Call/CallStream (+release at the
-   three `cmd_rx.recv()` sites); `window_share` error; the queue-flood
+   four `cmd_rx.recv()` sites); `window_share` error; the queue-flood
    test.
 3. **Task/stream admission.** Per-owner `in_flight` inside `Session`
    (dies with the generation), tasks + streams ceilings under the
