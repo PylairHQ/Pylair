@@ -39,18 +39,35 @@ impl Session<'_> {
             )));
             return ControlFlow::Continue(());
         }
-        // Per-window share (decisions 0005, PR 3): a global check
+        // Per-window share (decisions 0005, PR 3/4): a global check
         // stays the refusal when the GLOBAL is the binding cap; the
-        // share check adds the refusal when this owner's ceiling is.
-        // The actor is single-threaded and no await sits between here
-        // and `tasks.insert`, so check and charge cannot interleave.
-        if let Err(ceiling) = self.sup.fair.lock().unwrap().check_share(
-            &owner,
-            Resource::Tasks,
-            lim.max_concurrent_tasks,
-        ) {
-            let _ = respond.send(Err(share_err("task slots", ceiling, &owner)));
-            return ControlFlow::Continue(());
+        // share check adds the refusal when this owner's ceiling is -
+        // task slots for every call, isolated slots additionally when
+        // the manifest names the fn isolated. The actor is
+        // single-threaded and no await sits between here and
+        // `tasks.insert`, so check and charge cannot interleave.
+        let is_isolated = self
+            .sup
+            .fn_kinds
+            .get(&fn_name)
+            .is_some_and(|k| k == "isolated");
+        {
+            let f = self.sup.fair.lock().unwrap();
+            let share = f
+                .check_share(&owner, Resource::Tasks, lim.max_concurrent_tasks)
+                .map_err(|c| share_err("task slots", c, &owner))
+                .and_then(|()| {
+                    if is_isolated {
+                        f.check_share(&owner, Resource::Isolated, lim.max_isolated_workers)
+                            .map_err(|c| share_err("isolated workers", c, &owner))
+                    } else {
+                        Ok(())
+                    }
+                });
+            if let Err(e) = share {
+                let _ = respond.send(Err(e));
+                return ControlFlow::Continue(());
+            }
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
@@ -65,13 +82,18 @@ impl Session<'_> {
                 let _ = task_out.send(task);
                 self.pending.insert(id, PendingKind::Call(respond));
                 self.task_of_call.insert(id, task);
-                self.sup.fair.lock().unwrap().note_started(&owner, false);
+                self.sup
+                    .fair
+                    .lock()
+                    .unwrap()
+                    .note_started(&owner, false, is_isolated);
                 self.tasks.insert(
                     task,
                     TaskMeta {
                         call_id: id,
                         owner,
                         is_stream: false,
+                        is_isolated,
                         credit: 0,
                     },
                 );
@@ -138,11 +160,18 @@ impl Session<'_> {
                 return ControlFlow::Continue(());
             }
         }
-        // Per-window share (decisions 0005, PR 3): task slots for every
-        // call, stream slots additionally for a streaming one. Global
-        // checks above stay the refusal when the GLOBAL is the binding
-        // cap; check_share adds the refusal when this owner's ceiling
-        // is. No await between here and `tasks.insert`.
+        // Per-window share (decisions 0005, PR 3/4): task slots for
+        // every call, stream slots additionally for a streaming one,
+        // isolated slots additionally when the manifest names the fn
+        // isolated. Global checks above stay the refusal when the
+        // GLOBAL is the binding cap; check_share adds the refusal when
+        // this owner's ceiling is. No await between here and
+        // `tasks.insert`.
+        let is_isolated = self
+            .sup
+            .fn_kinds
+            .get(&fn_name)
+            .is_some_and(|k| k == "isolated");
         {
             let share = {
                 let f = self.sup.fair.lock().unwrap();
@@ -152,6 +181,14 @@ impl Session<'_> {
                         if is_stream {
                             f.check_share(&owner, Resource::Streams, lim.max_concurrent_streams)
                                 .map_err(|c| share_err("stream slots", c, &owner))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .and_then(|()| {
+                        if is_isolated {
+                            f.check_share(&owner, Resource::Isolated, lim.max_isolated_workers)
+                                .map_err(|c| share_err("isolated workers", c, &owner))
                         } else {
                             Ok(())
                         }
@@ -204,13 +241,14 @@ impl Session<'_> {
                     .fair
                     .lock()
                     .unwrap()
-                    .note_started(&owner, is_stream);
+                    .note_started(&owner, is_stream, is_isolated);
                 self.tasks.insert(
                     task,
                     TaskMeta {
                         call_id: id,
                         owner,
                         is_stream,
+                        is_isolated,
                         credit: if is_stream {
                             self.sup.config.initial_stream_credit
                         } else {

@@ -557,24 +557,29 @@ enforced per runtime on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the
 effective set is logged at startup.
 
-Three caps are additionally split per caller (per-window fairness,
-decisions 0005): `max_queued_commands`, `max_concurrent_tasks`, and
-`max_concurrent_streams`. While other live windows hold fewer than
-their guaranteed minimum, a caller that reaches its share ceiling has
-new `call`/`callStream` requests refused *before anything is
-committed*: before the command enters the queue for the queue cap,
-and before a task id or stream slot is allocated for the task and
-stream caps. The error carries
+Four caps are additionally split per caller (per-window fairness,
+decisions 0005): `max_queued_commands`, `max_concurrent_tasks`,
+`max_concurrent_streams`, and `max_isolated_workers`. While other live
+windows hold fewer than their guaranteed minimum, a caller that reaches
+its share ceiling has new `call`/`callStream` requests refused *before
+anything is committed*: before the command enters the queue for the
+queue cap, and before a task id or stream slot is allocated for the
+task, stream, and isolated-worker caps. The error carries
 `data: {"limit": "window_share", "max": <ceiling>, "window": "<label>"}`.
 `window` is the webview label, or `null` for host-side callers, which
 follow the same rule only while they hold queued or in-flight work. A
 caller alone keeps each entire resource and still sees
 `"max_queued_commands"` / `"max_concurrent_tasks"` /
-`"max_concurrent_streams"` at the global cap; the check is
-admission-only, so work already queued or running is unaffected, and
-`PYLAIR_PER_WINDOW_FAIRNESS=0` disables it. This is host-side behavior
-and does not change the wire protocol; isolated-worker slots remain
-per-runtime until the rest of decisions 0005 lands.
+`"max_concurrent_streams"` at the global cap. For isolated workers the
+host adds no global cap of its own: which functions count comes from
+the runtime's `exposes` manifest each generation (an undeclared
+function counts as non-isolated), and Python's `max_isolated_workers`
+remains the authoritative global backstop, so a lone caller's outcome
+is unchanged. The check is admission-only, so work already queued or
+running is unaffected, and `PYLAIR_PER_WINDOW_FAIRNESS=0` disables it.
+This is host-side behavior and does not change the wire protocol;
+`stream_buffer_bytes_total` stays a global backstop by design
+(decisions 0005 §5.1).
 
 `PERMISSION_DENIED` is raised by the host's `python_call` and
 `python_call_stream` commands when the calling window's capability scope

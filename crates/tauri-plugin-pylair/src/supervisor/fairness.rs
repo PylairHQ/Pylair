@@ -45,6 +45,9 @@ struct Counts {
     /// `max_concurrent_streams` as well as `max_concurrent_tasks`, so
     /// they need their own per-owner count.
     in_flight_streams: u64,
+    /// Of the `in_flight` tasks, how many are isolated workers - the
+    /// per-owner count behind the `max_isolated_workers` share.
+    in_flight_isolated: u64,
 }
 
 /// Which counter feeds `in_use` for a ceiling check.
@@ -59,6 +62,10 @@ pub(crate) enum Resource {
     /// In-flight streaming tasks: a subset of `Tasks`, split because
     /// `max_concurrent_streams` binds streams separately.
     Streams,
+    /// In-flight isolated-worker tasks: a subset of `Tasks` counted
+    /// per owner against `max_isolated_workers` (the Python-side cap
+    /// stays the global backstop; there is no separate host global).
+    Isolated,
 }
 
 #[derive(Debug)]
@@ -145,21 +152,35 @@ impl Fairness {
         }
     }
 
-    /// The actor registered a task (`tasks.insert`). `is_stream` comes
-    /// from `TaskMeta` so the stream cap's per-owner count stays exact.
-    pub(crate) fn note_started(&mut self, owner: &Option<String>, is_stream: bool) {
+    /// The actor registered a task (`tasks.insert`). `is_stream` /
+    /// `is_isolated` come from `TaskMeta` so each cap's per-owner
+    /// count stays exact.
+    pub(crate) fn note_started(
+        &mut self,
+        owner: &Option<String>,
+        is_stream: bool,
+        is_isolated: bool,
+    ) {
         if self.enabled {
             let c = self.owners.entry(owner.clone()).or_default();
             c.in_flight += 1;
             if is_stream {
                 c.in_flight_streams += 1;
             }
+            if is_isolated {
+                c.in_flight_isolated += 1;
+            }
         }
     }
 
     /// The actor removed a task (`tasks.remove`) - finished, cancelled,
     /// reaped, or drained from a dead inbox.
-    pub(crate) fn note_finished(&mut self, owner: &Option<String>, is_stream: bool) {
+    pub(crate) fn note_finished(
+        &mut self,
+        owner: &Option<String>,
+        is_stream: bool,
+        is_isolated: bool,
+    ) {
         if self.enabled {
             // A task leaving must have been counted in; a silent
             // underflow would over-admit under PR 2 enforcement.
@@ -175,6 +196,13 @@ impl Fairness {
                     "in_flight_streams double release: {owner:?}"
                 );
                 c.in_flight_streams = c.in_flight_streams.saturating_sub(1);
+            }
+            if is_isolated {
+                debug_assert!(
+                    c.in_flight_isolated > 0,
+                    "in_flight_isolated double release: {owner:?}"
+                );
+                c.in_flight_isolated = c.in_flight_isolated.saturating_sub(1);
             }
             self.prune(owner);
         }
@@ -195,9 +223,11 @@ impl Fairness {
         for c in self.owners.values_mut() {
             c.in_flight = 0;
             c.in_flight_streams = 0;
+            c.in_flight_isolated = 0;
         }
-        self.owners
-            .retain(|_, c| c.in_queue > 0 || c.in_flight > 0 || c.in_flight_streams > 0);
+        self.owners.retain(|_, c| {
+            c.in_queue > 0 || c.in_flight > 0 || c.in_flight_streams > 0 || c.in_flight_isolated > 0
+        });
     }
 
     /// Membership: a webview is live while subscribed; the host bucket
@@ -225,6 +255,7 @@ impl Fairness {
             Resource::Queue => c.in_queue,
             Resource::Tasks => c.in_flight,
             Resource::Streams => c.in_flight_streams,
+            Resource::Isolated => c.in_flight_isolated,
         }) as usize
     }
 
@@ -274,11 +305,12 @@ impl Fairness {
     }
 
     fn prune(&mut self, owner: &Option<String>) {
-        if self
-            .owners
-            .get(owner)
-            .is_some_and(|c| c.in_queue == 0 && c.in_flight == 0 && c.in_flight_streams == 0)
-        {
+        if self.owners.get(owner).is_some_and(|c| {
+            c.in_queue == 0
+                && c.in_flight == 0
+                && c.in_flight_streams == 0
+                && c.in_flight_isolated == 0
+        }) {
             self.owners.remove(owner);
         }
     }
@@ -296,6 +328,7 @@ impl Fairness {
                 in_queue: c.in_queue,
                 in_flight: c.in_flight,
                 in_flight_streams: c.in_flight_streams,
+                in_flight_isolated: c.in_flight_isolated,
                 live: self.is_live(owner),
             });
         }
@@ -307,6 +340,7 @@ impl Fairness {
                     in_queue: 0,
                     in_flight: 0,
                     in_flight_streams: 0,
+                    in_flight_isolated: 0,
                     live: true,
                 });
             }
@@ -360,6 +394,8 @@ pub struct OwnerUsage {
     pub in_flight: u64,
     /// Of `in_flight`, how many are streams.
     pub in_flight_streams: u64,
+    /// Of `in_flight`, how many are isolated workers.
+    pub in_flight_isolated: u64,
     /// Membership at snapshot time: a window while subscribed, the
     /// host bucket only while it holds work.
     pub live: bool,
@@ -390,6 +426,15 @@ impl FairnessSnapshot {
             .iter()
             .find(|o| o.owner.as_deref() == owner)
             .map(|o| o.in_flight_streams)
+            .unwrap_or(0)
+    }
+
+    /// In-flight isolated workers for `owner`; 0 when absent.
+    pub fn isolated_usage(&self, owner: Option<&str>) -> u64 {
+        self.owners
+            .iter()
+            .find(|o| o.owner.as_deref() == owner)
+            .map(|o| o.in_flight_isolated)
             .unwrap_or(0)
     }
 
@@ -495,9 +540,9 @@ mod tests {
         f.admit_queue(&None);
         assert!(f.is_live(&None), "queued host work makes it live");
         f.release_queue(&None);
-        f.note_started(&None, false);
+        f.note_started(&None, false, false);
         assert!(f.is_live(&None), "in-flight host work keeps it live");
-        f.note_finished(&None, false);
+        f.note_finished(&None, false, false);
         assert!(!f.is_live(&None), "idle again -> not live, pruned");
         assert!(!f.owners.contains_key(&None));
     }
@@ -511,7 +556,7 @@ mod tests {
         let main = Some("main".to_string());
         assert_eq!(f.ceiling_for(&main, Resource::Tasks, 64), 56);
         // settings now holds 1 in flight: reservation 7 -> ceiling 57
-        f.note_started(&Some("settings".to_string()), false);
+        f.note_started(&Some("settings".to_string()), false, false);
         assert_eq!(f.ceiling_for(&main, Resource::Tasks, 64), 57);
         // a window that left does not reserve
         f.leave_window("settings");
@@ -520,7 +565,7 @@ mod tests {
         // main is under its minimum
         let settings = Some("settings".to_string());
         for _ in 0..56 {
-            f.note_started(&main, false);
+            f.note_started(&main, false, false);
         }
         f.join_window("settings");
         assert_eq!(f.ceiling_for(&settings, Resource::Tasks, 64), 64);
@@ -536,7 +581,7 @@ mod tests {
         assert_eq!(f.ceiling_for(&Some("b".into()), Resource::Queue, 64), 57);
         // a's in-flight work is not queue usage: it must not eat b's
         // queue reservation
-        f.note_started(&Some("a".into()), false);
+        f.note_started(&Some("a".into()), false, false);
         assert_eq!(f.ceiling_for(&Some("b".into()), Resource::Queue, 64), 57);
     }
 
@@ -592,7 +637,7 @@ mod tests {
         // live = 2, cap = 4 -> min_reserve = 1; a's ceiling is 3
         for _ in 0..3 {
             assert_eq!(f.check_share(&a, Resource::Tasks, 4), Ok(()));
-            f.note_started(&a, false);
+            f.note_started(&a, false, false);
         }
         assert_eq!(f.check_share(&a, Resource::Tasks, 4), Err(3));
         // b still fits: a is past its minimum so it reserves nothing
@@ -609,7 +654,7 @@ mod tests {
         let a = Some("a".to_string());
         for _ in 0..4 {
             assert_eq!(f.check_share(&a, Resource::Tasks, 4), Ok(()));
-            f.note_started(&a, false);
+            f.note_started(&a, false, false);
         }
         assert_eq!(f.check_share(&a, Resource::Tasks, 4), Ok(()));
     }
@@ -622,14 +667,14 @@ mod tests {
         let a = Some("a".to_string());
         // live = 2, streams cap = 2 -> min_reserve = 1; a's stream
         // ceiling is 1 while its task ceiling is 3 (cap 4).
-        f.note_started(&a, true);
+        f.note_started(&a, true, false);
         assert_eq!(f.check_share(&a, Resource::Streams, 2), Err(1));
         assert_eq!(f.check_share(&a, Resource::Tasks, 4), Ok(()));
         // A plain task is not stream usage: b's stream ceiling is
         // 2 - (1 - 1) = 2 while a still holds its one stream.
         let b = Some("b".to_string());
         assert_eq!(f.check_share(&b, Resource::Streams, 2), Ok(()));
-        f.note_started(&b, false);
+        f.note_started(&b, false, false);
         assert_eq!(f.check_share(&b, Resource::Streams, 2), Ok(()));
     }
 
@@ -637,14 +682,14 @@ mod tests {
     fn stream_counts_survive_and_reset_with_the_task_counts() {
         let mut f = on();
         let a = Some("a".to_string());
-        f.note_started(&a, true);
-        f.note_started(&a, false);
+        f.note_started(&a, true, false);
+        f.note_started(&a, false, false);
         assert_eq!(f.owners[&a].in_flight_streams, 1);
-        f.note_finished(&a, true);
+        f.note_finished(&a, true, false);
         assert_eq!(f.owners[&a].in_flight_streams, 0);
         assert_eq!(f.owners[&a].in_flight, 1);
         // A crash zeroes streams with the rest of the generation.
-        f.note_started(&a, true);
+        f.note_started(&a, true, false);
         f.end_generation();
         assert!(
             !f.owners.contains_key(&a),
@@ -656,7 +701,7 @@ mod tests {
     fn end_generation_zeroes_in_flight_only() {
         let mut f = on();
         f.admit_queue(&Some("a".into()));
-        f.note_started(&Some("a".into()), false);
+        f.note_started(&Some("a".into()), false, false);
         f.end_generation();
         let (q, fl) = (
             f.owners[&Some("a".into())].in_queue,
@@ -678,7 +723,7 @@ mod tests {
         };
         f.join_window("a");
         f.admit_queue(&Some("a".into()));
-        f.note_started(&Some("a".into()), false);
+        f.note_started(&Some("a".into()), false, false);
         assert_eq!(f.live_count(), 0);
         assert!(f.snapshot().owners.is_empty());
         assert_eq!(f.check_share(&Some("a".into()), Resource::Tasks, 4), Ok(()));

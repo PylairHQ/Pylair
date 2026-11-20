@@ -202,11 +202,11 @@ impl Session<'_> {
                 }
                 if let Some(task) = self.task_of_call.remove(&id) {
                     if let Some(meta) = self.tasks.remove(&task) {
-                        self.sup
-                            .fair
-                            .lock()
-                            .unwrap()
-                            .note_finished(&meta.owner, meta.is_stream);
+                        self.sup.fair.lock().unwrap().note_finished(
+                            &meta.owner,
+                            meta.is_stream,
+                            meta.is_isolated,
+                        );
                     }
                     if self.done_tasks.len() >= 1024 {
                         self.done_tasks.clear();
@@ -336,11 +336,11 @@ impl Session<'_> {
                             }
                             self.task_of_call.remove(&call_id);
                             if let Some(meta) = self.tasks.remove(&task) {
-                                self.sup
-                                    .fair
-                                    .lock()
-                                    .unwrap()
-                                    .note_finished(&meta.owner, meta.is_stream);
+                                self.sup.fair.lock().unwrap().note_finished(
+                                    &meta.owner,
+                                    meta.is_stream,
+                                    meta.is_isolated,
+                                );
                             }
                             // The stream is over (its terminal was just
                             // delivered): tombstone it like a finished task,
