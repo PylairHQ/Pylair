@@ -9,7 +9,8 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use super::super::handle::{limit_err, CancelOutcome, ShutdownOutcome};
+use super::super::fairness::Resource;
+use super::super::handle::{limit_err, share_err, CancelOutcome, ShutdownOutcome};
 use super::super::spawn::{CTRL_OUT_CAPACITY, FRAME_OUT_CAPACITY};
 use super::super::stream::StreamSink;
 use super::super::wire::{owner_allows, send_ctrl, send_ctrl_flushed, send_frame, SendFail};
@@ -38,6 +39,19 @@ impl Session<'_> {
             )));
             return ControlFlow::Continue(());
         }
+        // Per-window share (decisions 0005, PR 3): a global check
+        // stays the refusal when the GLOBAL is the binding cap; the
+        // share check adds the refusal when this owner's ceiling is.
+        // The actor is single-threaded and no await sits between here
+        // and `tasks.insert`, so check and charge cannot interleave.
+        if let Err(ceiling) = self.sup.fair.lock().unwrap().check_share(
+            &owner,
+            Resource::Tasks,
+            lim.max_concurrent_tasks,
+        ) {
+            let _ = respond.send(Err(share_err("task slots", ceiling, &owner)));
+            return ControlFlow::Continue(());
+        }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
         let mut params = serde_json::json!({"fn": fn_name, "task": task,
@@ -51,7 +65,7 @@ impl Session<'_> {
                 let _ = task_out.send(task);
                 self.pending.insert(id, PendingKind::Call(respond));
                 self.task_of_call.insert(id, task);
-                self.sup.fair.lock().unwrap().note_started(&owner);
+                self.sup.fair.lock().unwrap().note_started(&owner, false);
                 self.tasks.insert(
                     task,
                     TaskMeta {
@@ -124,6 +138,30 @@ impl Session<'_> {
                 return ControlFlow::Continue(());
             }
         }
+        // Per-window share (decisions 0005, PR 3): task slots for every
+        // call, stream slots additionally for a streaming one. Global
+        // checks above stay the refusal when the GLOBAL is the binding
+        // cap; check_share adds the refusal when this owner's ceiling
+        // is. No await between here and `tasks.insert`.
+        {
+            let share = {
+                let f = self.sup.fair.lock().unwrap();
+                f.check_share(&owner, Resource::Tasks, lim.max_concurrent_tasks)
+                    .map_err(|c| share_err("task slots", c, &owner))
+                    .and_then(|()| {
+                        if is_stream {
+                            f.check_share(&owner, Resource::Streams, lim.max_concurrent_streams)
+                                .map_err(|c| share_err("stream slots", c, &owner))
+                        } else {
+                            Ok(())
+                        }
+                    })
+            };
+            if let Err(e) = share {
+                reject_stream(items, task_out, e);
+                return ControlFlow::Continue(());
+            }
+        }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
         let mut params = serde_json::json!({"fn": fn_name, "task": task,
@@ -162,7 +200,11 @@ impl Session<'_> {
                 let _ = task_out.send(Ok(task));
                 self.pending.insert(id, PendingKind::Stream(items));
                 self.task_of_call.insert(id, task);
-                self.sup.fair.lock().unwrap().note_started(&owner);
+                self.sup
+                    .fair
+                    .lock()
+                    .unwrap()
+                    .note_started(&owner, is_stream);
                 self.tasks.insert(
                     task,
                     TaskMeta {

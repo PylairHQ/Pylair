@@ -557,19 +557,23 @@ enforced per runtime on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the
 effective set is logged at startup.
 
-The supervisor command queue is additionally split per caller
-(per-window fairness, decisions 0005): while other live windows hold
-fewer than their guaranteed minimum of `max_queued_commands` slots, a
-caller that reaches its share ceiling has new `call`/`callStream`
-requests refused *before they enter the queue* with
+Three caps are additionally split per caller (per-window fairness,
+decisions 0005): `max_queued_commands`, `max_concurrent_tasks`, and
+`max_concurrent_streams`. While other live windows hold fewer than
+their guaranteed minimum, a caller that reaches its share ceiling has
+new `call`/`callStream` requests refused *before anything is
+committed*: before the command enters the queue for the queue cap,
+and before a task id or stream slot is allocated for the task and
+stream caps. The error carries
 `data: {"limit": "window_share", "max": <ceiling>, "window": "<label>"}`.
 `window` is the webview label, or `null` for host-side callers, which
 follow the same rule only while they hold queued or in-flight work. A
-caller alone keeps the entire queue and still sees
-`"max_queued_commands"` at the global cap; the check is admission-only,
-so commands already queued or running are unaffected, and
+caller alone keeps each entire resource and still sees
+`"max_queued_commands"` / `"max_concurrent_tasks"` /
+`"max_concurrent_streams"` at the global cap; the check is
+admission-only, so work already queued or running is unaffected, and
 `PYLAIR_PER_WINDOW_FAIRNESS=0` disables it. This is host-side behavior
-and does not change the wire protocol; task and stream limits remain
+and does not change the wire protocol; isolated-worker slots remain
 per-runtime until the rest of decisions 0005 lands.
 
 `PERMISSION_DENIED` is raised by the host's `python_call` and

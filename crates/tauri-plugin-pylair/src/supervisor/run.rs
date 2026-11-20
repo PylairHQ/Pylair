@@ -608,7 +608,9 @@ async fn drain_exited_inbox(
         }
         if let Some(task) = task_of_call.remove(&id) {
             if let Some(meta) = tasks.remove(&task) {
-                fair.lock().unwrap().note_finished(&meta.owner);
+                fair.lock()
+                    .unwrap()
+                    .note_finished(&meta.owner, meta.is_stream);
             }
             if done_tasks.len() >= 1024 {
                 done_tasks.clear();
