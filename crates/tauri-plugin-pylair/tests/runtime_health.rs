@@ -103,8 +103,13 @@ while True:
 /// Pongs every ping, but slower than the 50ms tick: each pong lands
 /// just after the NEXT ping went out. The newest ping is in flight,
 /// not missed — the miss count at pong arrival must be 0, not 1.
+/// Pongs every ping but one seq BEHIND: ping seq s gets a pong for
+/// s-1. At every pong arrival the newest queued ping is structurally
+/// a fraction of an interval old — in flight, never missed — no
+/// sleeps, so no runner jitter can flip the verdict (the earlier
+/// sleep-based version flaked on macOS CI with 50ms margins).
 const FAKE_SLOW_PONG: &str = r#"
-import sys, struct, json, time
+import sys, struct, json
 def w(o):
     b = json.dumps(o).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
@@ -115,8 +120,8 @@ while True:
     n, = struct.unpack(">I", h)
     m = json.loads(sys.stdin.buffer.read(n))
     if m["method"] == "ping":
-        time.sleep(0.15)
-        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
+        s = m["params"]["seq"]
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": s - 1 if s else 0, "loop_stale_ms": 0}})
     elif m["method"] == "shutdown":
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
 "#;
@@ -441,22 +446,16 @@ async fn missing_pongs_report_missing_then_kill() {
     );
 }
 
-/// A pong slower than the ping interval still answers every ping: the
-/// ping queued just before it lands is in flight, not missed, so at
-/// the pong the transport verdict is `ok` with `missed_pongs == 0`
-/// (the #120-review counting fix). Between pongs the tick correctly
-/// reports one in-flight miss — the assertion reads the pong-arrival
-/// instant, which `rtt_ms.is_some()` guarantees.
-///
-/// Margins: interval 100ms, pong ~150ms — the next ping is ~50ms old
-/// when the pong lands (in flight, under one interval) and the pong
-/// still answers *after* it went out. Both directions carry ~50ms of
-/// scheduling-jitter headroom; a loaded runner's sleep overshoot
-/// cannot flip the verdict (flaked on macOS CI with 10ms margins).
+/// A pong answering one seq behind still clears the transport: the
+/// ping queued just before it lands is in flight — under one interval
+/// old — not missed, so at the pong the transport verdict is `ok`
+/// with `missed_pongs == 0` (the #120-review counting fix). Between
+/// pongs the tick correctly reports one in-flight miss — the
+/// assertion reads the pong-arrival instant, which `rtt_ms.is_some()`
+/// guarantees.
 #[tokio::test]
 async fn a_pong_after_the_next_ping_is_not_a_miss() {
     let mut c = fast_config();
-    c.ping_interval = Duration::from_millis(100);
     c.missed_pongs_to_kill = 1000; // state may flap; never kill the worker
     let (events, _rx) = mpsc::channel(64);
     let h = spawn_h(spec(FAKE_SLOW_PONG), c, events);
