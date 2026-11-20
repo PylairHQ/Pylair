@@ -1,5 +1,6 @@
-"""Gradio acceptance fixture: the page title is the marker the self-test looks
-for in `GET /` (gradio embeds it in the served config)."""
+# A minimal Gradio app wrapped as a desktop app by Pylair. It exists so
+# `npx pylair dev` opens a real window out of the box; replace it with
+# your own app (the PYLAIR-WRAP-OK title is only a smoke-test marker).
 
 import gradio as gr
 
