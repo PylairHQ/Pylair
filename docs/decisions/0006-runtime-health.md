@@ -26,7 +26,9 @@ with two derived verdicts — `transport: ok|missing` and
 `loop: ok|busy` — plus load totals and **the calling window's own**
 usage and ceilings, never another window's. `url` for the web kind.
 Plus **one** new broadcast event, `pylair://health`, emitted only when
-a verdict changes (justified in §5).
+a verdict changes (justified in §5). And the observer effect is *fixed*,
+not documented: event subscription and fairness liveness are split so
+a state/health poller reserves no capacity (§3; lands as PR 0 in §7).
 
 Scope boundary: this is *host observability of the supervised child*,
 not web-server health — `protocol-v1.md:305` already decides that a
@@ -132,8 +134,9 @@ The caller's own row and its ceilings come from the existing map:
 `FairnessSnapshot`/`OwnerUsage` (`fairness.rs:389-453`) already exposes
 `usage`, `stream_usage`, `isolated_usage`, `is_live`; `ceiling_of`
 (`fairness.rs:287`) needs a `pub(crate)` accessor. Under
-`per_window_fairness=0` there is no owner row: `self.in_use` fields go
-`null` and ceilings read the global caps — honest, not fabricated.
+`per_window_fairness=0` the map is empty and no per-owner accounting
+exists to report, so `self` is `null` outright — honest absence, not
+fabricated zeros (§4, §7 agree).
 
 ## 2. Busy vs hung — decomposing `unresponsive`
 
@@ -204,16 +207,29 @@ briefly before the generation dies — correct, not a third verdict.
   live-window count (`ceiling_of` is a function of `live_count`,
   `fairness.rs:287-298`) — a number, not identities; accepted and
   documented.
-- **Subscription semantics: it subscribes.** Every bridge command
-  marks its window a subscriber (`subscribed()`, `commands.rs:21`;
-  `registry.rs:32-37`), which is also what joins the fairness live set
-  and the broadcast target list (`registry.rs:41-43`). `python_health`
-  must do the same: a health-only monitor window still needs
-  `pylair://health` events (delivered to subscribers only), and its
-  own-usage row is only meaningful as a live participant. The observer
-  effect is real but small and *already* the semantics of
-  `python_state`: a polling window holds its `min_reserve` — documented
-  here so nobody reads it as a bug.
+- **Subscription is split: event delivery vs fairness liveness.**
+  Today `subscribed()` does two jobs at once — marks the window a
+  broadcast target *and* joins the fairness live set
+  (`registry.rs:32-37`) — so a window that only polls `python_state`
+  reserves `min_reserve` of every cap forever: the observer effect.
+  The fix splits them. `subscribed()` (broadcast target) stays on
+  every bridge command, unchanged — a health-only monitor window still
+  receives `pylair://health` events. Joining the live set moves to the
+  two call commands, `python_call` and `python_call_stream`, at their
+  existing subscription site (`commands.rs:21`, `commands.rs:88`,
+  before `rt.0.call*` at `:22`/`:91`): a window is live once it can
+  admit work, not once it can look. A state/health/cancel/retry-only
+  window receives events and reserves nothing; `python_cancel` and
+  `grant_credit` need no join because a window can own tasks only via
+  a call command. 0005's first-call guarantee is preserved by
+  construction — the join still lands before the window's first
+  admission check, so "its guarantee applies to the very first call"
+  (0005 §3) holds exactly. `WindowRegistry::drop_label` still leaves
+  both sets on `Destroyed` (`registry.rs:64-69`); `leave_window` on a
+  label that never joined is a no-op (`fairness.rs:99-103`), so no
+  special-casing is needed. The existing two-window fairness selftest
+  stays green because `b_ping` is a `python_call` — it remains win-b's
+  join point. This change is PR 0 in §7 and amends 0005 §3.
 
 ## 4. Snapshot shape (v1) — minimal, versioned, kind-aware
 
@@ -266,7 +282,9 @@ pong reports `loop_stale_ms: 0` because it cannot measure the wrapped
 server's loop (`_launcher.py:501-505`), so `loop` reads `"unknown"`,
 not a fabricated `"ok"`. Outside a live generation (`starting`,
 `restarting`, `failed`, `stopped`) the liveness fields null out and
-both verdicts read `"unknown"`.
+both verdicts read `"unknown"`. `self` is `null` in two cases —
+`per_window_fairness` is off (no per-owner accounting exists to
+report; §1), or the caller is host-side (`Handle::health(None)`).
 
 Durations are milliseconds-suffix numbers measured at snapshot time —
 no epoch stamps, no clock agreement to negotiate (`*_ms` matches
@@ -282,9 +300,15 @@ stream credit and per-stream byte breakdowns. `version` is the only
 escape hatch: additive fields are allowed inside v1; a shape change
 bumps it.
 
-`Handle::health(owner: Option<&str>)` is a new **public** API on the
-crate — `self: null` for `None`, the command layer passes
-`Some(label)`. Note the semver surface it adds, unlike the
+`Handle::health(owner: Option<&str>) -> HealthSnapshot` is a new
+**public**, typed API: a `#[non_exhaustive]` `HealthSnapshot` struct —
+the `Limits`/`SupervisorConfig` precedent (`config.rs:79`, `:322`) —
+serde-serialized by the command, not a `serde_json::Value` handed
+through. `self` is `null` for `None`; the command layer passes
+`Some(label)`. `#[non_exhaustive]` is what makes "additive fields are
+allowed inside v1" semver-safe for *Rust* callers too — a downstream
+`match` or struct literal cannot pin the v1 shape — on top of the
+JSON-side rule above. This is a real semver surface, unlike the
 `#[doc(hidden)]` `fairness_snapshot` (`handle.rs:356-359`).
 
 ## 5. The `pylair://health` event — justified, one event, transitions only
@@ -343,13 +367,17 @@ and it interacts with §5's event design. Do not design it in this PR.
     `rtt_ms` null (optional-field behaviour);
   - crash-and-restart → `last_exit.kind:"crashed"`, non-empty detail,
     `crashes_in_window:1`, `generation` incremented, `uptime_ms` reset;
-  - `per_window_fairness` **off** → `self:null`, ceilings at caps, and
-    `load.*` totals still counting — the unconditional-totals
-    assertion of §1;
+  - `per_window_fairness` **off** → `self:null` and `load.*` totals
+    still counting — the unconditional-totals assertion of §1;
   - `self` ceilings shrink for a second owner (the
     `join_window`-in-test path, `handle.rs:365-373`);
   - verdict-change event: exactly one `pylair://health` per flip, none
     on steady state.
+- **PR-0 liveness split** (command path, `call_via_command.rs`
+  precedent): a window that only invokes `python_state` does not
+  shrink another owner's ceiling, and its first `python_call` joins
+  the live set — `python_health` inherits the same non-joining rule
+  once it exists;
 - **Command path** (`call_via_command.rs` precedent): `python_health`
   returns caller-scoped `self` — win-b's answer names `win-b`, shows
   its own usage, never main's row.
@@ -369,6 +397,16 @@ and it interacts with §5's event design. Do not design it in this PR.
 
 ## Implementation plan (one concern per PR)
 
+0. **Observer-effect fix (lands before health PR 1).** Split
+   `WindowRegistry` subscription into event subscription (every bridge
+   command, unchanged) and fairness liveness (joined only by
+   `python_call`/`python_call_stream`, before dispatch). Amend 0005 §3
+   with a one-line note recording the split. Test (command path,
+   `call_via_command.rs` precedent): a window that only polls
+   `python_state` does not shrink another window's ceiling, and its
+   first `python_call` joins it. The existing
+   two-window fairness selftest stays green — `b_ping` is a
+   `python_call`.
 1. **Collection.** `HealthShared` + actor writes + unconditional
    `Fairness` totals + `Handle::health(owner)` +
    `tests/runtime_health.rs` (snapshot assertions only — no command,
@@ -376,7 +414,9 @@ and it interacts with §5's event design. Do not design it in this PR.
    surfacing).
 2. **Command.** `python_health` in `commands.rs` + `build.rs`
    `COMMANDS` + `pylair:default` entry + `security.md` table row +
-   command/ACL tests (caller-scoped `self`).
+   command/ACL tests (caller-scoped `self`). Depends on PR 0: the
+   health poller must subscribe (for events) without joining the live
+   set.
 3. **Event.** `RuntimeEvent::HealthChanged` + `events::HEALTH` +
    builder emit + transition tests.
 4. **Client.** `health()`/`onHealth` + `HealthSnapshot` types +

@@ -141,6 +141,11 @@ windows that have invoked at least one Pylair command and still exist -
 **plus the `owner: None` host bucket, counted as live only while it has
 queued or in-flight work.**
 
+> Amended by decisions 0006: the live set joins on `python_call` /
+> `python_call_stream` invocation, not on any bridge command - event
+> subscription and fairness liveness were split so observer windows
+> reserve nothing (0006 §3; the code lands as its PR 0).
+
 - The window set already exists and is already maintained:
   `subscribed()` runs before every command (`commands.rs:21` - *before*
   the call, so a window's first call always joins before its admission
