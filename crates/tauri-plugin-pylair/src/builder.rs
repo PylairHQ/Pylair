@@ -178,8 +178,13 @@ impl<R: Runtime> Builder<R> {
                 let (handle, actor) = spawn_supervisor(spec, config, ev_tx);
                 tauri::async_runtime::spawn(actor);
                 let url_source = handle.clone();
+                // The fairness map lives in the supervisor; the window
+                // registry maintains the live set it consults
+                // (decisions 0005).
+                let reg = Registry::new(Default::default());
+                reg.lock().unwrap().set_fairness(handle.fairness());
                 app.manage(PyRuntime(handle));
-                app.manage(Registry::new(Default::default()));
+                app.manage(reg);
                 let wrap_ui = match &wrap_rt {
                     Some(rt) => {
                         let ui = wrap::Ui::new(app, url_source.clone(), rt);

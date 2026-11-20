@@ -61,6 +61,7 @@
 //!   `stderr.rs`, `spawn.rs`.
 
 mod config;
+pub(crate) mod fairness;
 mod handle;
 #[cfg(not(windows))]
 mod platform_unix;
@@ -75,6 +76,8 @@ mod tests;
 mod wire;
 
 pub use config::{Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, SupervisorConfig};
+#[doc(hidden)]
+pub use fairness::{FairnessSnapshot, OwnerUsage};
 pub use handle::{CallTask, CancelOutcome, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
 pub use platform_unix::pdeath_anchor_threads;

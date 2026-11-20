@@ -15,6 +15,7 @@ use tokio::sync::oneshot::error::RecvError;
 use tokio::time::timeout;
 
 use super::super::config::{RuntimeEvent, State};
+use super::super::fairness::release_queued;
 use super::super::handle::{limit_err, Command, ShutdownOutcome};
 use super::super::stream::ChunkFail;
 use super::super::wire::{cancel_outcome, mtime, send_ctrl};
@@ -59,6 +60,23 @@ impl<'a> Session<'a> {
             pongs_received: 0,
             ping_seq: 0,
         }
+    }
+}
+
+impl Drop for Session<'_> {
+    /// Teardown, not the next spawn, ends a generation's accounting:
+    /// every exit path out of `run_child` lands here, so a crashed
+    /// generation's `in_flight` is zeroed before the restart backoff
+    /// instead of leaking into it (queue debt is untouched - a queued
+    /// command still owes its release when dequeued).
+    fn drop(&mut self) {
+        // into_inner, not unwrap: a poisoned mutex must not panic in
+        // drop - a second panic while unwinding aborts the process.
+        self.sup
+            .fair
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_generation();
     }
 }
 
@@ -154,6 +172,7 @@ impl Session<'_> {
             &mut self.tasks,
             &mut self.task_of_call,
             &mut self.done_tasks,
+            &self.sup.fair,
         )
         .await;
         fail_all(&mut self.pending, proto::RUNTIME_CRASHED, &detail).await;
@@ -182,7 +201,9 @@ impl Session<'_> {
                     }
                 }
                 if let Some(task) = self.task_of_call.remove(&id) {
-                    self.tasks.remove(&task);
+                    if let Some(meta) = self.tasks.remove(&task) {
+                        self.sup.fair.lock().unwrap().note_finished(&meta.owner);
+                    }
                     if self.done_tasks.len() >= 1024 {
                         self.done_tasks.clear();
                     }
@@ -310,7 +331,9 @@ impl Session<'_> {
                                 sink.finish(Err(err));
                             }
                             self.task_of_call.remove(&call_id);
-                            self.tasks.remove(&task);
+                            if let Some(meta) = self.tasks.remove(&task) {
+                                self.sup.fair.lock().unwrap().note_finished(&meta.owner);
+                            }
                             // The stream is over (its terminal was just
                             // delivered): tombstone it like a finished task,
                             // so a later cancel says `completed` and a credit
@@ -376,6 +399,9 @@ impl Session<'_> {
             self.sup.shutdown_outcome = Some(outcome);
             return ControlFlow::Break(ExitCause::CleanShutdown);
         };
+        // The command freed its queue slot the moment it was dequeued
+        // (decisions 0005): release before any dispatch.
+        release_queued(&self.sup.fair, &cmd);
         match cmd {
             Command::Call {
                 fn_name,

@@ -19,6 +19,7 @@ use super::config::{
     clamp_hello_timeout_ms, clamp_ready_timeout_ms, parse_hello_timeout_ms, RuntimeEvent,
     SpawnSpec, State, SupervisorConfig,
 };
+use super::fairness::{release_queued, Fairness, FairnessRef};
 use super::handle::{CancelOutcome, Command, Handle, ShutdownOutcome};
 #[cfg(target_os = "linux")]
 use super::platform_unix::PdeathAnchor;
@@ -121,7 +122,7 @@ pub fn spawn(
         config.initial_stream_credit = limits.max_stream_credit;
     }
     let _ = events.try_send(RuntimeEvent::Stderr(format!(
-        "pylair limits: tasks={} streams={} queue={} stream_bytes={}/{} credit={} workers={} frame={}",
+        "pylair limits: tasks={} streams={} queue={} stream_bytes={}/{} credit={} workers={} frame={} window_share={}",
         limits.max_concurrent_tasks,
         limits.max_concurrent_streams,
         limits.max_queued_commands,
@@ -130,9 +131,15 @@ pub fn spawn(
         limits.max_stream_credit,
         limits.max_isolated_workers,
         config.max_frame,
+        if limits.per_window_fairness {
+            "on"
+        } else {
+            "off"
+        },
     )));
     config.limits = limits.clone();
     let limits = Arc::new(limits);
+    let fair = Fairness::new(limits.per_window_fairness);
     let (cmd_tx, cmd_rx) = mpsc::channel(limits.max_queued_commands);
     let (state_tx, state_rx) = watch::channel(State::Starting);
     let (ready_url_tx, ready_url_rx) = watch::channel(None::<String>);
@@ -151,6 +158,7 @@ pub fn spawn(
         generation: 0,
         next_id: AtomicU64::new(1),
         next_task: next_task.clone(),
+        fair: fair.clone(),
         ready_since: None,
         shutdown_acks: Vec::new(),
         shutdown_outcome: None,
@@ -169,6 +177,7 @@ pub fn spawn(
             stream_bytes_total,
             next_task,
             limits,
+            fair,
         },
         actor,
     )
@@ -188,6 +197,10 @@ struct Supervisor {
     /// Shared with `Handle` so a page-load can watermark "tasks that
     /// existed before this navigation" — see `cancel_owner_before`.
     next_task: Arc<AtomicU64>,
+    /// Per-owner fairness counters shared with `Handle`
+    /// (docs/decisions/0005). The actor releases `in_queue` at every
+    /// `cmd_rx.recv()` site and tracks `in_flight` via the Session.
+    fair: FairnessRef,
     /// When the current generation reached Ready — a crash after a sustained
     /// ready period is a fresh incident, not a boot loop.
     ready_since: Option<Instant>,
@@ -302,11 +315,18 @@ impl Supervisor {
                 _ = &mut deadline => return false,
                 cmd = self.cmd_rx.recv() => match cmd {
                     None => return true,
-                    Some(Command::Shutdown { ack }) => {
-                        self.shutdown_acks.push(ack);
-                        return true;
+                    Some(cmd) => {
+                        // Every dequeued Call/CallStream releases its
+                        // queue slot before any handling (decisions 0005).
+                        release_queued(&self.fair, &cmd);
+                        match cmd {
+                            Command::Shutdown { ack } => {
+                                self.shutdown_acks.push(ack);
+                                return true;
+                            }
+                            c => fail_command_fast(c, "runtime is restarting"),
+                        }
                     }
-                    Some(c) => fail_command_fast(c, "runtime is restarting"),
                 },
             }
         }
@@ -415,13 +435,18 @@ impl Supervisor {
                     self.set_state(State::Stopped, "shutdown");
                     return false;
                 }
-                Some(Command::Shutdown { ack }) => {
-                    self.shutdown_acks.push(ack);
-                    self.set_state(State::Stopped, "shutdown");
-                    return false;
+                Some(cmd) => {
+                    release_queued(&self.fair, &cmd);
+                    match cmd {
+                        Command::Shutdown { ack } => {
+                            self.shutdown_acks.push(ack);
+                            self.set_state(State::Stopped, "shutdown");
+                            return false;
+                        }
+                        Command::Retry => return true,
+                        c => fail_command_fast(c, "runtime is stopped"),
+                    }
                 }
-                Some(Command::Retry) => return true,
-                Some(c) => fail_command_fast(c, "runtime is stopped"),
             }
         }
     }
@@ -551,6 +576,7 @@ async fn drain_exited_inbox(
     tasks: &mut HashMap<u64, TaskMeta>,
     task_of_call: &mut HashMap<u64, u64>,
     done_tasks: &mut HashSet<u64>,
+    fair: &FairnessRef,
 ) {
     let deadline = Instant::now() + Duration::from_millis(250);
     loop {
@@ -581,7 +607,9 @@ async fn drain_exited_inbox(
             }
         }
         if let Some(task) = task_of_call.remove(&id) {
-            tasks.remove(&task);
+            if let Some(meta) = tasks.remove(&task) {
+                fair.lock().unwrap().note_finished(&meta.owner);
+            }
             if done_tasks.len() >= 1024 {
                 done_tasks.clear();
             }
