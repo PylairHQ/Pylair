@@ -372,7 +372,7 @@ describe("pylair wrap: initialising a project", () => {
     for (const f of ["src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "ui/index.html", "ui/restarting.html"])
       assert.ok(existsSync(join(d, f)), `missing ${f}`);
     const cargo = readFileSync(join(d, "src-tauri/Cargo.toml"), "utf-8");
-    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.17"/);
+    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.18"/);
   });
 
   test("an uninferred framework is asked for on a TTY, then its entry file", async () => {

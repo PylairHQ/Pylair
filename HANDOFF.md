@@ -47,25 +47,25 @@ admission are split per live window with a guaranteed minimum share;
 an over-share window's calls get `LIMIT_EXCEEDED` with
 `data.limit = "window_share"` naming the owner; the total stream-byte
 buffer stays global by design; `PYLAIR_PER_WINDOW_FAIRNESS=0` restores
-pure global caps. PyPI is skipped this train (`python/` unchanged):
-the crate `0.1.0-rc.18` publishes first, then a pins PR moves the npm
-trio to `0.1.0-rc.24`, the scaffold crate pin to `=0.1.0-rc.18`, and
-the template `Cargo.lock` files regenerated against the published
-crate. Registry acceptance with `expect_version 0.1.0-rc.24` then
-arms the window-fairness check for the first time against a published
-crate (`src/supervisor/fairness.rs` first ships in rc.18).
+pure global caps. PyPI is skipped this train (`python/` unchanged).
+The crate `0.1.0-rc.18` is published on crates.io; this pins commit
+moves the npm trio to `0.1.0-rc.24`, the scaffold crate pin to
+`=0.1.0-rc.18`, and regenerates both template `Cargo.lock` files
+against the published crate. Registry acceptance with
+`expect_version 0.1.0-rc.24` then arms the window-fairness check for
+the first time against a published crate (`src/supervisor/fairness.rs`
+first ships in rc.18).
 
 | Package | Version in the repo | rc.24 state |
 |---|---|---|
-| `tauri-plugin-pylair` (crate) | `0.1.0-rc.18` | next to publish |
+| `tauri-plugin-pylair` (crate) | `0.1.0-rc.18` | published |
 | `pylair` (PyPI) | `0.1.0-rc.11` | unchanged, skipped |
 | `pylair-ollama` (PyPI) | `0.1.0-rc.3` | unchanged, skipped |
-| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.23` | pins PR bumps to `0.1.0-rc.24` |
+| `@pylair/client`, `@pylair/cli`, `create-pylair` (npm) | `0.1.0-rc.24` | next to publish |
 
-Remaining order for rc.24: the crate publish, then the pins PR,
-pack-mode acceptance green on it, the npm trio under `--tag next`,
-then registry acceptance with `source=registry` and
-`expect_version 0.1.0-rc.24`.
+Remaining order for rc.24: pack-mode acceptance green on this commit,
+then the npm trio under `--tag next`, then registry acceptance with
+`source=registry` and `expect_version 0.1.0-rc.24`.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
