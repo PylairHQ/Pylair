@@ -553,9 +553,24 @@ naming which cap fired — e.g. `"max_concurrent_tasks"`,
 `"stream_buffer_bytes"`, `"max_stream_credit"`, `"max_frame"`,
 `"max_depth"`, `"inbound_queue"`. Clients
 surface it as `LimitExceededError` with `.limit`/`.max`. Limits are
-enforced per runtime (not per window) on the supervisor's `Limits`
+enforced per runtime on the supervisor's `Limits`
 config; defaults are env-overridable via `PYLAIR_MAX_*` and the
 effective set is logged at startup.
+
+The supervisor command queue is additionally split per caller
+(per-window fairness, decisions 0005): while other live windows hold
+fewer than their guaranteed minimum of `max_queued_commands` slots, a
+caller that reaches its share ceiling has new `call`/`callStream`
+requests refused *before they enter the queue* with
+`data: {"limit": "window_share", "max": <ceiling>, "window": "<label>"}`.
+`window` is the webview label, or `null` for host-side callers, which
+follow the same rule only while they hold queued or in-flight work. A
+caller alone keeps the entire queue and still sees
+`"max_queued_commands"` at the global cap; the check is admission-only,
+so commands already queued or running are unaffected, and
+`PYLAIR_PER_WINDOW_FAIRNESS=0` disables it. This is host-side behavior
+and does not change the wire protocol; task and stream limits remain
+per-runtime until the rest of decisions 0005 lands.
 
 `PERMISSION_DENIED` is raised by the host's `python_call` and
 `python_call_stream` commands when the calling window's capability scope

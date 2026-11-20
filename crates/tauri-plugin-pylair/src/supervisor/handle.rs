@@ -191,10 +191,14 @@ impl Handle {
     ) -> Result<CallTask, ErrorObj> {
         let (rtx, rrx) = oneshot::channel();
         let (ttx, trx) = oneshot::channel();
-        // Fairness admission bookkeeping: a queue slot is charged here
-        // and released when the actor dequeues the command (decisions
-        // 0005, PR 1: counting only - never refused).
-        self.fair.lock().unwrap().admit_queue(&owner);
+        // Fairness queue admission (decisions 0005, PR 2): the share
+        // check and the charge are one operation under the lock; the
+        // slot is released when the actor dequeues the command.
+        self.fair
+            .lock()
+            .unwrap()
+            .try_admit_queue(&owner, self.limits.max_queued_commands)
+            .map_err(|ceiling| share_err(ceiling, &owner))?;
         self.cmd
             .try_send(Command::Call {
                 fn_name: fn_name.into(),
@@ -251,7 +255,11 @@ impl Handle {
             self.limits.stream_buffer_bytes_total as u64,
         );
         let (task_tx, task_rx) = oneshot::channel();
-        self.fair.lock().unwrap().admit_queue(&owner);
+        self.fair
+            .lock()
+            .unwrap()
+            .try_admit_queue(&owner, self.limits.max_queued_commands)
+            .map_err(|ceiling| share_err(ceiling, &owner))?;
         self.cmd
             .try_send(Command::CallStream {
                 fn_name: fn_name.into(),
@@ -350,6 +358,20 @@ impl Handle {
         self.fair.lock().unwrap().snapshot()
     }
 
+    /// Test hook: join/leave the fairness live set. Integration tests
+    /// bypass the Tauri command layer where real subscription happens
+    /// (`WindowRegistry::subscribe`).
+    #[doc(hidden)]
+    pub fn fairness_join_window(&self, label: &str) {
+        self.fair.lock().unwrap().join_window(label);
+    }
+
+    /// See `fairness_join_window`.
+    #[doc(hidden)]
+    pub fn fairness_leave_window(&self, label: &str) {
+        self.fair.lock().unwrap().leave_window(label);
+    }
+
     /// Cancel every task `owner` allocated BEFORE `before` — used when a
     /// webview starts loading a new document. The label survives reloads,
     /// so unlike `cancel_owner` this must not sweep tasks the NEW
@@ -435,5 +457,20 @@ pub(super) fn limit_err(limit: &str, max: u64, msg: impl Into<String>) -> ErrorO
         code: proto::LIMIT_EXCEEDED,
         message: msg.into(),
         data: Some(serde_json::json!({"limit": limit, "max": max})),
+    }
+}
+
+/// `LIMIT_EXCEEDED` for an owner over its fairness share of a shared
+/// cap (decisions 0005). `window` names the refused owner so hog and
+/// victim are distinguishable; it is null for the host-side bucket.
+fn share_err(max: usize, owner: &Option<String>) -> ErrorObj {
+    ErrorObj {
+        code: proto::LIMIT_EXCEEDED,
+        message: "window is over its fairness share of the command queue".into(),
+        data: Some(serde_json::json!({
+            "limit": "window_share",
+            "max": max,
+            "window": owner,
+        })),
     }
 }
