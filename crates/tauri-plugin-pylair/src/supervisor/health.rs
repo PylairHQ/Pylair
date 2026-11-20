@@ -79,11 +79,13 @@ pub(super) struct HealthShared {
     pub(super) ping_sent: BTreeMap<u64, Instant>,
     /// The verdict pair a `pylair://health` event last carried —
     /// `None` until this generation emits its first. At spawn the
-    /// baseline is the assumed `{ok, ok}` (the runtime just reached
-    /// Ready; a literal first emit would carry no news). After
-    /// teardown `reset_generation` reseeds `{unknown, unknown}` — the
-    /// value observers last saw — so a new generation's first verdict
-    /// always emits even when it reads `{ok, ok}` again (0006 §5).
+    /// baseline is the assumed steady value for the runtime kind
+    /// (`{ok, ok}` bridge, `{ok, unknown}` web — the runtime just
+    /// reached Ready; a literal steady-state first emit would carry
+    /// no news). After teardown `reset_generation` reseeds
+    /// `{unknown, unknown}` — the value observers last saw — so a new
+    /// generation's first verdict always emits even when it reads
+    /// identically again (0006 §5).
     pub(super) emitted: Option<(&'static str, &'static str)>,
 }
 
@@ -205,9 +207,16 @@ impl HealthShared {
         missed_pongs_to_kill: u32,
     ) -> Option<serde_json::Value> {
         let (transport, loop_verdict) = self.verdicts(kind, live);
-        // Nothing emitted yet reads as the assumed-healthy baseline:
-        // generation 1's first {ok, ok} is not news and does not emit.
-        if self.emitted.unwrap_or(("ok", "ok")) == (transport, loop_verdict) {
+        // Nothing emitted yet reads as the assumed-healthy baseline
+        // for THIS kind — a bridge runtime starts {ok, ok}, a web
+        // runtime {ok, unknown} (its loop is never measured) — so a
+        // wrapped app's first pong does not manufacture a flip.
+        let baseline = if kind == RuntimeKind::Web {
+            ("ok", "unknown")
+        } else {
+            ("ok", "ok")
+        };
+        if self.emitted.unwrap_or(baseline) == (transport, loop_verdict) {
             return None;
         }
         self.emitted = Some((transport, loop_verdict));
