@@ -186,13 +186,20 @@ briefly before the generation dies — correct, not a third verdict.
   `security.md:60` reserves exclusion for supervisor *control*
   (`python_retry`/`python_shutdown`). A read cannot hold work, so it
   cannot starve anything.
-- **A window can be denied it**, the ordinary way: `build.rs`'s
-  `COMMANDS` list (`build.rs:4-14`) auto-generates `allow-`/`deny-
-  python-health` permissions, so `{ "identifier": "pylair:default" }`
-  plus `"pylair:deny-python-health"` — or simply omitting the default
-  set and granting only `allow-python-call` — withholds it. Nothing in
-  `security.md`'s model needs to change; the command table at
-  `security.md:39-51` gains a row.
+- **Deniable — per origin, not per window** (corrected in PR 3, from
+  the #121 test finding): `build.rs`'s `COMMANDS` list
+  (`build.rs:4-14`) auto-generates `allow-`/`deny-python-health`
+  permissions, but Tauri resolves a command deny on the execution
+  context — `tauri::ipc::Authority::resolve_access` runs `is_denied`
+  before label matching, and "window and webview labels are not taken
+  into account for denial". A capability carrying
+  `"pylair:deny-python-health"` therefore refuses the command on
+  **every local webview**, whatever its `windows:` list names — the
+  same origin-wide semantics the emit-deny analysis already documents
+  (`docs/design/event-scoping.md:98-106`). Per-window denial is still
+  achievable the allow-way: withhold `pylair:default` from that
+  window's capability and grant the remaining commands one by one
+  (an uncovered command answers "not allowed").
 - **No `FnScope`.** Command scopes bind *function names* to the two
   call commands (`fn_scope.rs:60-73`; `security.md:121-138`); health
   invokes no function. It also stays out of the

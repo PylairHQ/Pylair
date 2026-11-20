@@ -45,7 +45,7 @@ The plugin's entire IPC surface is ten commands:
 | `python_grant_credit` | grant stream credit to an owned task | `pylair:default` |
 | `python_cancel` | cancel an owned task | `pylair:default` |
 | `python_state` | read lifecycle state | `pylair:default` |
-| `python_health` | read the runtime-health snapshot (caller-scoped `self`) | `pylair:default` |
+| `python_health` | read the runtime-health snapshot (caller-scoped `self`); deniable per origin (all local webviews), never per window | `pylair:default` |
 | `python_retry` | respawn a `failed` runtime | opt-in only |
 | `python_shutdown` | stop the runtime | opt-in only |
 | `python_selftest_report` | end the installed-webview self-test | template grants; inert w/o env flag |
@@ -65,6 +65,18 @@ the everyday set. `python_selftest_b_report` is likewise opt-in only: the
 capability that grants it (`selftest-winb.json`) is carried by the
 reference app and injected into scaffolded apps by CI — it is not part of
 the shipped template.
+
+Command denies (`pylair:deny-*`) resolve by origin, not by window
+label: `tauri::ipc::Authority::resolve_access` runs `is_denied` on the
+execution context before label matching — "window and webview labels
+are not taken into account for denial" — so a capability carrying
+`pylair:deny-python-health` refuses the command on **every local
+webview** regardless of its `windows:` list. That is the same
+origin-wide semantics the emit-deny analysis in
+`design/event-scoping.md` documents. Denying a command for one window
+only means withholding its `pylair:default` grant and listing the
+remaining commands' `allow-` entries individually — an uncovered
+command is refused at the ACL.
 
 ## 3. The `@expose` allowlist — no arbitrary execution
 
