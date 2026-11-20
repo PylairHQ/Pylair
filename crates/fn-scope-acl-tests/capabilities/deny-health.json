@@ -1,0 +1,11 @@
+{
+  "identifier": "deny-health",
+  "description": "command-level deny: python_health refused at the Tauri ACL while the rest of pylair:default stays",
+  "windows": [
+    "deny-health"
+  ],
+  "permissions": [
+    "pylair:default",
+    "pylair:deny-python-health"
+  ]
+}

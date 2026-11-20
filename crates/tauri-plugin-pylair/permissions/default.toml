@@ -1,14 +1,16 @@
 "$schema" = "schemas/schema.json"
 
-# What a normal app UI needs: make calls, stream, cancel, read state.
+# What a normal app UI needs: make calls, stream, cancel, read state
+# and health.
 # Deliberately EXCLUDES python_retry and python_shutdown (supervisor
 # control) — apps opt in with pylair:allow-python-retry / -shutdown.
 [default]
-description = "Call exposed Python functions, stream results, cancel tasks, read runtime state."
+description = "Call exposed Python functions, stream results, cancel tasks, read runtime state and health."
 permissions = [
   "allow-python-call",
   "allow-python-call-stream",
   "allow-python-grant-credit",
   "allow-python-cancel",
   "allow-python-state",
+  "allow-python-health",
 ]

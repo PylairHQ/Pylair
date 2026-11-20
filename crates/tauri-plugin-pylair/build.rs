@@ -8,6 +8,7 @@ const COMMANDS: &[&str] = &[
     "python_cancel",
     "python_retry",
     "python_state",
+    "python_health",
     "python_shutdown",
     "python_selftest_report",
     "python_selftest_b_report",

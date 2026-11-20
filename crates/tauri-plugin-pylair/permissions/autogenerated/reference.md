@@ -1,6 +1,6 @@
 ## Default Permission
 
-Call exposed Python functions, stream results, cancel tasks, read runtime state.
+Call exposed Python functions, stream results, cancel tasks, read runtime state and health.
 
 #### This default permission set includes the following:
 
@@ -9,6 +9,7 @@ Call exposed Python functions, stream results, cancel tasks, read runtime state.
 - `allow-python-grant-credit`
 - `allow-python-cancel`
 - `allow-python-state`
+- `allow-python-health`
 
 ## Permission Table
 
@@ -119,6 +120,32 @@ Enables the python_grant_credit command without any pre-configured scope.
 <td>
 
 Denies the python_grant_credit command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:allow-python-health`
+
+</td>
+<td>
+
+Enables the python_health command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:deny-python-health`
+
+</td>
+<td>
+
+Denies the python_health command without any pre-configured scope.
 
 </td>
 </tr>

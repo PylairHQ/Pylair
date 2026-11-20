@@ -533,3 +533,56 @@ fn a_scope_on_only_one_call_command_leaves_the_other_open() {
         "the unscoped command is still open"
     );
 }
+
+// ---- command-level ACL on python_health (docs/decisions/0006 §3) ---------
+
+/// `pylair:deny-python-health` refuses the invoke at the Tauri ACL —
+/// the handler never runs — while the rest of `pylair:default`
+/// (here `python_state`) keeps working.
+#[test]
+fn deny_python_health_refuses_the_invoke_at_the_acl() {
+    let fx = fixture(&["deny-health"]);
+    let w = fx.win("deny-health");
+    let rt = fx.app.state::<PyRuntime>();
+    let watermark = rt.0.task_watermark();
+
+    let out = classify(invoke(w, "python_health", json!({})));
+    assert!(
+        matches!(out, Out::Acl(_)),
+        "deny-python-health must refuse before the handler, got {out:?}"
+    );
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready"),
+        "the rest of pylair:default still reaches the handler"
+    );
+    assert_eq!(
+        rt.0.task_watermark(),
+        watermark,
+        "a refused command may not reach the supervisor"
+    );
+}
+
+/// Command denies resolve by ORIGIN, not by window label:
+/// `tauri::ipc::Authority::resolve_access` checks `is_denied` against
+/// the execution context only ("window and webview labels are not
+/// taken into account for denial"), so a capability carrying
+/// `pylair:deny-python-health` refuses it for every local webview —
+/// including windows its `windows` list never names. `python_state`,
+/// which the capability does not deny, still answers on the same
+/// window.
+#[test]
+fn a_command_deny_applies_to_the_whole_origin_not_per_window() {
+    let fx = fixture(&["open"]);
+    let w = fx.win("open");
+    let out = classify(invoke(w, "python_health", json!({})));
+    assert!(
+        matches!(out, Out::Acl(_)),
+        "the deny-health capability denies it origin-wide: {out:?}"
+    );
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready"),
+        "commands the deny does not name are still allowed"
+    );
+}

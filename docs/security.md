@@ -36,7 +36,7 @@ scope except where noted (wrap mode's loopback server, §9).
 
 ## 2. What the webview can reach — and nothing else
 
-The plugin's entire IPC surface is nine commands:
+The plugin's entire IPC surface is ten commands:
 
 | command | what it does | default permission |
 |---|---|---|
@@ -45,6 +45,7 @@ The plugin's entire IPC surface is nine commands:
 | `python_grant_credit` | grant stream credit to an owned task | `pylair:default` |
 | `python_cancel` | cancel an owned task | `pylair:default` |
 | `python_state` | read lifecycle state | `pylair:default` |
+| `python_health` | read the runtime-health snapshot (caller-scoped `self`) | `pylair:default` |
 | `python_retry` | respawn a `failed` runtime | opt-in only |
 | `python_shutdown` | stop the runtime | opt-in only |
 | `python_selftest_report` | end the installed-webview self-test | template grants; inert w/o env flag |
