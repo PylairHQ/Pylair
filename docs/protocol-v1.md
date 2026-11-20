@@ -367,6 +367,12 @@ deadlock) never crashes, so it never restarts.
   `RUNTIME_WEDGED` and the runtime is killed and restarted. The field is
   additive — hosts that ignore it keep the older behaviour.
 - `seq` matching guards staleness.
+- **Host-side observability is additive.** The host exposes these
+  liveness signals to webviews through the `python_health` command (a
+  `health()` snapshot: verdicts, restart accounting, load totals) and
+  the `pylair://health` event, emitted only when a transport or loop
+  verdict *changes* — see `docs/decisions/0006-runtime-health.md`. The
+  wire protocol is unchanged: `ping`/`pong` carry the same fields.
 
 ### 5.1 Event delivery (host → webviews)
 

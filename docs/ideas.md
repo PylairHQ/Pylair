@@ -20,7 +20,8 @@ from this file — promote to a milestone or a decision doc first.
   emitted as `bigint` in generated TS. Until then the codec rejects
   out-of-range ints with a clear error (docs/codegen.md): annotate
   `str` for exact big integers.
-- Richer loop diagnostics: event-loop lag is currently a stderr line
-  (`event loop lag Ns`, forwarded to the UI). Could become a typed
-  notification + a heartbeat timestamp in `pong` params so the host can
-  distinguish "loop busy" from "process hung" in the UI.
+- App-defined readiness: the host reports transport + loop liveness and
+  supervisor state (`health()`/`onHealth`, decisions 0006), but "the app
+  finished loading its model and can serve" is the app's own signal —
+  a future runtime-surfaced readiness notification, the next step past
+  host-observed health.

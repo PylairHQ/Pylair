@@ -1,6 +1,6 @@
 # 0006: Runtime health API
 
-Status: accepted
+Status: accepted, implemented (PRs #119-#123, #124)
 
 ## Question
 
