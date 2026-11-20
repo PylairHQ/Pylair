@@ -1,6 +1,6 @@
 # 0006: Runtime health API
 
-Status: proposed
+Status: accepted
 
 ## Question
 
