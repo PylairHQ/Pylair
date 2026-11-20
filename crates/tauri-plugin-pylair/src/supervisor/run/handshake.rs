@@ -86,6 +86,23 @@ impl Supervisor {
                 hello["protocol"]
             )));
         }
+        // The generation's fn_name -> kind manifest: isolated calls
+        // are charged per owner for the window-share check (decisions
+        // 0005, PR 4). Replaced every generation so a dev reload's
+        // new manifest applies; an absent name is non-isolated.
+        self.fn_kinds = hello["exposes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some((
+                            e["name"].as_str()?.to_string(),
+                            e["kind"].as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let _ = self
             .events
             .try_send(RuntimeEvent::Exposes(hello["exposes"].clone()));

@@ -66,6 +66,9 @@ struct TaskMeta {
     owner: Option<String>,
     /// Streaming tasks count toward `max_concurrent_streams`.
     is_stream: bool,
+    /// Isolated-worker tasks count toward `max_isolated_workers`
+    /// (per owner; the Python-side cap stays the global backstop).
+    is_isolated: bool,
     /// Outstanding pull-credit: initial grant + `GrantCredit`s minus
     /// delivered chunks (RC.8A cap).
     credit: u64,
@@ -159,6 +162,7 @@ pub fn spawn(
         next_id: AtomicU64::new(1),
         next_task: next_task.clone(),
         fair: fair.clone(),
+        fn_kinds: HashMap::new(),
         ready_since: None,
         shutdown_acks: Vec::new(),
         shutdown_outcome: None,
@@ -201,6 +205,11 @@ struct Supervisor {
     /// (docs/decisions/0005). The actor releases `in_queue` at every
     /// `cmd_rx.recv()` site and tracks `in_flight` via the Session.
     fair: FairnessRef,
+    /// The current generation's `fn_name -> kind` map, parsed out of
+    /// `hello["exposes"]` when the handshake succeeds and replaced on
+    /// every new generation (a dev reload's manifest can differ). An
+    /// absent name counts as non-isolated.
+    fn_kinds: HashMap<String, String>,
     /// When the current generation reached Ready — a crash after a sustained
     /// ready period is a fresh incident, not a boot loop.
     ready_since: Option<Instant>,
@@ -610,7 +619,7 @@ async fn drain_exited_inbox(
             if let Some(meta) = tasks.remove(&task) {
                 fair.lock()
                     .unwrap()
-                    .note_finished(&meta.owner, meta.is_stream);
+                    .note_finished(&meta.owner, meta.is_stream, meta.is_isolated);
             }
             if done_tasks.len() >= 1024 {
                 done_tasks.clear();

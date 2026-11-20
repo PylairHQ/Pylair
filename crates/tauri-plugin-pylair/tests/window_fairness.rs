@@ -280,18 +280,26 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],"result": {"ok": True}})
 "#;
 
-/// The fairness workhorse: `hold` calls register their task id and are
-/// never answered (a held slot for as long as the test wants), `die`
-/// calls exit the process with every task held, `cancel` gets an ack
-/// plus a TASK_CANCELLED terminal for the held call it names, and
-/// every other call answers `{"ok": <fn>}`. All timing lives in what
-/// the test sends - there is no sleep in the fixture.
+/// The fairness workhorse: `hold`/`iso_hold`/`maybe_iso` calls register
+/// their task id and are never answered (a held slot for as long as the
+/// test wants), `die` calls exit the process with every task held,
+/// `cancel` gets an ack plus a TASK_CANCELLED terminal for the held call
+/// it names, and every other call answers `{"ok": <fn>}`. All timing
+/// lives in what the test sends - there is no sleep in the fixture.
+///
+/// `iso_hold` is always declared `kind: "isolated"`; `maybe_iso` is
+/// isolated only while the file named by argv[1] exists - removing it
+/// between generations relabels the fn, which is how the manifest-change
+/// test works.
 const FAKE_FAIRNESS_RUNTIME: &str = r#"
-import sys, struct, json
+import sys, struct, json, os
+flag = len(sys.argv) > 1 and os.path.exists(sys.argv[1])
 def w(o):
     b = json.dumps(o).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
-w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[{"name":"hold","kind":"sync"},{"name":"ok","kind":"sync"},{"name":"die","kind":"sync"}]}})
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[
+    {"name":"hold","kind":"sync"},{"name":"ok","kind":"sync"},{"name":"die","kind":"sync"},
+    {"name":"iso_hold","kind":"isolated"},{"name":"maybe_iso","kind":"isolated" if flag else "sync"}]}})
 held = {}
 while True:
     h = sys.stdin.buffer.read(4)
@@ -312,7 +320,7 @@ while True:
         fn = m["params"]["fn"]
         if fn == "die":
             break  # crash holding every task
-        if fn == "hold":
+        if fn in ("hold", "iso_hold", "maybe_iso"):
             held[m["params"]["task"]] = m["id"]
         else:
             w({"jsonrpc":"2.0","id": m["id"],"result": {"ok": fn}})
@@ -1042,4 +1050,280 @@ async fn host_bucket_shares_task_slots_only_while_busy() {
     for ct in held2 {
         let _ = ct.result.await;
     }
+}
+
+/// Isolated workers share too (PR 4): with `max_isolated_workers = 2`
+/// and two live windows, win-a's isolated ceiling is 1 - its second
+/// isolated call is refused `window_share`, its plain calls are
+/// unaffected, and win-b's isolated call is admitted.
+#[tokio::test]
+async fn isolated_workers_are_shared_across_windows() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_isolated_workers(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+    wait_state(&h, State::Ready).await;
+
+    let mut held = vec![h
+        .call_task("iso_hold", json!({}), Some("win-a".into()), Some(false))
+        .expect("a's first isolated call is inside its share")];
+    assert!(
+        eventually(|| h.fairness_snapshot().isolated_usage(Some("win-a")) == 1).await,
+        "a's isolated worker in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let refused = h
+        .call("iso_hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("a is over its isolated-share ceiling");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["max"].as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["window"].as_str()),
+        Some("win-a")
+    );
+
+    // a's plain calls are unaffected by its isolated ceiling: the
+    // task slot it just used is well under a's task share (3 of 4).
+    let answered = h
+        .call("ok", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect("a's plain call is unaffected");
+    assert_eq!(answered, json!({"ok": "ok"}));
+
+    // b's isolated call still fits: a is at its minimum so it
+    // reserves nothing further.
+    held.push(
+        h.call_task("iso_hold", json!({}), Some("win-b".into()), Some(false))
+            .expect("b's isolated share is untouched"),
+    );
+    assert!(
+        eventually(|| h.fairness_snapshot().isolated_usage(Some("win-b")) == 1).await,
+        "b's isolated worker in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// Lone-window parity for isolated workers: there is no host-side
+/// global isolated cap - Python's own `max_isolated_workers` is the
+/// backstop - so a lone window is never refused `window_share` for
+/// isolated calls at any count.
+#[tokio::test]
+async fn a_lone_window_never_sees_window_share_for_isolated_workers() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_isolated_workers(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    // Three isolated calls exceed even the nominal cap: all admitted,
+    // because a lone window's ceiling IS the cap and the share check
+    // only refuses below it.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task("iso_hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a lone window is never share-refused"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().isolated_usage(Some("win-a")) == 3).await,
+        "all three isolated workers in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// The manifest is per-generation: after a restart whose hello no
+/// longer names the fn isolated, the same fn stops counting against
+/// the isolated share.
+#[tokio::test]
+async fn a_new_manifest_relabels_the_fn_across_generations() {
+    let flag = temp_gate();
+    std::fs::write(&flag, b"1").unwrap();
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_isolated_workers(2);
+    let h = spawn_h(spec_argv(FAKE_FAIRNESS_RUNTIME, &flag), c, ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+    wait_state(&h, State::Ready).await;
+
+    // Generation 1: maybe_iso IS isolated - a's ceiling is 1.
+    let held = vec![h
+        .call_task("maybe_iso", json!({}), Some("win-a".into()), Some(false))
+        .expect("first isolated call admitted")];
+    assert!(
+        eventually(|| h.fairness_snapshot().isolated_usage(Some("win-a")) == 1).await,
+        "isolated count in gen 1: {:?}",
+        h.fairness_snapshot()
+    );
+    let refused = h
+        .call("maybe_iso", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("gen 1: the second isolated call is over share");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+
+    // Remove the flag and crash the generation. Wait for gen 1's
+    // teardown to land BEFORE waiting for Ready - otherwise wait_state
+    // returns on the stale Ready and the gen-2 calls would reach gen 1.
+    let _ = std::fs::remove_file(&flag);
+    let die = h
+        .call_task("die", json!({}), Some("win-a".into()), Some(false))
+        .expect("the trigger call is admitted");
+    assert!(
+        eventually(|| h.fairness_snapshot().isolated_usage(Some("win-a")) == 0).await,
+        "gen 1 teardown must zero the isolated count: {:?}",
+        h.fairness_snapshot()
+    );
+    wait_state(&h, State::Ready).await;
+    let _ = die.result.await;
+
+    // Generation 2: the second maybe_iso call - refused by the
+    // isolated share in gen 1 - is now plain task traffic and admits.
+    let mut held2 = Vec::new();
+    for _ in 0..2 {
+        held2.push(
+            h.call_task("maybe_iso", json!({}), Some("win-a".into()), Some(false))
+                .expect("gen 2: no longer isolated, so no share refusal"),
+        );
+    }
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 2) && s.isolated_usage(Some("win-a")) == 0
+        })
+        .await,
+        "gen 2: the fn counts as tasks, not isolated: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let _ = std::fs::remove_file(&flag);
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+    for ct in held2 {
+        let _ = ct.result.await;
+    }
+}
+
+/// A crash zeroes per-owner isolated counts at session teardown, the
+/// same as tasks and streams.
+#[tokio::test]
+async fn a_crash_zeroes_isolated_counts() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_isolated_workers(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    let held = vec![
+        h.call_task("iso_hold", json!({}), Some("win-a".into()), Some(false))
+            .expect("admitted"),
+        h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+            .expect("admitted"),
+    ];
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 2) && s.isolated_usage(Some("win-a")) == 1
+        })
+        .await,
+        "1 task + 1 isolated in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let die = h
+        .call_task("die", json!({}), Some("win-a".into()), Some(false))
+        .expect("the trigger call is admitted");
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 0) && s.isolated_usage(Some("win-a")) == 0
+        })
+        .await,
+        "teardown must zero isolated counts too: {:?}",
+        h.fairness_snapshot()
+    );
+    let _ = die.result.await;
+    wait_state(&h, State::Ready).await;
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// The host bucket gets the same rule for isolated slots: while `None`
+/// holds an isolated worker it is live and hits `window_share` with
+/// window: null; once drained it stops being live.
+#[tokio::test]
+async fn host_bucket_shares_isolated_slots_only_while_busy() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_isolated_workers(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    let ct = h
+        .call_task("iso_hold", json!({}), None, Some(false))
+        .expect("the host bucket shares isolated slots like a window");
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.isolated_usage(None) == 1 && s.is_live(None)
+        })
+        .await,
+        "host isolated worker in flight: {:?}",
+        h.fairness_snapshot()
+    );
+    let refused = h
+        .call("iso_hold", json!({}), None, Some(false))
+        .await
+        .expect_err("the host bucket hits its isolated ceiling too");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert!(
+        refused.data.as_ref().is_some_and(|d| d["window"].is_null()),
+        "the host bucket is reported as window: null"
+    );
+
+    // Free it: the idle bucket stops reserving.
+    let task_id = ct.task.await.expect("task id was delivered");
+    let _ = h.cancel(task_id, None).await;
+    let _ = ct.result.await;
+    assert!(
+        eventually(|| !h.fairness_snapshot().is_live(None)).await,
+        "an idle host bucket must stop reserving: {:?}",
+        h.fairness_snapshot()
+    );
+
+    h.shutdown().await;
 }
