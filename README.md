@@ -23,7 +23,7 @@ pull your dependencies into unstable versions and break for reasons
 unrelated to this project. Exact pins avoid that.
 
 Each package versions independently across registries: the numbers
-won't match (`pylair` at `0.1.0rc11`, npm packages at `0.1.0-rc.22`, the
+won't match (`pylair` at `0.1.0rc11`, npm packages at `0.1.0-rc.23`, the
 crate at `0.1.0-rc.17`). Check each registry for its latest RC.
 
 Try it:
