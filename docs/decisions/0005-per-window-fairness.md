@@ -1,7 +1,7 @@
 # 0005: Per-window fairness for runtime limits
 
-Status: proposed (spike, 2026-11-20; reservation model revised after
-review). No implementation in this PR; `tests/window_fairness.rs` is
+Status: accepted (2026-11-20; reservation model revised after review).
+This spike carried no implementation; `tests/window_fairness.rs` is
 throwaway proof the starvation is real and deterministic.
 
 ## Question
@@ -176,7 +176,8 @@ retains it). So:
   not the plugin).
 - `Command::Call` already carries `fn_name`: `Session::call` looks up
   the kind and counts the task against a per-owner isolated ceiling
-  (`min_reserve = min(1, ...) = 1` for `cap = 8`) alongside the task
+  (`min_reserve = min(max(1, cap / 8), floor(cap / live))`, which is 1
+  for `cap = 8` and any `live >= 2`) alongside the task
   ceiling. Unknown fn -> treated as non-isolated; Python's
   `FUNCTION_NOT_FOUND` sorts it out anyway.
 - The Python cap (`_tasks.py:111`) stays as the global backstop - host
