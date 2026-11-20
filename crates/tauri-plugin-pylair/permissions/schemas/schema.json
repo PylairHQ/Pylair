@@ -343,6 +343,18 @@
           "markdownDescription": "Denies the python_grant_credit command without any pre-configured scope."
         },
         {
+          "description": "Enables the python_health command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-health",
+          "markdownDescription": "Enables the python_health command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_health command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-health",
+          "markdownDescription": "Denies the python_health command without any pre-configured scope."
+        },
+        {
           "description": "Enables the python_retry command without any pre-configured scope.",
           "type": "string",
           "const": "allow-python-retry",
@@ -403,10 +415,10 @@
           "markdownDescription": "Denies the python_state command without any pre-configured scope."
         },
         {
-          "description": "Call exposed Python functions, stream results, cancel tasks, read runtime state.\n#### This default permission set includes:\n\n- `allow-python-call`\n- `allow-python-call-stream`\n- `allow-python-grant-credit`\n- `allow-python-cancel`\n- `allow-python-state`",
+          "description": "Call exposed Python functions, stream results, cancel tasks, read runtime state and health.\n#### This default permission set includes:\n\n- `allow-python-call`\n- `allow-python-call-stream`\n- `allow-python-grant-credit`\n- `allow-python-cancel`\n- `allow-python-state`\n- `allow-python-health`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Call exposed Python functions, stream results, cancel tasks, read runtime state.\n#### This default permission set includes:\n\n- `allow-python-call`\n- `allow-python-call-stream`\n- `allow-python-grant-credit`\n- `allow-python-cancel`\n- `allow-python-state`"
+          "markdownDescription": "Call exposed Python functions, stream results, cancel tasks, read runtime state and health.\n#### This default permission set includes:\n\n- `allow-python-call`\n- `allow-python-call-stream`\n- `allow-python-grant-credit`\n- `allow-python-cancel`\n- `allow-python-state`\n- `allow-python-health`"
         }
       ]
     }

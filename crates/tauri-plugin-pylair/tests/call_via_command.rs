@@ -17,8 +17,8 @@ use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{Limits, SpawnSpec, State};
 use tauri_plugin_pylair::{
-    python_call_impl, python_call_stream_impl, python_state_impl, Builder, PyRuntime, Registry,
-    SupervisorConfig,
+    python_call_impl, python_call_stream_impl, python_health_impl, python_state_impl, Builder,
+    PyRuntime, Registry, SupervisorConfig,
 };
 
 fn python() -> PathBuf {
@@ -348,4 +348,190 @@ fn observer_window_joins_fairness_only_on_its_first_call() {
     assert_eq!(data["limit"], json!("window_share"));
     assert_eq!(data["max"], json!(3));
     assert_eq!(data["window"], json!("main"));
+}
+
+/// docs/decisions/0006 §3: `python_health` is caller-scoped — the
+/// `self` row carries THIS window's label and its own usage/ceilings,
+/// never another window's row. `load` stays global.
+#[test]
+fn health_command_is_caller_scoped() {
+    let mut cfg = SupervisorConfig::default();
+    cfg.hello_timeout = Duration::from_secs(15);
+    cfg.shutdown_grace = Duration::from_secs(2);
+    cfg.limits = Limits::default().with_max_concurrent_tasks(4);
+    let app = tauri::test::mock_builder()
+        .plugin(
+            Builder::<MockRuntime>::new(real_runtime_spec())
+                .config(cfg)
+                .build(),
+        )
+        .build(mock_context(noop_assets()))
+        .expect("app builds with the plugin");
+    let w_main: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+    let w_b: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "win-b", WebviewUrl::default())
+            .build()
+            .unwrap();
+
+    let rt_state = app.state::<PyRuntime>();
+    let reg = app.state::<Registry>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while rt_state.0.state() != State::Ready {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime never reached Ready (at {:?})",
+            rt_state.0.state()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = &rt_state.0;
+
+    // Both windows join the live set with a real call.
+    for w in [&w_main, &w_b] {
+        rt.block_on(python_call_impl(
+            w,
+            &reg,
+            &rt_state,
+            "add".into(),
+            json!({"a": 1, "b": 2}),
+        ))
+        .expect("first call joins the window");
+    }
+
+    // main holds two tasks, win-b one — their self rows differ.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            h.call_task(
+                "echo_later",
+                json!({"text": "x", "delay": 30.0}),
+                Some("main".into()),
+                Some(false),
+            )
+            .expect("main's holds are inside its share"),
+        );
+    }
+    held.push(
+        h.call_task(
+            "echo_later",
+            json!({"text": "x", "delay": 30.0}),
+            Some("win-b".into()),
+            Some(false),
+        )
+        .expect("win-b's hold is inside its share"),
+    );
+    wait_until(
+        || h.health(None).load.tasks == 3,
+        "three echo_later tasks in flight",
+    );
+
+    // win-b's snapshot: its own label and its own usage — main's row
+    // would read in_use 2; the global totals see both.
+    let v = python_health_impl(&w_b, &reg, &rt_state).expect("python_health_impl");
+    assert_eq!(v["version"], json!(1));
+    assert_eq!(v["state"], json!("ready"));
+    assert_eq!(v["self"]["window"], json!("win-b"));
+    assert_eq!(v["self"]["tasks"]["in_use"], json!(1));
+    assert_eq!(v["self"]["tasks"]["ceiling"], json!(3));
+    assert_eq!(v["self"]["tasks"]["cap"], json!(4));
+    assert_eq!(v["load"]["tasks"], json!(3));
+
+    // main's own snapshot names main and counts its two holds.
+    let m = python_health_impl(&w_main, &reg, &rt_state).expect("python_health_impl");
+    assert_eq!(m["self"]["window"], json!("main"));
+    assert_eq!(m["self"]["tasks"]["in_use"], json!(2));
+}
+
+/// docs/decisions/0006 §3: a health poller reserves no fairness share —
+/// `python_health` is `subscribed()`, never `subscribed_live()`. A
+/// window that only polls health does not shrink another window's
+/// ceiling.
+#[test]
+fn health_only_window_reserves_no_fairness_share() {
+    let mut cfg = SupervisorConfig::default();
+    cfg.hello_timeout = Duration::from_secs(15);
+    cfg.shutdown_grace = Duration::from_secs(2);
+    cfg.limits = Limits::default().with_max_concurrent_tasks(4);
+    let app = tauri::test::mock_builder()
+        .plugin(
+            Builder::<MockRuntime>::new(real_runtime_spec())
+                .config(cfg)
+                .build(),
+        )
+        .build(mock_context(noop_assets()))
+        .expect("app builds with the plugin");
+    let w_main: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+    let w_mon: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "monitor", WebviewUrl::default())
+            .build()
+            .unwrap();
+
+    let rt_state = app.state::<PyRuntime>();
+    let reg = app.state::<Registry>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while rt_state.0.state() != State::Ready {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime never reached Ready (at {:?})",
+            rt_state.0.state()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = &rt_state.0;
+
+    rt.block_on(python_call_impl(
+        &w_main,
+        &reg,
+        &rt_state,
+        "add".into(),
+        json!({"a": 1, "b": 2}),
+    ))
+    .expect("main's first call");
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task(
+                "echo_later",
+                json!({"text": "x", "delay": 30.0}),
+                Some("main".into()),
+                Some(false),
+            )
+            .expect("main's holds are inside its share"),
+        );
+    }
+    wait_until(
+        || h.fairness_snapshot().usage(Some("main")).1 == 3,
+        "main's three echo_later tasks in flight",
+    );
+
+    // The monitor polls health — it gets its own caller-scoped row but
+    // joins nothing: liveness and main's ceiling are unchanged.
+    for _ in 0..2 {
+        let v = python_health_impl(&w_mon, &reg, &rt_state).expect("python_health_impl");
+        assert_eq!(v["self"]["window"], json!("monitor"));
+    }
+    assert!(
+        !h.fairness_snapshot().is_live(Some("monitor")),
+        "a health-only poller must not be live"
+    );
+    assert_eq!(h.fairness_snapshot().live_count(), 1);
+
+    rt.block_on(python_call_impl(
+        &w_main,
+        &reg,
+        &rt_state,
+        "add".into(),
+        json!({"a": 3, "b": 4}),
+    ))
+    .expect("a health-only poller reserves nothing — main keeps the full cap");
 }

@@ -400,10 +400,11 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   void emit("pylair://stream", { task: 3, done: true, result: "FORGED-EARLY-BY-B" }).catch(() => {});
 
   // Wait until the runtime is up so task 2 (the owner's stream) is live.
-  // Every python_state invoke also SUBSCRIBES this window, which joins it
-  // to the fairness live set — the `b_ping` call below is the observable
-  // mark main polls before it floods (Python state, not an emit: an emit
-  // can arrive before main's listener exists and is gone forever).
+  // Every python_state invoke subscribes this window for events; the
+  // `b_ping` call below is what joins it to the fairness live set — the
+  // observable mark main polls before it floods (Python state, not an
+  // emit: an emit can arrive before main's listener exists and is gone
+  // forever).
   for (let i = 0; i < 120; i++) {
     const s = await invoke<string>("plugin:pylair|python_state").catch(() => "");
     if (s === "ready") break;

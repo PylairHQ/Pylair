@@ -260,6 +260,38 @@ pub fn python_state_impl<R: Runtime>(
     state_reply(rt.0.kind(), rt.0.state(), rt.0.ready_url())
 }
 
+/// The runtime-health snapshot (docs/decisions/0006 §4): state and
+/// time-in-state, restart accounting, the transport/loop liveness
+/// verdicts, load totals, and THIS window's own usage/ceilings — never
+/// another window's row.
+#[tauri::command]
+fn python_health<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+) -> Result<Value, ErrorObj> {
+    python_health_impl(&window, &reg, &rt)
+}
+
+/// `python_health`'s body, callable in tests — the real command path
+/// minus Tauri's invoke-arg deserialization. `subscribed()` only, like
+/// `python_state`: a health poller reserves no fairness share
+/// (decisions 0006 §3). The `self` row is caller-scoped from
+/// `window.label()`, never JS input.
+#[doc(hidden)]
+pub fn python_health_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reg: &Registry,
+    rt: &PyRuntime,
+) -> Result<Value, ErrorObj> {
+    subscribed(window, reg);
+    serde_json::to_value(rt.0.health(Some(window.label()))).map_err(|e| ErrorObj {
+        code: protocol::INTERNAL,
+        message: format!("health snapshot failed to serialize: {e}"),
+        data: None,
+    })
+}
+
 #[tauri::command]
 async fn python_shutdown<R: Runtime>(
     window: tauri::WebviewWindow<R>,
@@ -279,6 +311,7 @@ pub(super) fn invoke_handler<R: Runtime>(
         python_cancel,
         python_retry,
         python_state,
+        python_health,
         python_shutdown,
         python_selftest_report,
         python_selftest_b_report,
