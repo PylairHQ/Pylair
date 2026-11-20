@@ -346,6 +346,22 @@ the payload would only change at transitions, and verdicts can flip
 *without* one (the case above); or no event at all — forces every
 banner onto a poll loop.
 
+**Emission baseline.** "One per flip" needs a remembered last-emitted
+pair, generation-scoped:
+
+- Generation 1's baseline is the *assumed* `{ok, ok}` — the runtime
+  just reached Ready, so a literal `{ok, ok}` first emit carries no
+  news. The first verdict emits only when it differs (e.g. `{ok,
+  busy}`); the `0 → 2500 → 0` staleness flap therefore emits exactly
+  twice, busy then ok.
+- Teardown emits `{unknown, unknown}` only when the generation
+  actually emitted a verdict — "a real change from the last emitted
+  value"; a generation that never emitted stays silent.
+- The reset then reseeds the baseline to the `{unknown, unknown}`
+  observers last saw, so a restarted generation's first verdict always
+  emits — even when it reads `{ok, ok}` — because it *is* news to an
+  observer still showing the teardown verdict.
+
 ## 6. App-defined readiness — a separate future decision
 
 Not in v1. Sketch only: a Python-side `pylair.report(...)` /

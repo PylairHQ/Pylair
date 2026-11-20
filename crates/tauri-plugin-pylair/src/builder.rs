@@ -214,6 +214,7 @@ impl<R: Runtime> Builder<R> {
                             )),
                             RuntimeEvent::Stderr(line) => Some((events::STDERR, json!(line))),
                             RuntimeEvent::Exposes(x) => Some((events::EXPOSES, x)),
+                            RuntimeEvent::HealthChanged(x) => Some((events::HEALTH, x)),
                         };
                         let Some((event, payload)) = payload else {
                             continue;

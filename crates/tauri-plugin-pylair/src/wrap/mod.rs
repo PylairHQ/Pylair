@@ -324,6 +324,7 @@ impl<R: Runtime> Ui<R> {
                 self.apply(action);
             }
             RuntimeEvent::Exposes(_) => {}
+            RuntimeEvent::HealthChanged(_) => {}
         }
     }
 

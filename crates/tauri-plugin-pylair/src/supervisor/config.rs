@@ -43,6 +43,10 @@ pub enum RuntimeEvent {
     Stderr(String),
     /// Parsed `hello` exposes manifest.
     Exposes(Value),
+    /// A liveness verdict (transport or loop) changed
+    /// (docs/decisions/0006 §5): `{version, generation, liveness}` —
+    /// no per-window data. One emit per flip, never per tick.
+    HealthChanged(Value),
 }
 
 #[derive(Debug, Clone, Default)]

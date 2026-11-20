@@ -242,6 +242,8 @@ enum Ev {
     },
     Stderr(String),
     Exposes(Value),
+    /// A `pylair://health` verdict-change event fired (0006 §5).
+    Health,
 }
 
 #[derive(Clone)]
@@ -278,6 +280,7 @@ impl Rec {
                         }
                     }
                     RuntimeEvent::Exposes(x) => Ev::Exposes(x),
+                    RuntimeEvent::HealthChanged(_) => Ev::Health,
                 };
                 r.log.lock().unwrap().push(ev);
                 r.bump.notify_waiters();
