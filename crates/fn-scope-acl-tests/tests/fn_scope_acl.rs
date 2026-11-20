@@ -563,16 +563,26 @@ fn deny_python_health_refuses_the_invoke_at_the_acl() {
     );
 }
 
-/// Positive control: an allowed window gets the v1 snapshot through the
-/// real invoke handler — `self.window` is the Tauri label, never JS
-/// input.
+/// Command denies resolve by ORIGIN, not by window label:
+/// `tauri::ipc::Authority::resolve_access` checks `is_denied` against
+/// the execution context only ("window and webview labels are not
+/// taken into account for denial"), so a capability carrying
+/// `pylair:deny-python-health` refuses it for every local webview —
+/// including windows its `windows` list never names. `python_state`,
+/// which the capability does not deny, still answers on the same
+/// window.
 #[test]
-fn python_health_answers_through_the_real_ipc_path() {
+fn a_command_deny_applies_to_the_whole_origin_not_per_window() {
     let fx = fixture(&["open"]);
     let w = fx.win("open");
-    let v = invoke(w, "python_health", json!({})).expect("open allows python_health");
-    assert_eq!(v["version"], json!(1));
-    assert_eq!(v["state"], json!("ready"));
-    assert_eq!(v["self"]["window"], json!("open"));
-    assert!(v.get("self").is_some(), "the caller-scoped row is present");
+    let out = classify(invoke(w, "python_health", json!({})));
+    assert!(
+        matches!(out, Out::Acl(_)),
+        "the deny-health capability denies it origin-wide: {out:?}"
+    );
+    assert_eq!(
+        invoke(w, "python_state", json!({})).unwrap(),
+        json!("ready"),
+        "commands the deny does not name are still allowed"
+    );
 }
