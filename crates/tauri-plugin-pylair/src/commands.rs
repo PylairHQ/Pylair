@@ -1,5 +1,5 @@
 use crate::fn_scope::{self, FnScope};
-use crate::registry::subscribed;
+use crate::registry::{subscribed, subscribed_live};
 use crate::util::state_reply;
 use crate::{protocol, supervisor, ErrorObj, Handle, PyRuntime, Registry, StreamItem};
 use serde_json::{json, Value};
@@ -18,7 +18,22 @@ async fn python_call<R: Runtime>(
     // Per-function permissions: checked before the window is subscribed or
     // anything reaches the supervisor, so a denial touches no state.
     fn_scope::check(&scope, window.label(), &fn_name)?;
-    subscribed(&window, &reg);
+    python_call_impl(&window, &reg, &rt, fn_name, input).await
+}
+
+/// `python_call`'s body, callable in tests — the real command path minus
+/// Tauri's invoke-arg deserialization and the `FnScope` check. Joins the
+/// window to the fairness live set (`subscribed_live`) before dispatch:
+/// decisions 0006 §3, amending 0005 §3.
+#[doc(hidden)]
+pub async fn python_call_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reg: &Registry,
+    rt: &PyRuntime,
+    fn_name: String,
+    input: Value,
+) -> Result<Value, ErrorObj> {
+    subscribed_live(window, reg);
     rt.0.call(
         &fn_name,
         input,
@@ -85,7 +100,7 @@ pub async fn python_call_stream_impl<R: Runtime>(
     input: Value,
     stream: Option<bool>,
 ) -> Result<StreamAck, ErrorObj> {
-    subscribed(window, reg);
+    subscribed_live(window, reg);
     let label = window.label().to_string();
     let (task, items) =
         rt.0.call_stream(&fn_name, input, Some(label.clone()), stream)
@@ -228,7 +243,20 @@ fn python_state<R: Runtime>(
     reg: tauri::State<'_, Registry>,
     rt: tauri::State<'_, PyRuntime>,
 ) -> Value {
-    subscribed(&window, &reg);
+    python_state_impl(&window, &reg, &rt)
+}
+
+/// `python_state`'s body, callable in tests — the real command path minus
+/// Tauri's invoke-arg deserialization. Subscribes the window for event
+/// delivery WITHOUT joining the fairness live set: a state-only observer
+/// reserves no share (decisions 0006 §3).
+#[doc(hidden)]
+pub fn python_state_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reg: &Registry,
+    rt: &PyRuntime,
+) -> Value {
+    subscribed(window, reg);
     state_reply(rt.0.kind(), rt.0.state(), rt.0.ready_url())
 }
 

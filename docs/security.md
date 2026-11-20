@@ -357,7 +357,9 @@ Two more bounded paths matter:
   makes a long stall fatal for apps that prefer it.
 
 Four of those caps are additionally split per caller (per-window
-fairness, decisions 0005): each live window keeps a guaranteed minimum
+fairness, decisions 0005): each live window — a window that has called
+Python through `python_call` or `python_call_stream`, not merely
+subscribed to events — keeps a guaranteed minimum
 share of `max_queued_commands`, `max_concurrent_tasks`,
 `max_concurrent_streams`, and `max_isolated_workers`. A caller over its
 share ceiling is refused before work is committed: before the command

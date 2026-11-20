@@ -19,7 +19,9 @@ mod util;
 pub mod wrap;
 
 pub use builder::{Builder, StderrDelivery};
-pub use commands::{forward_stream, python_call_stream_impl, StreamAck};
+pub use commands::{
+    forward_stream, python_call_impl, python_call_stream_impl, python_state_impl, StreamAck,
+};
 pub use protocol::ErrorObj;
 pub use registry::{PyRuntime, Registry, WindowRegistry};
 pub use selftest::{self_test_gui, self_test_headless, self_test_requested};
