@@ -16,6 +16,75 @@ import { join } from "node:path";
 import { ui } from "../ui/index.js";
 import { run } from "./util.js";
 
+// ── hdiutil with retries ──────────────────────────────────────────────
+// hdiutil intermittently fails when a system process holds the image
+// (Spotlight, XProtect, a leftover mount): "Resource busy" on create,
+// "Resource temporarily unavailable" on attach. Those messages retry;
+// anything else fails at once, as run() did.
+const HDIUTIL_TRANSIENT = /resource busy|resource temporarily unavailable/i;
+const HDIUTIL_ATTEMPTS = 5;
+
+/** The pieces of `runHdiutil` a test stubs. */
+export interface HdiutilOps {
+  /** The command's exit code and combined output. */
+  run: (args: string[]) => { code: number | null; out: string };
+  warn: (msg: string) => void;
+  sleep: (ms: number) => void;
+}
+
+const hdiutilReal: HdiutilOps = {
+  run: (args) => {
+    const r = spawnSync("hdiutil", args, { encoding: "utf-8" });
+    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  },
+  warn: (s) => ui.warn(s),
+  sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms),
+};
+
+/** Where `image` is mounted right now, per `hdiutil info`. */
+function mountsOfImage(infoOut: string, image: string): string[] {
+  const mounts: string[] = [];
+  let forImage = false;
+  for (const line of infoOut.split(/\r?\n/)) {
+    if (/^(image-path|image-alias)\s*:/.test(line)) {
+      forImage = line.slice(line.indexOf(":") + 1).trim() === image;
+    } else if (forImage && /^mount-point\s*:/.test(line)) {
+      const m = line.slice(line.indexOf(":") + 1).trim();
+      if (m) mounts.push(m);
+    }
+  }
+  return mounts;
+}
+
+/** Before an attach retry: drop mounts of the same image that a failed
+ * attach left behind, plus anything at our mountpoint. Best-effort. */
+function detachStaleMounts(o: HdiutilOps, image: string, mountpoint: string): void {
+  const stale = new Set<string>([mountpoint]);
+  const info = o.run(["info"]);
+  if (info.code === 0) for (const m of mountsOfImage(info.out, image)) stale.add(m);
+  for (const m of stale) o.run(["detach", m, "-force", "-quiet"]);
+}
+
+/** Run hdiutil, retrying only the transient lock messages: 5 attempts,
+ * waits of 1, 2, 4, 8 s between them, one warning line per retry. For
+ * attach, stale mounts of the image are detached before each retry. */
+export function runHdiutil(o: HdiutilOps, args: string[]): void {
+  const isAttach = args[0] === "attach";
+  const image = isAttach ? args[args.length - 1] : "";
+  const mount = isAttach ? args[args.indexOf("-mountpoint") + 1] : "";
+  for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt++) {
+    const r = o.run(args);
+    if (r.code === 0) return;
+    const out = r.out.trim();
+    if (!HDIUTIL_TRANSIENT.test(out) || attempt === HDIUTIL_ATTEMPTS)
+      throw new Error(`hdiutil ${args[0]} exited ${r.code}${out ? `:\n${out}` : ""}`);
+    if (isAttach) detachStaleMounts(o, image, mount);
+    const wait = 2 ** (attempt - 1); // 1, 2, 4, 8 s
+    o.warn(`hdiutil ${args[0]} failed transiently; retrying in ${wait}s (attempt ${attempt + 1}/${HDIUTIL_ATTEMPTS})`);
+    o.sleep(wait * 1000);
+  }
+}
+
 // ── macOS ad-hoc signing ──────────────────────────────────────────────
 // Mach-O magic numbers, read as the first BE u32 — includes the
 // byte-swapped forms and both fat headers.
@@ -92,11 +161,17 @@ export function adHocSign(tauriDir: string, productName: string): void {
     try {
       run("ditto", [appPath, join(staging, app)], tauriDir);
       run("ln", ["-s", "/Applications", join(staging, "Applications")], tauriDir);
-      run(
-        "hdiutil",
-        ["create", "-volname", productName, "-srcfolder", staging, "-ov", "-format", "UDZO", dmgPath],
-        tauriDir,
-      );
+      runHdiutil(hdiutilReal, [
+        "create",
+        "-volname",
+        productName,
+        "-srcfolder",
+        staging,
+        "-ov",
+        "-format",
+        "UDZO",
+        dmgPath,
+      ]);
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }
@@ -104,7 +179,7 @@ export function adHocSign(tauriDir: string, productName: string): void {
     // Verify the app INSIDE the shipped dmg — mount read-only at a fixed
     // point, verify, always detach, then judge.
     const mount = mkdtempSync(join(tmpdir(), "pylair-mnt-"));
-    run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, dmgPath], tauriDir);
+    runHdiutil(hdiutilReal, ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, dmgPath]);
     let inDmg: string | null = null;
     try {
       inDmg = codesignVerify(join(mount, app));
