@@ -56,16 +56,17 @@ const MSVC_FIX =
   'install "Desktop development with C++" via Visual Studio Installer, or repair it if an update is pending';
 
 /** The C/C++ toolchain `pylair build` needs on this OS, past cargo itself:
- * MSVC build tools on Windows (found the way cc/find-msvc-tools finds them:
- * vswhere at the standard Installer path, then a scan of the well-known
- * install dirs, never PATH), Xcode Command Line Tools on macOS, a C compiler
- * and the webkit2gtk-4.1 dev files Tauri links against on Linux. */
+ * MSVC build tools on Windows (OK only when vswhere at the standard
+ * Installer path reports an instance with the VC tools component: rustc
+ * locates MSVC via the setup instance registry vswhere reads, so files on
+ * disk without a registered instance do not link; those get a repair hint),
+ * Xcode Command Line Tools on macOS, a C compiler and the webkit2gtk-4.1 dev
+ * files Tauri links against on Linux. */
 export function nativeToolchain(e: NativeEnv): { ok: boolean; detail: string; fix?: string } {
   if (e.platform === "win32") {
     const pf86 = e.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
     const pf = e.env.ProgramFiles ?? "C:\\Program Files";
     const vswhere = join(pf86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
-    let dir: string | undefined;
     if (e.exists(vswhere)) {
       const found = e.run(vswhere, [
         "-utf8",
@@ -77,24 +78,22 @@ export function nativeToolchain(e: NativeEnv): { ok: boolean; detail: string; fi
         "-property",
         "installationPath",
       ]);
-      dir = found?.split(/\r?\n/).find((l) => l.trim());
+      const dir = found?.split(/\r?\n/).find((l) => l.trim());
+      if (dir) return { ok: true, detail: `MSVC build tools at ${dir}` };
     }
-    // find-msvc-tools also scans the well-known layout; an install whose
-    // registration broke still builds, and still counts here.
-    let viaScan: string | undefined;
+    // A link.exe on disk that vswhere does not see is a broken or
+    // half-registered install: rustc will not find it either.
     for (const root of [join(pf, "Microsoft Visual Studio", "2022"), join(pf86, "Microsoft Visual Studio", "2019"), join(pf86, "Microsoft Visual Studio", "2017")]) {
       for (const ed of ["Enterprise", "Professional", "Community", "BuildTools", "Preview"]) {
         const msvc = join(root, ed, "VC", "Tools", "MSVC");
-        if (e.list(msvc).some((v) => e.exists(join(msvc, v, "bin", "Hostx64", "x64", "link.exe")))) {
-          viaScan = join(root, ed);
-          break;
-        }
+        if (e.list(msvc).some((v) => e.exists(join(msvc, v, "bin", "Hostx64", "x64", "link.exe"))))
+          return {
+            ok: false,
+            detail: `MSVC tools found at ${join(root, ed)} but Visual Studio does not list the install`,
+            fix: "repair it from Visual Studio Installer (More > Repair)",
+          };
       }
-      if (viaScan) break;
     }
-    if (dir) return { ok: true, detail: `MSVC build tools at ${dir}` };
-    if (viaScan)
-      return { ok: true, detail: `MSVC build tools at ${viaScan} (vswhere does not see it; the install may need repair)` };
     return {
       ok: false,
       detail: "no MSVC C++ build tools found (link.exe missing)",

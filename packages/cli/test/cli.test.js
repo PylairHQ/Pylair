@@ -169,7 +169,7 @@ describe("doctor: native toolchain", () => {
     assert.match(noWorkload.fix, /Desktop development with C\+\+/);
   });
 
-  test("windows: an install vswhere does not see still counts (dir scan)", () => {
+  test("windows: an install vswhere does not see is a broken install, not a toolchain", () => {
     // join() computes the same path the source builds on any host.
     const MSVC_DIR = join("C:\\Program Files", "Microsoft Visual Studio", "2022", "Community", "VC", "Tools", "MSVC");
     const LINK = join(MSVC_DIR, "14.44.35207", "bin", "Hostx64", "x64", "link.exe");
@@ -179,9 +179,10 @@ describe("doctor: native toolchain", () => {
       (p) => p === VSWHERE || p === LINK,
       (d) => (d === MSVC_DIR ? ["14.44.35207"] : []),
     );
-    assert.equal(r.ok, true);
+    assert.equal(r.ok, false);
     assert.match(r.detail, /Community/);
-    assert.match(r.detail, /vswhere does not see it/);
+    assert.match(r.detail, /does not list the install/);
+    assert.match(r.fix, /Visual Studio Installer \(More > Repair\)/);
   });
 
   test("macos: xcode-select -p decides", () => {
