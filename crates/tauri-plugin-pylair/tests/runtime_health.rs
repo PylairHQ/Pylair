@@ -115,7 +115,7 @@ while True:
     n, = struct.unpack(">I", h)
     m = json.loads(sys.stdin.buffer.read(n))
     if m["method"] == "ping":
-        time.sleep(0.06)
+        time.sleep(0.15)
         w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
     elif m["method"] == "shutdown":
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
@@ -447,9 +447,16 @@ async fn missing_pongs_report_missing_then_kill() {
 /// (the #120-review counting fix). Between pongs the tick correctly
 /// reports one in-flight miss — the assertion reads the pong-arrival
 /// instant, which `rtt_ms.is_some()` guarantees.
+///
+/// Margins: interval 100ms, pong ~150ms — the next ping is ~50ms old
+/// when the pong lands (in flight, under one interval) and the pong
+/// still answers *after* it went out. Both directions carry ~50ms of
+/// scheduling-jitter headroom; a loaded runner's sleep overshoot
+/// cannot flip the verdict (flaked on macOS CI with 10ms margins).
 #[tokio::test]
 async fn a_pong_after_the_next_ping_is_not_a_miss() {
     let mut c = fast_config();
+    c.ping_interval = Duration::from_millis(100);
     c.missed_pongs_to_kill = 1000; // state may flap; never kill the worker
     let (events, _rx) = mpsc::channel(64);
     let h = spawn_h(spec(FAKE_SLOW_PONG), c, events);
