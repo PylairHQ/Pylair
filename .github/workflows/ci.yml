@@ -583,6 +583,10 @@ jobs:
                 echo "stderr-delivery skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
+              if grep -q "health.*skipped" "$f"; then
+                echo "health skipped on a --local leg — probe must run here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -602,6 +606,10 @@ jobs:
           # running (legitimate only on pack/registry legs).
           if grep -q '"stderr-delivery":"skipped' /tmp/wst.log; then
             echo "stderr-delivery skipped on a --local leg — probe must run here" >&2
+            exit 1
+          fi
+          if grep -q '"health":"skipped' /tmp/wst.log; then
+            echo "health skipped on a --local leg — probe must run here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -643,6 +651,10 @@ jobs:
           # running (legitimate only on pack/registry legs).
           if (Select-String -Path $out -Pattern '"stderr-delivery":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error 'stderr-delivery skipped on a --local leg — probe must run here'
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"health":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error 'health skipped on a --local leg — probe must run here'
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic

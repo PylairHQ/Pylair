@@ -152,6 +152,17 @@ recipes and known limitations: [docs/wrap.md](docs/wrap.md).
   `deny-emit`/`deny-emit-to` entries block forging those broadcasts.
   Task *control* (cancel, stream credit) stays owner-scoped and is
   unaffected.
+- **Runtime health is observable only.** `health()` returns the
+  host-observed snapshot — state, generation, restart accounting,
+  liveness verdicts (transport `"ok"|"missing"|"unknown"`, loop
+  `"ok"|"busy"|"unknown"`), load totals and the calling window's own
+  fairness row — and `onHealth` delivers `pylair://health` only on a
+  transport or loop verdict *change*, never on the ping cadence
+  (docs/decisions/0006). Both are read-only: a poller subscribes to
+  events but never joins the fairness live set, and a
+  `pylair:deny-python-health` deny is origin-wide like every command
+  deny. `pylair://health` is a broadcast event — the `Any`-listener
+  caveat above applies.
 - **`cargo audit` flags `glib 0.18.5` (RUSTSEC-2024-0429, unsound).**
   It reaches Linux builds only, transitively through Tauri's GTK chain
   (`tauri → wry → webkit2gtk → gtk`); the advisory is tracked upstream

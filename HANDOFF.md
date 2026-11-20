@@ -215,6 +215,19 @@ Merged since rc.17 (d7daaaf):
   the template `Cargo.lock`, and the npm trio; `python/` is unchanged,
   so no PyPI step.
 
+- PRs 118-124: runtime health API (`docs/decisions/0006`). `health()`
+  (the `python_health` command) returns a host-observed snapshot —
+  state, generation, restart accounting, transport + loop liveness
+  verdicts, global load totals and the calling window's own fairness
+  row — and `pylair://health` (`onHealth`) emits only when a verdict
+  *changes*. The installed-webview self-test gains a `health` check
+  through the real bridge: clean skip when the resolved crate predates
+  `python_health` (first published crate carrying it is
+  `0.1.0-rc.19`), mandatory on `--local` legs. Crate-side plus client
+  API and selftest/docs: the next release is the crate at
+  `0.1.0-rc.19` plus the npm trio at `0.1.0-rc.25` with scaffold pins
+  and the template `Cargo.lock`; `python/` is unchanged, so no PyPI
+  step.
 - PR 88: per-function permissions (crate `fn_scope`, client
   `PermissionDeniedError`, CLI capability checks, self-test
   `fn-permission` check, `docs/decisions/0004-per-function-permissions.md`).
