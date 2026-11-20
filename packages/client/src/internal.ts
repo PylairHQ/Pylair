@@ -17,6 +17,7 @@ export const CMD = {
   cancel: "plugin:pylair|python_cancel",
   retry: "plugin:pylair|python_retry",
   state: "plugin:pylair|python_state",
+  health: "plugin:pylair|python_health",
   shutdown: "plugin:pylair|python_shutdown",
 } as const;
 
