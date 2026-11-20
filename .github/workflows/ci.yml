@@ -553,7 +553,7 @@ jobs:
             # cancellation. Exit code 0 only if all pass.
             echo "── webview self-test: deb"
             # PYLAIR_MAX_TASKS=4 keeps the window-fairness flood small
-            # (main's ceiling is 3 of 4 with two live windows).
+            # (the main window ceiling is 3 of 4 with two live windows).
             PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/$APP_BIN | tee /tmp/wst-deb.log
             echo "── webview self-test: appimage"
             PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a ./squashfs-root/AppRun | tee /tmp/wst-appimage.log
