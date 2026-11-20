@@ -27,8 +27,8 @@ pub use registry::{PyRuntime, Registry, WindowRegistry};
 pub use selftest::{self_test_gui, self_test_headless, self_test_requested};
 pub use spec::{app_spawn_spec, release_spawn_spec, SpawnSpecError};
 pub use supervisor::{
-    spawn as spawn_supervisor, Handle, RuntimeEvent, RuntimeKind, SpawnSpec, State, StreamItem,
-    SupervisorConfig,
+    spawn as spawn_supervisor, Handle, HealthSnapshot, RuntimeEvent, RuntimeKind, SpawnSpec, State,
+    StreamItem, SupervisorConfig,
 };
 pub use util::same_origin;
 
