@@ -360,7 +360,7 @@ impl Handle {
 
     /// Test hook: join/leave the fairness live set. Integration tests
     /// bypass the Tauri command layer where real subscription happens
-    /// (`WindowRegistry::subscribe`).
+    /// (`WindowRegistry::subscribe_live`).
     #[doc(hidden)]
     pub fn fairness_join_window(&self, label: &str) {
         self.fair.lock().unwrap().join_window(label);

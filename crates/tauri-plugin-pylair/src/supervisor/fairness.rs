@@ -16,12 +16,14 @@
 //!   because a generation's tasks die with it (teardown, not the next
 //!   `Session::new`, so the dead generation's counts never leak into
 //!   the restart backoff).
-//! - live set: `WindowRegistry` joins on `subscribe`, leaves on
+//! - live set: `WindowRegistry` joins on `subscribe_live` — the two
+//!   call commands, `python_call`/`python_call_stream` (decisions 0006:
+//!   an event-only subscriber reserves nothing) — and leaves on
 //!   `drop_label`. The `None` host bucket is live only while it holds
 //!   work.
 //!
 //! Lock order: `WindowRegistry`'s mutex is held while this mutex is
-//! taken (`subscribe`/`drop_label` call `join_window`/`leave_window`
+//! taken (`subscribe_live`/`drop_label` call `join_window`/`leave_window`
 //! under it); every other call site takes this mutex with no lock
 //! held. Registry -> Fairness, never the reverse - and this mutex is
 //! never held while awaiting or taking any other lock.
@@ -75,7 +77,7 @@ pub(crate) struct Fairness {
     enabled: bool,
     owners: HashMap<Option<String>, Counts>,
     /// Live webview labels, maintained by `WindowRegistry` (join on
-    /// `subscribe`, leave on `drop_label`).
+    /// `subscribe_live`, leave on `drop_label`).
     live_windows: HashSet<String>,
 }
 
@@ -88,7 +90,8 @@ impl Fairness {
         }))
     }
 
-    /// A webview invoked its first Pylair command (`WindowRegistry::subscribe`).
+    /// A webview invoked its first Python call (`WindowRegistry::subscribe_live`,
+    /// via `python_call`/`python_call_stream`).
     pub(crate) fn join_window(&mut self, label: &str) {
         if self.enabled {
             self.live_windows.insert(label.to_string());

@@ -14,9 +14,11 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::test::{mock_context, noop_assets, MockRuntime};
 use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tauri_plugin_pylair::supervisor::{SpawnSpec, State};
+use tauri_plugin_pylair::protocol as proto;
+use tauri_plugin_pylair::supervisor::{Limits, SpawnSpec, State};
 use tauri_plugin_pylair::{
-    python_call_stream_impl, Builder, PyRuntime, Registry, SupervisorConfig,
+    python_call_impl, python_call_stream_impl, python_state_impl, Builder, PyRuntime, Registry,
+    SupervisorConfig,
 };
 
 fn python() -> PathBuf {
@@ -201,4 +203,149 @@ fn command_path_declared_intents_and_mismatches() {
         vec![json!({"task": payloads[0]["task"], "done": true, "result": 9})],
         "legacy no-intent call must succeed unvalidated: {payloads:?}"
     );
+}
+
+fn wait_until(mut ok: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition never met: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// 0006 PR 0 (amends 0005 §3): event subscription and the fairness live
+/// set are separate memberships. A window that only polls `python_state`
+/// receives events but reserves no share — it must not shrink a live
+/// window's ceiling. Its first `python_call` joins, and ceilings move.
+/// Driven through the real command bodies, not the test-only
+/// `fairness_join_window` hook.
+#[test]
+fn observer_window_joins_fairness_only_on_its_first_call() {
+    let mut cfg = SupervisorConfig::default();
+    cfg.hello_timeout = Duration::from_secs(15);
+    cfg.shutdown_grace = Duration::from_secs(2);
+    // cap 4, two live windows -> ceiling 3 (the fairness unit-test
+    // worked example the selftest also relies on).
+    cfg.limits = Limits::default().with_max_concurrent_tasks(4);
+    let app = tauri::test::mock_builder()
+        .plugin(
+            Builder::<MockRuntime>::new(real_runtime_spec())
+                .config(cfg)
+                .build(),
+        )
+        .build(mock_context(noop_assets()))
+        .expect("app builds with the plugin");
+    let w_main: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+    let w_obs: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "observer", WebviewUrl::default())
+            .build()
+            .unwrap();
+
+    let rt_state = app.state::<PyRuntime>();
+    let reg = app.state::<Registry>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while rt_state.0.state() != State::Ready {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime never reached Ready (at {:?})",
+            rt_state.0.state()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = &rt_state.0;
+
+    // main's first python_call joins it to the live set.
+    rt.block_on(python_call_impl(
+        &w_main,
+        &reg,
+        &rt_state,
+        "add".into(),
+        json!({"a": 1, "b": 2}),
+    ))
+    .expect("main's first call");
+    assert!(h.fairness_snapshot().is_live(Some("main")));
+    assert_eq!(h.fairness_snapshot().live_count(), 1);
+
+    // main holds 3 of the 4 task slots: echo_later stays in flight ~30s,
+    // far past the end of this test.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task(
+                "echo_later",
+                json!({"text": "x", "delay": 30.0}),
+                Some("main".into()),
+                Some(false),
+            )
+            .expect("main's hold calls are inside its share"),
+        );
+    }
+    wait_until(
+        || h.fairness_snapshot().usage(Some("main")).1 == 3,
+        "main's three echo_later tasks in flight",
+    );
+
+    // The observer polls state — events reach it but it joins nothing:
+    // liveness and main's ceiling are unchanged.
+    for _ in 0..2 {
+        assert_eq!(
+            python_state_impl(&w_obs, &reg, &rt_state),
+            json!("ready"),
+            "python_state answers the bridge state string"
+        );
+    }
+    assert!(
+        !h.fairness_snapshot().is_live(Some("observer")),
+        "a state-only observer must not be live"
+    );
+    assert_eq!(h.fairness_snapshot().live_count(), 1);
+
+    // main's 4th call still fits: its ceiling is the whole cap while the
+    // observer stays unjoined.
+    rt.block_on(python_call_impl(
+        &w_main,
+        &reg,
+        &rt_state,
+        "add".into(),
+        json!({"a": 3, "b": 4}),
+    ))
+    .expect("a state-only observer reserves nothing — main keeps the full cap");
+
+    // The observer's first python_call joins it; ceilings move.
+    rt.block_on(python_call_impl(
+        &w_obs,
+        &reg,
+        &rt_state,
+        "add".into(),
+        json!({"a": 1, "b": 1}),
+    ))
+    .expect("observer's first call");
+    assert!(h.fairness_snapshot().is_live(Some("observer")));
+    assert_eq!(h.fairness_snapshot().live_count(), 2);
+
+    // main's 3 in-flight tasks now meet its two-window ceiling of 3: the
+    // next call is refused window_share — the identical call that was
+    // admitted a moment ago.
+    let err = rt
+        .block_on(python_call_impl(
+            &w_main,
+            &reg,
+            &rt_state,
+            "add".into(),
+            json!({"a": 5, "b": 6}),
+        ))
+        .expect_err("main is at its shrunken ceiling");
+    assert_eq!(err.code, proto::LIMIT_EXCEEDED);
+    let data = err.data.expect("window_share carries the ceiling");
+    assert_eq!(data["limit"], json!("window_share"));
+    assert_eq!(data["max"], json!(3));
+    assert_eq!(data["window"], json!("main"));
 }
