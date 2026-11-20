@@ -3,6 +3,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Vendored ui sources (scripts/sync-ui.mjs regenerates from packages/cli)
+packages/create-pylair/src/ui/
+
 # Rust
 target/
 

@@ -12,10 +12,24 @@ function scaffold(args, cwd) {
   return spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", cwd });
 }
 
+const EXPECTED_BRIDGE_STDOUT =
+  "Created my-app/ (bridge)\n\n" +
+  "Next:\n" +
+  "  cd my-app\n" +
+  "  npm install         # or pnpm install\n" +
+  "  uv sync             # python env (https://docs.astral.sh/uv/)\n" +
+  "  npx pylair dev      # supervised dev: python hot reload + vite\n" +
+  "                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n" +
+  "  npx pylair build    # native installer with bundled python\n" +
+  "  npx pylair doctor   # diagnose environment any time\n\n";
+
 test("scaffolds a complete app skeleton", () => {
   const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
   const res = scaffold(["my-app"], dir);
   assert.equal(res.status, 0, res.stderr);
+  // Spawned with piped stdio the run never prompts; its finish block is
+  // byte-exact so scripted callers see stable output.
+  assert.equal(res.stdout, EXPECTED_BRIDGE_STDOUT);
   const app = join(dir, "my-app");
   for (const f of [
     "pyproject.toml",
@@ -108,6 +122,7 @@ test("--mode wrap works without --local since wrap mode is published", () => {
   const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
   const res = scaffold(["w-app", "--mode", "wrap"], dir);
   assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /^Created w-app\/ \(wrap, command\)/m);
   const app = join(dir, "w-app");
   const py = readFileSync(join(app, "pyproject.toml"), "utf8");
   assert.match(py, /mode = "wrap"/);
@@ -168,6 +183,47 @@ test("--mode must be bridge or wrap, and the bridge template is untouched", () =
   assert.equal(ok.status, 0, ok.stderr);
   assert.ok(existsSync(join(dir, "b-app/src/App.tsx")));
   assert.ok(!existsSync(join(dir, "b-app/ui")));
+  rmSync(dir, { recursive: true });
+});
+
+test("--framework scaffolds the per-framework wrap variant without prompting", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const res = scaffold(["g-app", "--mode", "wrap", "--framework", "gradio"], dir);
+  assert.equal(res.status, 0, res.stderr);
+  const app = join(dir, "g-app");
+  const py = readFileSync(join(app, "pyproject.toml"), "utf8");
+  assert.match(py, /framework = "gradio"/);
+  assert.match(py, /entry = "app\.py"/);
+  assert.match(py, /"gradio>=5,<6"/);
+  assert.ok(existsSync(join(app, "app", "app.py")));
+  assert.ok(!existsSync(join(app, "app", "main.py")), "gradio ships app.py, not the FastAPI sample");
+  assert.match(readFileSync(join(app, "requirements.txt"), "utf8"), /gradio>=5,<6/);
+  assert.match(res.stdout, /Created g-app\/ \(wrap, gradio\)/);
+
+  // --framework alone means wrap: no --mode needed.
+  const res2 = scaffold(["s-app", "--framework", "streamlit"], dir);
+  assert.equal(res2.status, 0, res2.stderr);
+  assert.match(readFileSync(join(dir, "s-app", "pyproject.toml"), "utf8"), /framework = "streamlit"/);
+  assert.match(res2.stdout, /Created s-app\/ \(wrap, streamlit\)/);
+  rmSync(dir, { recursive: true });
+});
+
+test("bad flag combinations fail loudly without prompting", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const fw = scaffold(["x-app", "--framework", "flask"], dir);
+  assert.equal(fw.status, 1);
+  assert.match(fw.stderr, /--framework must be "command", "gradio" or "streamlit"/);
+  const both = scaffold(["x-app", "--mode", "bridge", "--framework", "gradio"], dir);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /--framework is for wrap mode/);
+  rmSync(dir, { recursive: true });
+});
+
+test("spawned output is ASCII-only and never prompts without a TTY", () => {
+  const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));
+  const res = scaffold(["ascii-app", "--mode", "wrap", "--framework", "gradio"], dir);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout + res.stderr, /^[\x09\x0a\x0d\x20-\x7e]*$/);
   rmSync(dir, { recursive: true });
 });
 

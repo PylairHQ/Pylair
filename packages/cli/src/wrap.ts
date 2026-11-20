@@ -19,6 +19,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { basename, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { ui } from "./ui/index.js";
+import { askSelect, askText, interactive, type PromptIo } from "./ui/prompts.js";
 import { cliVersion } from "./version.js";
 import { parseWrapConfig, type WrapConfig, type WrapFramework } from "./wrapconfig.js";
 
@@ -37,6 +38,15 @@ export interface InitWrapOptions {
   /** Ask a yes/no question (the `uv init` offer). Default: prompt on a TTY,
    * answer no otherwise. */
   ask?: (question: string) => Promise<boolean>;
+  /** Pick a framework when none can be inferred. Default: an interactive
+   * select on a TTY, undefined otherwise (the caller then errors). */
+  chooseFramework?: () => Promise<WrapFramework | undefined>;
+  /** Ask for the entry file a non-command framework needs. Default: an
+   * interactive text prompt on a TTY, undefined otherwise. */
+  askEntry?: () => Promise<string | undefined>;
+  /** Ask for the server command a "command" framework needs. Default: an
+   * interactive text prompt on a TTY, undefined otherwise. */
+  askCmd?: () => Promise<string[] | undefined>;
   log?: (msg: string) => void;
 }
 
@@ -94,6 +104,69 @@ export function wrapToml(w: WrapConfig, source: string): string {
   if (w.readyPath !== undefined) lines.push(`ready-path = ${tomlString(w.readyPath)}`);
   lines.push(`ready-timeout = ${w.readyTimeout}`, `downloads = ${tomlString(w.downloads)}`);
   return lines.join("\n") + "\n";
+}
+
+const FRAMEWORK_CHOICES: { value: WrapFramework; label: string }[] = [
+  { value: "command", label: "a server command (uvicorn, gunicorn, ...)" },
+  { value: "gradio", label: "Gradio" },
+  { value: "streamlit", label: "Streamlit" },
+];
+
+function promptIo(): PromptIo {
+  return { input: process.stdin, output: process.stdout, caps: ui.caps };
+}
+
+/** The interactive framework select for `pylair wrap`: only on a TTY outside
+ * CI; otherwise undefined and the caller falls back to the flag error. */
+async function chooseFramework(): Promise<WrapFramework | undefined> {
+  if (!interactive(process.stdin, process.env)) return undefined;
+  return askSelect(promptIo(), "what does the app run?", FRAMEWORK_CHOICES);
+}
+
+/** The entry file a gradio/streamlit app needs, asked only on a TTY. */
+async function askEntry(appDir: string): Promise<string | undefined> {
+  if (!interactive(process.stdin, process.env)) return undefined;
+  return askText(promptIo(), "entry file (for example app/main.py)", (v) =>
+    existsSync(join(appDir, v)) ? undefined : `no such file: ${v}`);
+}
+
+/** The server argv a "command" framework needs, typed as one line on a TTY. */
+async function askCmd(): Promise<string[] | undefined> {
+  if (!interactive(process.stdin, process.env)) return undefined;
+  const line = await askText(
+    promptIo(),
+    "server command (for example: python -m uvicorn main:app --port {port})",
+  );
+  return splitCmd(line);
+}
+
+/** Split a typed command line into argv, honoring single and double quotes.
+ * Not a shell parser: no escapes or operators, just quoting. */
+export function splitCmd(text: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | undefined;
+  let seen = false;
+  for (const ch of text) {
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      seen = true;
+    } else if (/\s/.test(ch)) {
+      if (cur || seen) {
+        out.push(cur);
+        cur = "";
+        seen = false;
+      }
+    } else {
+      cur += ch;
+      seen = true;
+    }
+  }
+  if (cur || seen) out.push(cur);
+  return out;
 }
 
 async function promptYesNo(question: string): Promise<boolean> {
@@ -156,20 +229,32 @@ export async function initWrap(opts: InitWrapOptions): Promise<InitWrapResult> {
   } else {
     if (existing && Object.keys(existing).length)
       throw new Error(`${pyproject} already has a [tool.pylair] table without mode = "wrap"; edit it by hand`);
-    const framework = opts.framework ?? (opts.cmd ? "command" : inferFramework(manifestText));
+    const framework =
+      opts.framework ??
+      (opts.cmd ? "command" : inferFramework(manifestText)) ??
+      (await (opts.chooseFramework ?? chooseFramework)());
     if (!framework)
       throw new Error(
         `cannot tell which framework to run: pass --framework command|gradio|streamlit ` +
           `(and --cmd <argv...> for command, or an entry file for gradio/streamlit)`,
       );
-    const entryPath = opts.entry?.replace(/\\/g, "/");
+    // A "command" framework needs the server argv, other frameworks an
+    // entry file; when the command line did not give them a TTY gets one
+    // more prompt before the config error can.
+    const entryOpt =
+      framework !== "command" && opts.entry === undefined
+        ? await (opts.askEntry ?? (() => askEntry(appDir)))()
+        : undefined;
+    const cmdOpt =
+      framework === "command" && opts.cmd === undefined ? await (opts.askCmd ?? askCmd)() : opts.cmd;
+    const entryPath = (opts.entry ?? entryOpt)?.replace(/\\/g, "/");
     source = opts.source ?? (entryPath && entryPath.includes("/") ? entryPath.slice(0, entryPath.lastIndexOf("/")) : entryPath ? "." : "app");
     const entryInSource =
       entryPath && source !== "." && entryPath.startsWith(source + "/") ? entryPath.slice(source.length + 1) : entryPath;
     config = parseWrapConfig(
       {
         framework,
-        ...(framework === "command" ? { cmd: opts.cmd } : { entry: entryInSource }),
+        ...(framework === "command" ? { cmd: cmdOpt } : { entry: entryInSource }),
       },
       pyproject,
     );

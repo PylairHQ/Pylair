@@ -3,7 +3,7 @@ name = "__APP_NAME__"
 version = "0.1.0"
 description = "A Pylair wrap-mode desktop app"
 requires-python = ">=3.12"
-dependencies = ["__PYLAIR_PY__", "fastapi>=0.115", "uvicorn>=0.30"]
+dependencies = [__WRAP_DEPS__]
 
 [tool.pylair]
 mode = "wrap"
@@ -13,13 +13,14 @@ requirements = "requirements.txt"
 python-version = "3.12"
 # prune = ["extra/deny-glob"]   # extend the default bundle deny-list
 
-# Wrap mode shows a Python web UI you already have in the window. This
-# sample runs a FastAPI app with uvicorn; replace `cmd` with your own
-# server. {port} is replaced by the port Pylair picks, and the server must
-# listen on 127.0.0.1 only.
+# Wrap mode shows a Python web UI you already have in the window. The
+# scaffolded sample serves the app in app/; point `cmd` or `entry` at
+# yours. With framework = "command", `cmd` runs your server: {port} is
+# replaced by the port Pylair picks, and the server must listen on
+# 127.0.0.1 only.
 [tool.pylair.wrap]
-framework = "command"
-cmd = ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "{port}"]
+framework = "__WRAP_FRAMEWORK__"
+__WRAP_RUN__
 # ready-path = "/"      # probed until the server answers, then every 10s
 #                       # (default: "/" for command, per-framework for the adapters)
 ready-timeout = 120     # seconds to wait for the first answer
