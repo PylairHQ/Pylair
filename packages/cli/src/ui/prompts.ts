@@ -133,6 +133,20 @@ async function readLineRetry(
   return buf.trim();
 }
 
+/** `label: ` for bare labels, `label? ` when the label already ends in
+ * question punctuation, so a question mark never gains a colon (`label?:`). */
+function questionSuffix(label: string): string {
+  return /[?!.:]$/.test(label) ? " " : ": ";
+}
+
+/** Every prompt resolves the same way: the ok mark, the question and the
+ * answer, styled like a completed step. */
+function resolved(io: PromptIo, label: string, answer: string): void {
+  io.output.write(
+    `${symbolsFor(io.caps).ok} ${label}${questionSuffix(label)}${paint(io.caps, "muted", answer)}\n`,
+  );
+}
+
 /** Free-text question. `validate` returns an error message to show (then the
  * question repeats) or undefined to accept. Empty answers repeat. */
 export async function askText(
@@ -141,14 +155,19 @@ export async function askText(
   validate?: (value: string) => string | undefined,
 ): Promise<string> {
   let answer = "";
-  await readLineRetry(io, () => io.output.write(`${label}: `), (v) => {
-    const bad = v ? validate?.(v) : "a value is required";
-    if (bad === undefined) {
-      answer = v;
-      return undefined;
-    }
-    return bad;
-  });
+  await readLineRetry(
+    io,
+    () => io.output.write(`${label}${questionSuffix(label)}`),
+    (v) => {
+      const bad = v ? validate?.(v) : "a value is required";
+      if (bad === undefined) {
+        answer = v;
+        return undefined;
+      }
+      return bad;
+    },
+  );
+  resolved(io, label, answer);
   return answer;
 }
 
@@ -164,7 +183,7 @@ export async function askSelect<T>(io: PromptIo, label: string, options: SelectO
   if (!io.caps.fancy) {
     const list = options.map((o, i) => `  ${i + 1}) ${o.label}`).join("\n");
     let first = true;
-    let chosen: T | undefined;
+    let chosen: SelectOption<T> | undefined;
     await readLineRetry(
       io,
       () => {
@@ -177,13 +196,14 @@ export async function askSelect<T>(io: PromptIo, label: string, options: SelectO
       (v) => {
         const n = Number(v);
         if (Number.isInteger(n) && n >= 1 && n <= options.length) {
-          chosen = options[n - 1].value;
+          chosen = options[n - 1];
           return undefined;
         }
         return `type a number between 1 and ${options.length}`;
       },
     );
-    return chosen as T;
+    resolved(io, label, (chosen as SelectOption<T>).label);
+    return (chosen as SelectOption<T>).value;
   }
 
   const syms = symbolsFor(io.caps);
@@ -211,6 +231,6 @@ export async function askSelect<T>(io: PromptIo, label: string, options: SelectO
   }
   // Collapse the menu into a resolved line, like a completed step.
   write(`\x1b[${options.length + 1}A\x1b[0J`);
-  write(`${syms.ok} ${label}: ${paint(io.caps, "muted", options[idx].label)}\n`);
+  resolved(io, label, options[idx].label);
   return options[idx].value;
 }

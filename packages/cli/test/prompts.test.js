@@ -40,6 +40,7 @@ describe("prompts: askText", () => {
     p.input.write("  my-app  \n");
     assert.equal(await q, "my-app");
     assert.match(p.plain(), /project name: /);
+    assert.match(p.plain(), /✔ project name: my-app/, "an answered text prompt ends with a resolved line");
   });
 
   test("a failed validation shows the message and re-asks", async () => {
@@ -93,7 +94,8 @@ describe("prompts: askSelect", () => {
     assert.equal(await q, "other");
     const shown = p.plain();
     assert.match(shown, /what are you building\?/);
-    assert.match(shown, /✔ what are you building\?: something else/);
+    assert.match(shown, /✔ what are you building\? something else/);
+    assert.doesNotMatch(shown, /\?:/, "a label ending in '?' gains no colon");
   });
 
   test("fancy: up from the first option wraps to the last", async () => {
@@ -119,6 +121,7 @@ describe("prompts: askSelect", () => {
     const shown = p.text();
     assert.match(shown, /1\) a new UI/);
     assert.match(shown, /choose 1-3/);
+    assert.match(shown, /\[ok\] pick: wrap an existing Python web app/, "a plain select ends with a resolved line");
   });
 
   test("plain: an out-of-range answer re-asks", async () => {
