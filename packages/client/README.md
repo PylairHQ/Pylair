@@ -22,7 +22,7 @@ when the window's capability does not permit the function.
 
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
-`npm i @pylair/client@0.1.0-rc.23`.
+`npm i @pylair/client@0.1.0-rc.24`.
 
 Pylair builds on [Tauri](https://tauri.app) but is not affiliated with
 or endorsed by the Tauri project.
