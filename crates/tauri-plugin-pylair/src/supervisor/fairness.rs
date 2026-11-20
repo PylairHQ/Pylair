@@ -39,17 +39,19 @@ pub(crate) type FairnessRef = Arc<Mutex<Fairness>>;
 /// Per-owner counters. An owner whose counters both reach 0 is pruned:
 /// the map stays proportional to live work, and for the `None` bucket
 /// an empty entry is exactly what removes it from the live set.
-#[derive(Debug, Default)]
-struct Counts {
-    in_queue: u64,
-    in_flight: u64,
+/// `pub` for the `FairnessSnapshot.totals` row (docs/decisions/0006 §1).
+#[doc(hidden)]
+#[derive(Debug, Default, Clone)]
+pub struct Counts {
+    pub in_queue: u64,
+    pub in_flight: u64,
     /// Of the `in_flight` tasks, how many are streams. Streams bind
     /// `max_concurrent_streams` as well as `max_concurrent_tasks`, so
     /// they need their own per-owner count.
-    in_flight_streams: u64,
+    pub in_flight_streams: u64,
     /// Of the `in_flight` tasks, how many are isolated workers - the
     /// per-owner count behind the `max_isolated_workers` share.
-    in_flight_isolated: u64,
+    pub in_flight_isolated: u64,
 }
 
 /// Which counter feeds `in_use` for a ceiling check.
@@ -72,13 +74,20 @@ pub(crate) enum Resource {
 
 #[derive(Debug)]
 pub(crate) struct Fairness {
-    /// When false (`Limits.per_window_fairness` off) every mutator is a
-    /// no-op, so disabling restores exactly today's behaviour.
+    /// When false (`Limits.per_window_fairness` off) per-OWNER counting
+    /// is a no-op, so disabling restores exactly today's behaviour.
+    /// `totals` still counts — decisions 0006 §1 chose unconditional
+    /// global totals inside `Fairness` so `Handle::health`'s `load`
+    /// works with fairness off.
     enabled: bool,
     owners: HashMap<Option<String>, Counts>,
     /// Live webview labels, maintained by `WindowRegistry` (join on
     /// `subscribe_live`, leave on `drop_label`).
     live_windows: HashSet<String>,
+    /// Global counts across ALL owners, updated BEFORE the `enabled`
+    /// early-returns at every mutator. In-flight zeroes at generation
+    /// teardown exactly like the per-owner columns.
+    totals: Counts,
 }
 
 impl Fairness {
@@ -87,6 +96,7 @@ impl Fairness {
             enabled,
             owners: HashMap::new(),
             live_windows: HashSet::new(),
+            totals: Counts::default(),
         }))
     }
 
@@ -110,6 +120,7 @@ impl Fairness {
     /// checks first).
     #[cfg(test)]
     pub(crate) fn admit_queue(&mut self, owner: &Option<String>) {
+        self.totals.in_queue += 1;
         if self.enabled {
             self.owners.entry(owner.clone()).or_default().in_queue += 1;
         }
@@ -128,6 +139,9 @@ impl Fairness {
         cap: usize,
     ) -> Result<(), usize> {
         if !self.enabled {
+            // Disabled still counts the global total: the command IS
+            // queued, and `release_queue` discharges it symmetrically.
+            self.totals.in_queue += 1;
             return Ok(());
         }
         let ceiling = self.ceiling_of(owner, Resource::Queue, cap);
@@ -136,11 +150,15 @@ impl Fairness {
             return Err(ceiling);
         }
         c.in_queue += 1;
+        self.totals.in_queue += 1;
         Ok(())
     }
 
     /// The dequeued command freed its queue slot.
     pub(crate) fn release_queue(&mut self, owner: &Option<String>) {
+        // Unconditional: every admission charged `totals` regardless of
+        // `enabled`, so every release discharges it.
+        self.totals.in_queue = self.totals.in_queue.saturating_sub(1);
         if self.enabled {
             // A release without an admission is an accounting bug; once
             // PR 2 enforces on these counts a hidden double release
@@ -164,6 +182,13 @@ impl Fairness {
         is_stream: bool,
         is_isolated: bool,
     ) {
+        self.totals.in_flight += 1;
+        if is_stream {
+            self.totals.in_flight_streams += 1;
+        }
+        if is_isolated {
+            self.totals.in_flight_isolated += 1;
+        }
         if self.enabled {
             let c = self.owners.entry(owner.clone()).or_default();
             c.in_flight += 1;
@@ -184,6 +209,13 @@ impl Fairness {
         is_stream: bool,
         is_isolated: bool,
     ) {
+        self.totals.in_flight = self.totals.in_flight.saturating_sub(1);
+        if is_stream {
+            self.totals.in_flight_streams = self.totals.in_flight_streams.saturating_sub(1);
+        }
+        if is_isolated {
+            self.totals.in_flight_isolated = self.totals.in_flight_isolated.saturating_sub(1);
+        }
         if self.enabled {
             // A task leaving must have been counted in; a silent
             // underflow would over-admit under PR 2 enforcement.
@@ -220,6 +252,12 @@ impl Fairness {
     /// `in_queue` is untouched - a queued command still owes its release
     /// when it is eventually dequeued (normally or via fail-fast).
     pub(crate) fn end_generation(&mut self) {
+        // The generation's in-flight work died with it, globally and
+        // per owner; queue debt survives exactly like the per-owner
+        // `in_queue` columns do.
+        self.totals.in_flight = 0;
+        self.totals.in_flight_streams = 0;
+        self.totals.in_flight_isolated = 0;
         if !self.enabled {
             return;
         }
@@ -285,9 +323,20 @@ impl Fairness {
         }
     }
 
+    /// One owner's counters (zeros when the owner holds nothing) — for
+    /// `Handle::health`'s caller-scoped `self` row (decisions 0006).
+    pub(crate) fn counts_of(&self, owner: &Option<String>) -> Counts {
+        self.owners.get(owner).cloned().unwrap_or_default()
+    }
+
     /// `ceiling(owner, cap)` under the decisions-0005 formula: the cap
     /// minus, per OTHER live owner, `max(0, min_reserve - in_use)`.
-    fn ceiling_of(&self, owner: &Option<String>, resource: Resource, cap: usize) -> usize {
+    pub(crate) fn ceiling_of(
+        &self,
+        owner: &Option<String>,
+        resource: Resource,
+        cap: usize,
+    ) -> usize {
         let others = self
             .owners
             .keys()
@@ -349,7 +398,10 @@ impl Fairness {
             }
         }
         owners.sort_by(|a, b| a.owner.cmp(&b.owner));
-        FairnessSnapshot { owners }
+        FairnessSnapshot {
+            owners,
+            totals: self.totals.clone(),
+        }
     }
 }
 
@@ -411,6 +463,9 @@ pub struct OwnerUsage {
 #[derive(Debug)]
 pub struct FairnessSnapshot {
     pub owners: Vec<OwnerUsage>,
+    /// Global counts across every owner — populated even when
+    /// `per_window_fairness` is off (decisions 0006 §1).
+    pub totals: Counts,
 }
 
 impl FairnessSnapshot {
@@ -464,6 +519,7 @@ mod tests {
             enabled: true,
             owners: HashMap::new(),
             live_windows: HashSet::new(),
+            totals: Counts::default(),
         }
     }
 
@@ -624,6 +680,7 @@ mod tests {
             enabled: false,
             owners: HashMap::new(),
             live_windows: HashSet::new(),
+            totals: Counts::default(),
         };
         for _ in 0..64 {
             assert_eq!(f.try_admit_queue(&Some("a".into()), 8), Ok(()));
@@ -723,6 +780,7 @@ mod tests {
             enabled: false,
             owners: HashMap::new(),
             live_windows: HashSet::new(),
+            totals: Counts::default(),
         };
         f.join_window("a");
         f.admit_queue(&Some("a".into()));

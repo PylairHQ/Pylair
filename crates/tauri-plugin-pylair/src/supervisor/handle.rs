@@ -4,16 +4,21 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
 use super::config::{Limits, RuntimeKind, State};
-use super::fairness::{release_queued, FairnessRef, FairnessSnapshot};
+use super::fairness::{release_queued, FairnessRef, FairnessSnapshot, Resource};
+use super::health::{
+    BreakerSnapshot, HealthRef, HealthSnapshot, LastExitSnapshot, LivenessSnapshot, LoadSnapshot,
+    RestartsSnapshot, SelfResource, SelfSnapshot,
+};
 use super::stream::{stream_pair, StreamRx, StreamSink};
 use crate::protocol::{self as proto, ErrorObj};
+use crate::util::fmt_state;
 
 pub(super) enum Command {
     Call {
@@ -136,6 +141,13 @@ pub struct Handle {
     /// Per-window accounting shared with the actor
     /// (docs/decisions/0005). Counting only - nothing is refused.
     pub(super) fair: FairnessRef,
+    /// The `Handle::health` reads of the shared health block
+    /// (docs/decisions/0006 §1) plus the three config constants its
+    /// schema publishes.
+    pub(super) health: HealthRef,
+    pub(super) missed_pongs_to_kill: u32,
+    pub(super) breaker_crashes: usize,
+    pub(super) breaker_window: Duration,
 }
 
 impl Handle {
@@ -172,6 +184,162 @@ impl Handle {
     /// Subscribe to state changes (UI lifecycle events).
     pub fn subscribe_state(&self) -> watch::Receiver<State> {
         self.state.clone()
+    }
+
+    /// A point-in-time observability snapshot (docs/decisions/0006 §4):
+    /// state and time-in-state, generation uptime, restart accounting,
+    /// the transport/loop liveness verdicts, global load totals, and
+    /// the CALLER's own usage/ceilings — `self` is `None` for
+    /// `owner: None` and when `per_window_fairness` is off, and never
+    /// exposes another window's row. `#[non_exhaustive]` makes additive
+    /// v1 fields semver-safe; serde serializes it for the command
+    /// boundary.
+    pub fn health(&self, owner: Option<&str>) -> HealthSnapshot {
+        let now = Instant::now();
+        let state = self.state();
+        // "live generation" = a Ready-or-Unresponsive child: liveness
+        // fields and verdicts are per-generation, so outside it they
+        // report null/unknown regardless of what the shared block holds.
+        let live = matches!(state, State::Ready | State::Unresponsive);
+        let (
+            in_state_ms,
+            generation,
+            uptime_ms,
+            last_exit,
+            crashes_in_window,
+            backoff_ms,
+            last_pong_age_ms,
+            rtt_ms,
+            missed_pongs,
+            loop_stale_ms,
+        ) = {
+            let h = self.health.lock().unwrap();
+            (
+                h.state_since.elapsed().as_millis() as u64,
+                h.generation,
+                h.ready_at
+                    .map(|t| now.saturating_duration_since(t).as_millis() as u64),
+                h.last_exit.clone(),
+                h.crashes_in_window as u64,
+                h.backoff.as_millis() as u64,
+                if live {
+                    h.last_pong_at
+                        .map(|t| now.saturating_duration_since(t).as_millis() as u64)
+                } else {
+                    None
+                },
+                if live {
+                    h.last_rtt.map(|d| d.as_millis() as u64)
+                } else {
+                    None
+                },
+                if live { h.missed_pongs } else { 0 },
+                // Outer Some/None is the bridge/web absent rule; the
+                // inner Option is "null until the first pong".
+                if self.kind == RuntimeKind::Web {
+                    None
+                } else {
+                    Some(if live {
+                        h.last_loop_stale.map(|d| d.as_millis() as u64)
+                    } else {
+                        None
+                    })
+                },
+            )
+        };
+        let transport = if !live {
+            "unknown"
+        } else if missed_pongs > 0 {
+            "missing"
+        } else {
+            "ok"
+        };
+        let loop_verdict = if !live || self.kind == RuntimeKind::Web {
+            "unknown"
+        } else {
+            match loop_stale_ms {
+                Some(Some(ms)) if ms >= super::run::LOOP_STALL_WARN.as_millis() as u64 => "busy",
+                _ => "ok",
+            }
+        };
+        let f = self.fair.lock().unwrap();
+        let totals = f.snapshot().totals;
+        let self_usage = match (self.limits.per_window_fairness, owner) {
+            (true, Some(label)) => {
+                let o = Some(label.to_string());
+                let c = f.counts_of(&o);
+                let lim = &self.limits;
+                let cell = |in_use: u64, resource: Resource, cap: usize| SelfResource {
+                    in_use,
+                    ceiling: f.ceiling_of(&o, resource, cap) as u64,
+                    cap: cap as u64,
+                };
+                Some(SelfSnapshot {
+                    window: label.to_string(),
+                    tasks: cell(c.in_flight, Resource::Tasks, lim.max_concurrent_tasks),
+                    streams: cell(
+                        c.in_flight_streams,
+                        Resource::Streams,
+                        lim.max_concurrent_streams,
+                    ),
+                    queued: cell(c.in_queue, Resource::Queue, lim.max_queued_commands),
+                    isolated: cell(
+                        c.in_flight_isolated,
+                        Resource::Isolated,
+                        lim.max_isolated_workers,
+                    ),
+                })
+            }
+            // Host-side reads and fairness-off deployments get no
+            // caller row (decisions 0006 §4).
+            _ => None,
+        };
+        drop(f);
+        HealthSnapshot {
+            version: 1,
+            kind: match self.kind {
+                RuntimeKind::Bridge => "bridge",
+                RuntimeKind::Web => "web",
+            },
+            state: fmt_state(state),
+            in_state_ms,
+            generation,
+            uptime_ms,
+            url: match self.kind {
+                RuntimeKind::Web => Some(self.ready_url()),
+                RuntimeKind::Bridge => None,
+            },
+            restarts: RestartsSnapshot {
+                crashes_in_window,
+                breaker: BreakerSnapshot {
+                    crashes: self.breaker_crashes as u64,
+                    window_ms: self.breaker_window.as_millis() as u64,
+                },
+                backoff_ms,
+                last_exit: last_exit.map(|e| LastExitSnapshot {
+                    kind: e.kind,
+                    detail: e.detail,
+                    ms_ago: e.at.elapsed().as_millis() as u64,
+                }),
+            },
+            liveness: LivenessSnapshot {
+                last_pong_age_ms,
+                rtt_ms,
+                missed_pongs,
+                missed_pongs_to_kill: self.missed_pongs_to_kill,
+                loop_stale_ms,
+                transport,
+                loop_verdict,
+            },
+            load: LoadSnapshot {
+                tasks: totals.in_flight,
+                streams: totals.in_flight_streams,
+                isolated: totals.in_flight_isolated,
+                queued: totals.in_queue,
+                stream_bytes_total: self.stream_bytes_total.load(Ordering::Relaxed),
+            },
+            self_usage,
+        }
     }
 
     /// Dispatch a call immediately (non-async, try_send) and get its task id.

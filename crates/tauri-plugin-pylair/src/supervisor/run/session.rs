@@ -77,6 +77,14 @@ impl Drop for Session<'_> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .end_generation();
+        // Per-generation liveness dies with the Session
+        // (decisions 0006 §1): pong ages, RTT and the seq map mean
+        // nothing once the child is gone.
+        self.sup
+            .health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset_generation();
     }
 }
 
@@ -90,6 +98,11 @@ impl Session<'_> {
             .pings_sent
             .load(Ordering::Relaxed)
             .saturating_sub(self.pongs_received) as u32;
+        self.sup
+            .health
+            .lock()
+            .unwrap()
+            .note_missed(pongs_outstanding);
         if pongs_outstanding >= self.sup.config.missed_pongs_to_kill {
             self.sup.set_state(
                 State::Unresponsive,
@@ -128,6 +141,11 @@ impl Session<'_> {
             if bytes.len() <= self.sup.config.max_frame {
                 *self.io.ping_slot.lock().unwrap() = Some(bytes);
                 self.io.ping_notify.notify_one();
+                self.sup
+                    .health
+                    .lock()
+                    .unwrap()
+                    .note_ping(self.ping_seq, self.sup.config.missed_pongs_to_kill as usize);
             }
         }
         ControlFlow::Continue(())
@@ -221,6 +239,15 @@ impl Session<'_> {
                         self.pongs_received += 1;
                         // Transport is alive. Is the loop SERVING?
                         let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
+                        self.sup.health.lock().unwrap().note_pong(
+                            p["seq"].as_u64(),
+                            stale,
+                            self.io
+                                .pings_sent
+                                .load(Ordering::Relaxed)
+                                .saturating_sub(self.pongs_received)
+                                as u32,
+                        );
                         match classify_pong(stale, self.sup.config.loop_stall_kill) {
                             PongVerdict::StallKill => {
                                 self.sup.set_state(

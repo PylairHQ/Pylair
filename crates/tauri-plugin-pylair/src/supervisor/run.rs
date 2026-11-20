@@ -21,6 +21,7 @@ use super::config::{
 };
 use super::fairness::{release_queued, Fairness, FairnessRef};
 use super::handle::{CancelOutcome, Command, Handle, ShutdownOutcome};
+use super::health::{self, ExitKind, HealthRef};
 #[cfg(target_os = "linux")]
 use super::platform_unix::PdeathAnchor;
 use super::spawn::spawn_child;
@@ -143,12 +144,19 @@ pub fn spawn(
     config.limits = limits.clone();
     let limits = Arc::new(limits);
     let fair = Fairness::new(limits.per_window_fairness);
+    // The health block (decisions 0006 §1) — shared with Handle like
+    // the fairness map; written only at bookkeeping points, never on
+    // a hot path.
+    let health = health::new(config.backoff_base);
     let (cmd_tx, cmd_rx) = mpsc::channel(limits.max_queued_commands);
     let (state_tx, state_rx) = watch::channel(State::Starting);
     let (ready_url_tx, ready_url_rx) = watch::channel(None::<String>);
     let kind = config.kind;
     let stream_buffer = config.stream_buffer;
     let cancel_timeout = config.cancel_timeout;
+    let missed_pongs_to_kill = config.missed_pongs_to_kill;
+    let breaker_crashes = config.breaker_crashes;
+    let breaker_window = config.breaker_window;
     let stream_bytes_total = Arc::new(AtomicU64::new(0));
     let next_task = Arc::new(AtomicU64::new(1));
     let actor = Supervisor {
@@ -162,6 +170,7 @@ pub fn spawn(
         next_id: AtomicU64::new(1),
         next_task: next_task.clone(),
         fair: fair.clone(),
+        health: health.clone(),
         fn_kinds: HashMap::new(),
         ready_since: None,
         shutdown_acks: Vec::new(),
@@ -180,8 +189,12 @@ pub fn spawn(
             cancel_timeout,
             stream_bytes_total,
             next_task,
+            missed_pongs_to_kill,
+            breaker_crashes,
+            breaker_window,
             limits,
             fair,
+            health,
         },
         actor,
     )
@@ -205,6 +218,9 @@ struct Supervisor {
     /// (docs/decisions/0005). The actor releases `in_queue` at every
     /// `cmd_rx.recv()` site and tracks `in_flight` via the Session.
     fair: FairnessRef,
+    /// Host-observed health mirrors shared with `Handle`
+    /// (docs/decisions/0006 §1) — written only at bookkeeping points.
+    health: HealthRef,
     /// The current generation's `fn_name -> kind` map, parsed out of
     /// `hello["exposes"]` when the handshake succeeds and replaced on
     /// every new generation (a dev reload's manifest can differ). An
@@ -288,6 +304,7 @@ impl Supervisor {
     fn set_state(&self, to: State, detail: impl Into<String>) {
         let from = *self.state_tx.borrow();
         if from != to {
+            self.health.lock().unwrap().note_transition();
             let _ = self.state_tx.send(to);
             let _ = self.events.try_send(RuntimeEvent::StateChanged {
                 from,
@@ -346,6 +363,7 @@ impl Supervisor {
         let mut backoff = self.config.backoff_base;
         loop {
             self.ready_since = None;
+            self.health.lock().unwrap().note_ready(None);
             self.set_state(
                 State::Starting,
                 format!("spawning (gen {})", self.generation),
@@ -369,15 +387,27 @@ impl Supervisor {
             self.set_ready_url(None);
 
             match cause {
+                // No `last_exit` for a clean stop: the schema's kinds are
+                // restart accounting (crashed | fatal | dev_restart), and
+                // an operator stop is terminal, not an exit cause.
                 ExitCause::CleanShutdown => {
                     self.set_state(State::Stopped, "shutdown");
                     return;
                 }
                 ExitCause::DevRestart => {
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_exit(ExitKind::DevRestart, "source changed".into());
                     self.set_state(State::Restarting, "source changed");
                     self.generation += 1;
+                    self.health.lock().unwrap().note_generation(self.generation);
                 }
                 ExitCause::Fatal(reason) => {
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_exit(ExitKind::Fatal, reason.clone());
                     self.set_state(State::Failed, reason);
                     if !self.park_failed().await {
                         return;
@@ -385,9 +415,18 @@ impl Supervisor {
                     // operator retried: fresh counters, spawn again
                     crashes.clear();
                     backoff = self.config.backoff_base;
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_restart_accounting(0, backoff);
                     self.generation += 1;
+                    self.health.lock().unwrap().note_generation(self.generation);
                 }
                 ExitCause::Crashed(reason) => {
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_exit(ExitKind::Crashed, reason.clone());
                     // Surviving Ready for a whole breaker window counts as
                     // healthy — the crash that follows is a fresh incident,
                     // not evidence of a boot loop.
@@ -397,6 +436,10 @@ impl Supervisor {
                     {
                         crashes.clear();
                         backoff = self.config.backoff_base;
+                        self.health
+                            .lock()
+                            .unwrap()
+                            .note_restart_accounting(0, backoff);
                     }
                     let now = Instant::now();
                     while crashes
@@ -406,6 +449,10 @@ impl Supervisor {
                         crashes.pop_front();
                     }
                     crashes.push_back(now);
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_restart_accounting(crashes.len(), backoff);
                     if crashes.len() >= self.config.breaker_crashes {
                         self.set_state(
                             State::Failed,
@@ -420,7 +467,12 @@ impl Supervisor {
                         }
                         crashes.clear();
                         backoff = self.config.backoff_base;
+                        self.health
+                            .lock()
+                            .unwrap()
+                            .note_restart_accounting(0, backoff);
                         self.generation += 1;
+                        self.health.lock().unwrap().note_generation(self.generation);
                         continue;
                     }
                     self.set_state(State::Restarting, reason);
@@ -429,7 +481,12 @@ impl Supervisor {
                         return;
                     }
                     backoff = (backoff * 2).min(self.config.backoff_cap);
+                    self.health
+                        .lock()
+                        .unwrap()
+                        .note_restart_accounting(crashes.len(), backoff);
                     self.generation += 1;
+                    self.health.lock().unwrap().note_generation(self.generation);
                 }
             }
         }

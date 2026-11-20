@@ -63,6 +63,7 @@
 mod config;
 pub(crate) mod fairness;
 mod handle;
+mod health;
 #[cfg(not(windows))]
 mod platform_unix;
 #[cfg(windows)]
@@ -79,6 +80,10 @@ pub use config::{Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, Supervisor
 #[doc(hidden)]
 pub use fairness::{FairnessSnapshot, OwnerUsage};
 pub use handle::{CallTask, CancelOutcome, Handle, ShutdownOutcome};
+pub use health::{
+    BreakerSnapshot, ExitKind, HealthSnapshot, LastExitSnapshot, LivenessSnapshot, LoadSnapshot,
+    RestartsSnapshot, SelfResource, SelfSnapshot,
+};
 #[cfg(target_os = "linux")]
 pub use platform_unix::pdeath_anchor_threads;
 pub use run::spawn;

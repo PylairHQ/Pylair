@@ -114,6 +114,7 @@ impl Supervisor {
                 ControlFlow::Break(cause) => return ControlFlow::Break(cause),
             };
             self.ready_since = Some(Instant::now());
+            self.health.lock().unwrap().note_ready(self.ready_since);
             // The url is published before the transition so that anyone
             // woken by the Ready state already finds it.
             self.set_ready_url(Some(url));
@@ -121,6 +122,7 @@ impl Supervisor {
             return ControlFlow::Continue(io);
         }
         self.ready_since = Some(Instant::now());
+        self.health.lock().unwrap().note_ready(self.ready_since);
         self.set_state(State::Ready, "handshake complete");
         ControlFlow::Continue(io)
     }
