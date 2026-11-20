@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { ui } from "./ui/index.js";
 import { cliVersion } from "./version.js";
 import { parseWrapConfig, type WrapConfig, type WrapFramework } from "./wrapconfig.js";
 
@@ -108,7 +109,9 @@ async function promptYesNo(question: string): Promise<boolean> {
 
 export async function initWrap(opts: InitWrapOptions): Promise<InitWrapResult> {
   const { appDir } = opts;
-  const log = opts.log ?? ((m: string) => console.log(m));
+  const log =
+    opts.log ??
+    ((m: string) => (m.startsWith("warning:") && ui.caps.fancy ? ui.warn(m) : ui.line(m)));
   const ask = opts.ask ?? promptYesNo;
   const pyproject = join(appDir, "pyproject.toml");
   const requirements = join(appDir, "requirements.txt");

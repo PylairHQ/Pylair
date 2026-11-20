@@ -4,6 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ui } from "../ui/index.js";
 
 /** pyc invalidation mode shipped in installers — see docs/build.md.
  * checked-hash: installers rewrite mtimes, so timestamp pycs silently
@@ -66,10 +67,10 @@ export function compileBytecode(
     ...String(r.stdout).matchAll(/^\*\*\* Error compiling '([^']+)'/gm),
   ].map((m) => m[1].replace(/\\\\/g, "\\")); // repr-escaped on Windows
   const shown = failed.slice(0, 10).join("\n  ");
-  console.warn(
+  ui.warn(
     `warning: ${failed.length} file(s) failed to byte-compile and are left` +
-      ` uncompiled — they will compile (or fail to import) as normal at` +
-      ` runtime:\n  ${shown}${failed.length > 10 ? `\n  …and ${failed.length - 10} more` : ""}`,
+      ` uncompiled; they will compile (or fail to import) as normal at` +
+      ` runtime:\n  ${shown}${failed.length > 10 ? `\n  and ${failed.length - 10} more` : ""}`,
   );
   return failed;
 }

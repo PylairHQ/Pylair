@@ -49,7 +49,7 @@ export interface TauriConfig {
 export function loadConfig(appDir: string): PylairConfig {
   const pyproject = join(appDir, "pyproject.toml");
   if (!existsSync(pyproject))
-    throw new Error(`no pyproject.toml in ${appDir} — is this a pylair app?`);
+    throw new Error(`no pyproject.toml in ${appDir}: is this a pylair app?`);
 
   let raw: Record<string, unknown>;
   try {
@@ -92,7 +92,7 @@ export function loadTauriConfig(appDir: string): TauriConfig {
   const p = join(appDir, "src-tauri", "tauri.conf.json");
   if (!existsSync(p))
     throw new Error(
-      `no src-tauri/tauri.conf.json in ${appDir} — run this inside a pylair app`,
+      `no src-tauri/tauri.conf.json in ${appDir}: run this inside a pylair app`,
     );
   const raw = JSON.parse(readFileSync(p, "utf-8"));
   return {

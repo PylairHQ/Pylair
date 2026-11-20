@@ -92,7 +92,7 @@ function into(argv: string[]): number {
 
 function scaffold(name: string, argv: string[]): number {
   if (!/^[a-z][a-z0-9-]*$/.test(name))
-    fail(`invalid app name '${name}' — use lowercase letters, digits, dashes`);
+    fail(`invalid app name '${name}': use lowercase letters, digits, dashes`);
 
   const identifier = argValue(argv, "--identifier") ?? `com.example.${name.replace(/-/g, "")}`;
   const local = argValue(argv, "--local");
@@ -115,7 +115,7 @@ function scaffold(name: string, argv: string[]): number {
 
   copyTree(templateDir, dest, substitutions(name, identifier, local));
   if (!statSync(join(dest, "src-tauri/tauri.conf.json")).isFile())
-    fail("template produced no tauri.conf.json — internal error");
+    fail("template produced no tauri.conf.json (internal error)");
 
   console.log(
     template === "wrap"

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBuildArgs, resolveAppDir } from "../dist/cli.js";
+import { nativeToolchain } from "../dist/doctor.js";
 
 const cli = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 const pkgVersion = JSON.parse(
@@ -130,4 +131,96 @@ test("doctor --dir ./some-app from the parent reports the same app as running in
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
+});
+
+describe("doctor: native toolchain", () => {
+  const VSWHERE = join("C:\\Program Files (x86)", "Microsoft Visual Studio", "Installer", "vswhere.exe");
+  const check = (platform, run, exists = () => false, list = () => []) =>
+    nativeToolchain({
+      platform,
+      run,
+      exists,
+      list,
+      env: { "ProgramFiles(x86)": "C:\\Program Files (x86)" },
+    });
+
+  test("windows: vswhere (not PATH) locates the MSVC C++ workload", () => {
+    const r = check(
+      "win32",
+      (cmd, args) => {
+        assert.equal(cmd, VSWHERE, "must probe the installed-vswhere path, not PATH");
+        assert.ok(args.includes("Microsoft.VisualStudio.Component.VC.Tools.x86.x64"), args.join(" "));
+        return "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\n";
+      },
+      (p) => p === VSWHERE,
+    );
+    assert.equal(r.ok, true);
+    assert.match(r.detail, /MSVC build tools at/);
+  });
+
+  test("windows: no Visual Studio Installer or no C++ workload fails with the fix", () => {
+    const noInstaller = check("win32", () => null, () => false);
+    assert.equal(noInstaller.ok, false);
+    assert.match(noInstaller.fix, /Desktop development with C\+\+/);
+    assert.match(noInstaller.fix, /Visual Studio Installer/);
+    const noWorkload = check("win32", () => "", () => true);
+    assert.equal(noWorkload.ok, false);
+    assert.match(noWorkload.detail, /no MSVC C\+\+ build tools/);
+    assert.match(noWorkload.fix, /Desktop development with C\+\+/);
+  });
+
+  test("windows: an install vswhere does not see is a broken install, not a toolchain", () => {
+    // join() computes the same path the source builds on any host.
+    const MSVC_DIR = join("C:\\Program Files", "Microsoft Visual Studio", "2022", "Community", "VC", "Tools", "MSVC");
+    const LINK = join(MSVC_DIR, "14.44.35207", "bin", "Hostx64", "x64", "link.exe");
+    const r = check(
+      "win32",
+      () => "",
+      (p) => p === VSWHERE || p === LINK,
+      (d) => (d === MSVC_DIR ? ["14.44.35207"] : []),
+    );
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /Community/);
+    assert.match(r.detail, /does not list the install/);
+    assert.match(r.fix, /Visual Studio Installer \(More > Repair\)/);
+  });
+
+  test("macos: xcode-select -p decides", () => {
+    assert.equal(check("darwin", () => "/Library/Developer/CommandLineTools").ok, true);
+    const r = check("darwin", () => null);
+    assert.equal(r.ok, false);
+    assert.match(r.fix, /xcode-select --install/);
+  });
+
+  test("linux: a C compiler AND the webkit2gtk-4.1 dev package are required", () => {
+    const ok = check("linux", (cmd, args) => {
+      if (args[0] === "--exists") return "";
+      if (args[0] === "--modversion") return "2.46.5";
+      if (cmd === "cc") return "cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0";
+      return "1.8.1";
+    });
+    assert.equal(ok.ok, true);
+    assert.match(ok.detail, /webkit2gtk-4\.1 2\.46\.5/);
+
+    const noGtk = check("linux", (cmd, args) =>
+      args[0] === "--exists" ? null : cmd === "cc" ? "cc 13.3.0" : "1.8.1",
+    );
+    assert.equal(noGtk.ok, false);
+    assert.match(noGtk.detail, /webkit2gtk-4\.1/);
+    assert.match(noGtk.fix, /libwebkit2gtk-4\.1-dev/);
+
+    const noCc = check("linux", (cmd, args) =>
+      ["cc", "gcc", "clang"].includes(cmd) ? null : args[0] === "--modversion" ? "2.46.5" : "",
+    );
+    assert.equal(noCc.ok, false);
+    assert.match(noCc.detail, /C compiler/);
+    assert.match(noCc.fix, /build-essential/);
+  });
+
+  test("linux: missing pkg-config cannot prove webkit2gtk, so both land in the fix", () => {
+    const r = check("linux", (cmd) => (cmd === "pkg-config" ? null : "cc 13.3.0"));
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /pkg-config/);
+    assert.match(r.fix, /pkg-config.*libwebkit2gtk-4\.1-dev/);
+  });
 });

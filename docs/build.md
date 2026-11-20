@@ -25,8 +25,32 @@ pyproject.toml [tool.pylair] + src-tauri/tauri.conf.json
    bundled interpreter (checked-hash pycs — see below)
 6. import-check the app module with the staged tree
 7. npx tauri build
-8. warn loudly if no signing credentials are configured
+8. warn (one line, linking the Signing section) if no signing
+   credentials are configured
 ```
+
+## What the output looks like
+
+On an interactive terminal `pylair build` prints a short header (app, version,
+platform), one line per stage with its time (`bundle python`, `install deps`,
+`stage app`, `prune`, `compile bytecode`, `smoke test`, `build installer`), the
+uv and tauri output folded into one live progress line, and a summary listing
+each installer with its size. If a tool fails its whole captured log is printed
+before the error.
+
+- `--verbose` streams the uv and tauri output as it comes instead of folding it
+  (it is still passed on to `tauri build`).
+- `--plain` (any command) prints plain text: no colour, symbols, spinner or
+  folding. That is also what you get whenever stdout is not a terminal, in CI
+  (`CI` set), with `NO_COLOR` set, or with `TERM=dumb`. `FORCE_COLOR=1` turns the
+  styled output on anyway; `FORCE_COLOR=0` turns it off.
+- Symbols are Unicode where the console can show them and ASCII (`[ok]`, `[x]`,
+  `[!]`) otherwise. On Windows that means Unicode in Windows Terminal or after
+  `chcp 65001`, ASCII in the classic PowerShell/cmd console.
+- Plain output keeps its wording where something reads it: the `pylair
+  <command>: message` error lines, and the `pylair doctor` check lines
+  (` ok `/`FAIL`, name, detail), which now carry a `> file` and `> fix` line
+  under each failure.
 
 ## Wrap mode
 
@@ -237,7 +261,7 @@ Cross-OS installers are out of scope by design, matching Tauri's own model.
 ## Signing
 
 **Unsigned by default.** `tauri build` produces an unsigned bundle and
-pylair prints a loud warning — unsigned apps trigger Gatekeeper on macOS
+pylair prints a one-line warning: unsigned apps trigger Gatekeeper on macOS
 and SmartScreen on Windows, which is correct and intended: users should
 see that warning until real signing is configured.
 
