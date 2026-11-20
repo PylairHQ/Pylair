@@ -418,8 +418,10 @@ jobs:
               PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/app-under-test | tee /tmp/wst.log
               # rc.19+ carries python_health — a skipped check hides an
               # ACL regression, so it fails the leg (ci.yml --local guard).
-              # No single quotes — inside the quoted docker script.
-              if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q "health.*skipped" /tmp/wst.log; then
+              # Exact key — a loose "health.*skipped" would also match a
+              # later legitimately-skipped check on the one-line JSON.
+              # Escaped double quotes — inside the quoted docker script.
+              if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q "\"health\":\"skipped" /tmp/wst.log; then
                 echo "health skipped but resolved crate carries python_health" >&2
                 exit 1
               fi
@@ -497,7 +499,9 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app-under-test
         run: |
-          set -e
+          # pipefail: the webview self-test tees its log below — without
+          # it a failing app exit is masked by tee's 0.
+          set -eo pipefail
           # Take the app from the DMG — the artifact a user downloads,
           # not the intermediate under bundle/macos. Proves the signed
           # app is what ships in the image.
@@ -734,6 +738,9 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: ${{ env.APP_DIR }}
         run: |
+          # pipefail: the wrap self-test tees its log below — without it a
+          # failing app exit is masked by tee's 0.
+          set -eo pipefail
           APP="$PWD/$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)"
           touch /tmp/wrap-restart-trigger
           # A clean environment, run from outside the checkout (as the
