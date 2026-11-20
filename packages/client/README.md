@@ -20,6 +20,29 @@ bounded resource refuses the call (`.limit` names the cap — including
 `data.window` naming the over-share owner), and `PermissionDeniedError`
 when the window's capability does not permit the function.
 
+## Runtime health
+
+`health()` returns the host-observed snapshot (state, generation,
+restart accounting, liveness, load totals, and the calling window's own
+fairness row). `onHealth` delivers `pylair://health` events — emitted
+only when a liveness verdict *changes*, so "the runtime is busy" UI
+needs one subscription, not a poll loop:
+
+```ts
+import { onHealth } from "@pylair/client";
+
+const banner = document.getElementById("busy-banner")!;
+const unlisten = await onHealth((c) => {
+  banner.hidden = c.liveness.loop !== "busy";
+});
+```
+
+Both are read-only observation: they subscribe to events and never join
+the fairness live set, so a poller reserves no share. A
+`pylair:deny-python-health` capability deny is **origin-wide** — it
+refuses `health()` on every local webview, not just the window carrying
+it.
+
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
 `npm i @pylair/client@0.1.0-rc.24`.

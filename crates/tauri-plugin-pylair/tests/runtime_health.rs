@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri_plugin_pylair::supervisor::{
-    spawn, ExitKind, Handle, Limits, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
+    spawn, ExitKind, Handle, Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, SupervisorConfig,
 };
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -173,6 +173,48 @@ while True:
         # seqs 3,4 are read but never answered
     elif m["method"] == "shutdown":
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
+/// The Web kind: hello, then `ready {url}` (Ready waits for it,
+/// protocol-v1 4.1), then seq-echoing pongs with NO loop_stale_ms —
+/// the wrapped server cannot measure the loop, matching the real
+/// launcher (_launcher.py). Its steady verdict is {ok, unknown}.
+const FAKE_WEB: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+w({"jsonrpc":"2.0","method":"ready","params":{"url":"http://127.0.0.1:4242/"}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
+/// The Web kind gone silent: hello + `ready {url}` (Ready still
+/// arrives), then reads frames but never pongs — the transport
+/// verdict flips {ok, unknown} → {missing, unknown}.
+const FAKE_WEB_NO_PONG: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+w({"jsonrpc":"2.0","method":"ready","params":{"url":"http://127.0.0.1:4242/"}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+    # every other frame is read and ignored — no pongs, ever
 "#;
 
 /// Reads every frame so the pipe never backpressures, answers
@@ -699,4 +741,49 @@ async fn the_unresponsive_cause_flip_emits_health_not_state() {
         1,
         "the intra-state cause flip must not produce a second onState event"
     );
+}
+
+/// The per-kind baseline (#122 review): a Web runtime's steady verdict
+/// is `{ok, unknown}` — its loop is never measured — so its first
+/// pong is NOT news and must not manufacture a `{ok, ok} → {ok,
+/// unknown}` event. The transport can still flip for real: a web
+/// runtime that stops ponging emits `{missing, unknown}` — the loop
+/// verdict stays `"unknown"` throughout, never a fabricated `"ok"`.
+#[tokio::test]
+async fn a_web_runtime_emits_nothing_steady_and_missing_on_silence() {
+    let (events, rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.kind = RuntimeKind::Web;
+    c.ready_timeout = Duration::from_secs(5);
+    c.missed_pongs_to_kill = 1000; // probe liveness, not the kill
+    let h = spawn_h(spec(FAKE_WEB), c, events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+    // Several ping intervals of pongs: web's steady {ok, unknown} is
+    // the assumed baseline, so nothing emits — the #122 nit.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        health_events(&log).is_empty(),
+        "a wrapped app's first pongs must not emit: {:?}",
+        health_events(&log)
+    );
+    h.shutdown().await;
+
+    let (events, rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.kind = RuntimeKind::Web;
+    c.ready_timeout = Duration::from_secs(5);
+    c.missed_pongs_to_kill = 1000;
+    let h = spawn_h(spec(FAKE_WEB_NO_PONG), c, events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+    assert!(
+        eventually(|| !health_events(&log).is_empty()).await,
+        "the silent web transport never emitted"
+    );
+    let seen = health_events(&log);
+    assert_eq!(seen[0]["liveness"]["transport"], json!("missing"));
+    assert_eq!(seen[0]["liveness"]["loop"], json!("unknown"));
+    assert_eq!(seen.len(), 1, "one flip, one event: {seen:?}");
+    h.shutdown().await;
 }

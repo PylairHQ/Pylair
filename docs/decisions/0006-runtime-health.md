@@ -349,11 +349,14 @@ banner onto a poll loop.
 **Emission baseline.** "One per flip" needs a remembered last-emitted
 pair, generation-scoped:
 
-- Generation 1's baseline is the *assumed* `{ok, ok}` — the runtime
-  just reached Ready, so a literal `{ok, ok}` first emit carries no
-  news. The first verdict emits only when it differs (e.g. `{ok,
-  busy}`); the `0 → 2500 → 0` staleness flap therefore emits exactly
-  twice, busy then ok.
+- Generation 1's baseline is the *assumed* steady value for the
+  runtime kind — `{ok, ok}` for bridge, `{ok, unknown}` for web
+  (its loop is never measured) — since the runtime just reached
+  Ready and a literal steady-state first emit carries no news. The
+  first verdict emits only when it differs (e.g. `{ok, busy}` for
+  bridge); the `0 → 2500 → 0` staleness flap therefore emits
+  exactly twice, busy then ok, and a wrapped app's first pong
+  emits nothing.
 - Teardown emits `{unknown, unknown}` only when the generation
   actually emitted a verdict — "a real change from the last emitted
   value"; a generation that never emitted stays silent.

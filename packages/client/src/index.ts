@@ -156,6 +156,7 @@ const EVT = {
   state: "pylair://state",
   stderr: "pylair://stderr",
   exposes: "pylair://exposes",
+  health: "pylair://health",
 } as const;
 
 // ---- wire JSON (protocol §2, docs/codegen.md) -------------------------------
@@ -610,6 +611,139 @@ export async function onExposes<T = unknown>(cb: (manifest: T) => void): Promise
   return (await ipc()).listen<T>(EVT.exposes, cb);
 }
 
+// ---- runtime health (docs/decisions/0006) ------------------------------------
+
+/** Transport liveness: pongs are arriving ("ok"), going unanswered
+ * ("missing"), or there is no live generation to judge ("unknown"). */
+export type HealthTransport = "ok" | "missing" | "unknown";
+
+/** Event-loop liveness: serving ("ok"), stalled past the warn
+ * threshold ("busy"), or unmeasurable — a `web` runtime never
+ * reports loop health ("unknown"). */
+export type HealthLoop = "ok" | "busy" | "unknown";
+
+/**
+ * Per-generation liveness (docs/decisions/0006 §4). `loop_stale_ms`
+ * is present only for `kind: "bridge"`; on `web` runtimes it is
+ * absent and `loop` reads "unknown" rather than a fabricated "ok".
+ * Outside a live generation the age/stale fields are null and both
+ * verdicts read "unknown".
+ */
+export interface HealthLiveness {
+  /** ms since the last pong; null before the first. */
+  last_pong_age_ms: number | null;
+  /** Round-trip time of the last seq-echoed ping; null if unmatched. */
+  rtt_ms: number | null;
+  /** Pings currently unanswered for a full interval. */
+  missed_pongs: number;
+  /** Misses that kill the runtime. */
+  missed_pongs_to_kill: number;
+  /** Reported event-loop staleness (bridge kind only). */
+  loop_stale_ms?: number | null;
+  transport: HealthTransport;
+  loop: HealthLoop;
+}
+
+export interface HealthRestarts {
+  crashes_in_window: number;
+  breaker: { crashes: number; window_ms: number };
+  /** The backoff that will apply to the next restart. */
+  backoff_ms: number;
+  /** null until the first generation ends. */
+  last_exit: {
+    kind: "crashed" | "fatal" | "dev_restart";
+    /** Free text — informational only (protocol-v1 §8), never parse it. */
+    detail: string;
+    ms_ago: number;
+  } | null;
+}
+
+/** Global in-flight totals — every window summed, always counted. */
+export interface HealthLoad {
+  tasks: number;
+  streams: number;
+  isolated: number;
+  queued: number;
+  stream_bytes_total: number;
+}
+
+export interface HealthSelfCell {
+  in_use: number;
+  /** This window's current ceiling (0005 min-reserve). */
+  ceiling: number;
+  cap: number;
+}
+
+/**
+ * The calling window's own row — `null` from a host-side `health()`
+ * or when `per_window_fairness` is off. Never another window's row.
+ */
+export interface HealthSelf {
+  window: string;
+  tasks: HealthSelfCell;
+  streams: HealthSelfCell;
+  queued: HealthSelfCell;
+  isolated: HealthSelfCell;
+}
+
+/**
+ * The host-observed runtime-health snapshot (docs/decisions/0006 §4).
+ *
+ * `version` is the only schema contract: **version 1 may gain fields**;
+ * a shape change bumps it. A `pylair:deny-python-health` capability
+ * deny is origin-wide — it refuses the command on every local webview,
+ * not just the window that carries the capability.
+ */
+export interface HealthSnapshot {
+  version: 1;
+  kind: "bridge" | "web";
+  state: RuntimeState;
+  in_state_ms: number;
+  generation: number;
+  /** ms this generation has been alive; null until it reaches Ready. */
+  uptime_ms: number | null;
+  /** Validated server url — web kind only. */
+  url?: string | null;
+  restarts: HealthRestarts;
+  liveness: HealthLiveness;
+  load: HealthLoad;
+  self: HealthSelf | null;
+}
+
+/**
+ * The `pylair://health` event payload — emitted to subscribed webviews
+ * only when a transport or loop verdict *changes*, never on a poll
+ * cadence. Carries no per-window data (`self` is command-only).
+ */
+export interface HealthChange {
+  version: 1;
+  generation: number;
+  liveness: HealthLiveness;
+}
+
+/**
+ * The current health snapshot, caller-scoped. Like `state()` and
+ * `retry()` this is read-only observation: calling it does not join
+ * the fairness live set, so a poller reserves no share.
+ *
+ * Against a plugin that predates `python_health` the invoke rejects
+ * — the same contract as `retry()`: the error propagates and never
+ * hangs. Same for a `pylair:deny-python-health` ACL deny.
+ */
+export async function health(): Promise<HealthSnapshot> {
+  return (await ipc()).invoke<HealthSnapshot>(CMD.health);
+}
+
+/**
+ * Subscribe to liveness verdict changes; resolves to an unlisten
+ * function. For "the runtime is busy, calls are slow" banners —
+ * subscribe once and flip the banner on transitions instead of
+ * polling `health()`.
+ */
+export async function onHealth(cb: (c: HealthChange) => void): Promise<() => void> {
+  return (await ipc()).listen<HealthChange>(EVT.health, cb);
+}
+
 // ---- installed-webview self-test, loaded on demand ---------------------------
 
 /**
@@ -653,8 +787,10 @@ export const python = {
   cancel,
   retry,
   state,
+  health,
   shutdown,
   onState,
   onStderr,
   onExposes,
+  onHealth,
 };
