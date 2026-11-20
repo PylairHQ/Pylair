@@ -375,6 +375,10 @@ fn health_command_is_caller_scoped() {
         WebviewWindowBuilder::new(&app, "win-b", WebviewUrl::default())
             .build()
             .unwrap();
+    let w_c: WebviewWindow<MockRuntime> =
+        WebviewWindowBuilder::new(&app, "win-c", WebviewUrl::default())
+            .build()
+            .unwrap();
 
     let rt_state = app.state::<PyRuntime>();
     let reg = app.state::<Registry>();
@@ -391,8 +395,8 @@ fn health_command_is_caller_scoped() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let h = &rt_state.0;
 
-    // Both windows join the live set with a real call.
-    for w in [&w_main, &w_b] {
+    // All three windows join the live set with a real call.
+    for w in [&w_main, &w_b, &w_c] {
         rt.block_on(python_call_impl(
             w,
             &reg,
@@ -403,7 +407,10 @@ fn health_command_is_caller_scoped() {
         .expect("first call joins the window");
     }
 
-    // main holds two tasks, win-b one — their self rows differ.
+    // main holds two tasks, win-b one, win-c none — their self rows
+    // differ. A busy owner at or past its minimum reserve holds back
+    // nothing extra, so the idle win-c's reserve is what moves the
+    // busy windows' ceilings (cap 4, min reserve 1: ceiling 3).
     let mut held = Vec::new();
     for _ in 0..2 {
         held.push(
@@ -431,7 +438,7 @@ fn health_command_is_caller_scoped() {
     );
 
     // win-b's snapshot: its own label and its own usage — main's row
-    // would read in_use 2; the global totals see both.
+    // would read in_use 2; the global totals see all three holds.
     let v = python_health_impl(&w_b, &reg, &rt_state).expect("python_health_impl");
     assert_eq!(v["version"], json!(1));
     assert_eq!(v["state"], json!("ready"));
@@ -441,10 +448,18 @@ fn health_command_is_caller_scoped() {
     assert_eq!(v["self"]["tasks"]["cap"], json!(4));
     assert_eq!(v["load"]["tasks"], json!(3));
 
-    // main's own snapshot names main and counts its two holds.
+    // main's own snapshot names main, counts its two holds, and its
+    // ceiling is equally shrunk by idle win-c's reserve.
     let m = python_health_impl(&w_main, &reg, &rt_state).expect("python_health_impl");
     assert_eq!(m["self"]["window"], json!("main"));
     assert_eq!(m["self"]["tasks"]["in_use"], json!(2));
+    assert_eq!(m["self"]["tasks"]["ceiling"], json!(3));
+
+    // win-c, idle, reserves nobody: the whole cap is its ceiling.
+    let c = python_health_impl(&w_c, &reg, &rt_state).expect("python_health_impl");
+    assert_eq!(c["self"]["window"], json!("win-c"));
+    assert_eq!(c["self"]["tasks"]["in_use"], json!(0));
+    assert_eq!(c["self"]["tasks"]["ceiling"], json!(4));
 }
 
 /// docs/decisions/0006 §3: a health poller reserves no fairness share —
