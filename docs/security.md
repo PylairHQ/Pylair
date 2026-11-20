@@ -356,20 +356,24 @@ Two more bounded paths matter:
   `loop_stale_ms` as a diagnostic; `loop_stall_kill` (off by default)
   makes a long stall fatal for apps that prefer it.
 
-The command queue is additionally split per caller (per-window fairness,
-decisions 0005): each live window keeps a guaranteed minimum share of
-`max_queued_commands`, and a caller over its share ceiling is refused
-before the command enters the queue: `LIMIT_EXCEEDED` with
+Three of those caps are additionally split per caller (per-window
+fairness, decisions 0005): each live window keeps a guaranteed minimum
+share of `max_queued_commands`, `max_concurrent_tasks`, and
+`max_concurrent_streams`. A caller over its share ceiling is refused
+before work is committed: before the command enters the queue, and
+before a task id or stream is allocated. `LIMIT_EXCEEDED` with
 `data: {"limit": "window_share", "max": <ceiling>, "window": "<label>"}`
 (`window` is `null` for host-side calls, which follow the same rule only
-while they hold work). A lone caller still fills the whole queue and sees
-`max_queued_commands` at the global cap; the split is admission-only, so
-nothing already queued or running is affected.
-`PYLAIR_PER_WINDOW_FAIRNESS=0` restores the pure global cap.
+while they hold work). A lone caller still fills each whole resource and
+sees `max_queued_commands` / `max_concurrent_tasks` /
+`max_concurrent_streams` at the global cap; the split is admission-only,
+so nothing already queued or running is affected.
+`PYLAIR_PER_WINDOW_FAIRNESS=0` restores the pure global caps.
 
-Known gap: task slots and stream resources are still per-runtime, not
-per-window. A webview that holds every task slot can still starve other
-windows' calls until the rest of decisions 0005 lands.
+Known gap: isolated-worker slots are still per-runtime (PR 4 of
+decisions 0005), and `stream_buffer_bytes_total` stays a global
+backstop by design; decisions 0005 §5.1 explains why per-owner bytes
+are not split.
 
 ## 7. Process boundaries and orphan prevention
 

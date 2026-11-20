@@ -198,7 +198,7 @@ impl Handle {
             .lock()
             .unwrap()
             .try_admit_queue(&owner, self.limits.max_queued_commands)
-            .map_err(|ceiling| share_err(ceiling, &owner))?;
+            .map_err(|ceiling| share_err("the command queue", ceiling, &owner))?;
         self.cmd
             .try_send(Command::Call {
                 fn_name: fn_name.into(),
@@ -259,7 +259,7 @@ impl Handle {
             .lock()
             .unwrap()
             .try_admit_queue(&owner, self.limits.max_queued_commands)
-            .map_err(|ceiling| share_err(ceiling, &owner))?;
+            .map_err(|ceiling| share_err("the command queue", ceiling, &owner))?;
         self.cmd
             .try_send(Command::CallStream {
                 fn_name: fn_name.into(),
@@ -463,10 +463,10 @@ pub(super) fn limit_err(limit: &str, max: u64, msg: impl Into<String>) -> ErrorO
 /// `LIMIT_EXCEEDED` for an owner over its fairness share of a shared
 /// cap (decisions 0005). `window` names the refused owner so hog and
 /// victim are distinguishable; it is null for the host-side bucket.
-fn share_err(max: usize, owner: &Option<String>) -> ErrorObj {
+pub(super) fn share_err(what: &str, max: usize, owner: &Option<String>) -> ErrorObj {
     ErrorObj {
         code: proto::LIMIT_EXCEEDED,
-        message: "window is over its fairness share of the command queue".into(),
+        message: format!("window is over its fairness share of {what}"),
         data: Some(serde_json::json!({
             "limit": "window_share",
             "max": max,

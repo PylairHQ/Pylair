@@ -125,38 +125,96 @@ async fn wait_state(h: &Handle, want: State) {
     .unwrap_or_else(|_| panic!("state never became {want:?}"));
 }
 
-/// owner "a" holds every task slot; owner "b" is refused with the shared
-/// cap. Proves the gap named in security.md section 6. After the fairness
-/// work lands this flips: b is admitted on its reserved share and a's
-/// next call fails LIMIT_EXCEEDED{limit:"window_share"}.
+/// The PR 3 flip of the original starvation spike: with two live
+/// windows and `max_concurrent_tasks = 4`, win-a's task ceiling is 3
+/// (win-b's idle reservation is one slot), so a's fourth call is
+/// refused `window_share` and win-b's call is admitted and answered.
 #[tokio::test]
-async fn one_owner_starves_the_other_of_task_slots() {
+async fn one_owner_can_no_longer_starve_the_other_of_task_slots() {
     let (ev, _rx) = mpsc::channel(64);
-    let h = spawn_h(spec(FAKE_HOLDS_TASKS), fast_config(), ev);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
     wait_state(&h, State::Ready).await;
 
-    // a fills all 4 task slots (each call registers a task, never finishes)
+    // a holds up to its share: 3 in-flight tasks (each call registers
+    // a task and never finishes).
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a's call is inside its share"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 3)).await,
+        "a's three tasks must be in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    // a's fourth call is over share: refused before a task exists.
+    let refused = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("a is over its task-share ceiling");
+    assert_eq!(refused.code, proto::LIMIT_EXCEEDED);
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["max"].as_u64()),
+        Some(3)
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["window"].as_str()),
+        Some("win-a")
+    );
+
+    // b is the victim fairness protects: its call is admitted AND
+    // answered, while a still holds its three slots.
+    let answered = h
+        .call("ok", json!({}), Some("win-b".into()), Some(false))
+        .await
+        .expect("b is under share and must be served");
+    assert_eq!(answered, json!({"ok": "ok"}));
+
+    h.shutdown().await;
+    // Held CallTasks resolve with errors as the runtime shuts down.
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// The pre-fairness outcome, preserved verbatim under the off switch:
+/// a fills all 4 task slots, b is starved out entirely, and hog and
+/// victim see the same `max_concurrent_tasks` error.
+#[tokio::test]
+async fn one_owner_starves_the_other_when_fairness_is_off() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_per_window_fairness(false);
+    let h = spawn_h(spec(FAKE_HOLDS_TASKS), c, ev);
+    wait_state(&h, State::Ready).await;
+
     let mut held = Vec::new();
     for _ in 0..4 {
-        let ct = h
-            .call_task("hold", json!({}), Some("win-a".into()), Some(false))
-            .expect("a's call should be admitted under the global cap");
-        held.push(ct);
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a's call should be admitted under the global cap"),
+        );
     }
 
-    // TODAY: b is starved out of the runtime entirely.
     let starved = h
         .call("hold", json!({}), Some("win-b".into()), Some(false))
         .await
-        .expect_err("b loses the shared cap to a - the documented gap");
+        .expect_err("b loses the shared cap to a - today's outcome");
     assert_eq!(starved.code, proto::LIMIT_EXCEEDED);
     assert_eq!(
         starved.data.as_ref().and_then(|d| d["limit"].as_str()),
         Some("max_concurrent_tasks")
     );
 
-    // And a's extra calls fail identically - the cap cannot tell owners
-    // apart, so a hog and its victim see the same error.
     let also = h
         .call("hold", json!({}), Some("win-a".into()), Some(false))
         .await
@@ -164,6 +222,9 @@ async fn one_owner_starves_the_other_of_task_slots() {
     assert_eq!(also.code, proto::LIMIT_EXCEEDED);
 
     h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
 }
 
 /// Same as FAKE_HOLDS_TASKS, but the child exits after consuming a
@@ -217,6 +278,45 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
     else:
         w({"jsonrpc":"2.0","id": m["id"],"result": {"ok": True}})
+"#;
+
+/// The fairness workhorse: `hold` calls register their task id and are
+/// never answered (a held slot for as long as the test wants), `die`
+/// calls exit the process with every task held, `cancel` gets an ack
+/// plus a TASK_CANCELLED terminal for the held call it names, and
+/// every other call answers `{"ok": <fn>}`. All timing lives in what
+/// the test sends - there is no sleep in the fixture.
+const FAKE_FAIRNESS_RUNTIME: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[{"name":"hold","kind":"sync"},{"name":"ok","kind":"sync"},{"name":"die","kind":"sync"}]}})
+held = {}
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    meth = m.get("method")
+    if meth == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"]}})
+    elif meth == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+    elif meth == "cancel":
+        task = m["params"]["task"]
+        w({"jsonrpc":"2.0","id": m["id"],"result": {"cancelled": True}})
+        if task in held:
+            w({"jsonrpc":"2.0","id": held.pop(task),"error": {"code": -32010,"message": "cancelled"}})
+    elif meth == "call":
+        fn = m["params"]["fn"]
+        if fn == "die":
+            break  # crash holding every task
+        if fn == "hold":
+            held[m["params"]["task"]] = m["id"]
+        else:
+            w({"jsonrpc":"2.0","id": m["id"],"result": {"ok": fn}})
+    # stream.credit and friends are notifications: nothing to answer
 "#;
 
 /// hello, then immediate exit: every generation dies before it can
@@ -572,4 +672,374 @@ async fn fairness_off_is_exactly_todays_outcome() {
     );
     let _ = std::fs::remove_file(&gate);
     h.shutdown().await;
+}
+
+/// Single-window parity for task slots: the only live window fills
+/// all `max_concurrent_tasks` and the refusal is the global error,
+/// never `window_share`.
+#[tokio::test]
+async fn a_lone_window_fills_all_task_slots_and_sees_the_global_cap() {
+    let (ev, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a lone window keeps every task slot"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 4)).await,
+        "all four tasks in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let refused = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("the global cap still binds");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_concurrent_tasks"),
+        "a lone window must see today's error, not window_share"
+    );
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// Single-window parity for stream slots: the only live window opens
+/// all `max_concurrent_streams` and the refusal is the global error.
+#[tokio::test]
+async fn a_lone_window_fills_all_stream_slots_and_sees_the_global_cap() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_concurrent_streams(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            h.call_stream("hold", json!({}), Some("win-a".into()), Some(true))
+                .await
+                .expect("a lone window keeps every stream slot"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().stream_usage(Some("win-a")) == 2).await,
+        "both streams in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let refused = h
+        .call_stream("hold", json!({}), Some("win-a".into()), Some(true))
+        .await
+        .err()
+        .expect("the global stream cap still binds");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_concurrent_streams"),
+        "a lone window must see today's error, not window_share"
+    );
+
+    h.shutdown().await;
+    drop(held);
+}
+
+/// Stream slots are shared too: with `max_concurrent_streams = 2` and
+/// two live windows, win-a's stream ceiling is 1 - its second stream is
+/// refused `window_share` while win-b's stream is admitted.
+#[tokio::test]
+async fn stream_slots_are_shared_across_windows() {
+    let (ev, _rx) = mpsc::channel(64);
+    let mut c = fast_config();
+    c.limits = c.limits.with_max_concurrent_streams(2);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+    wait_state(&h, State::Ready).await;
+
+    let (a_task, a_rx) = h
+        .call_stream("hold", json!({}), Some("win-a".into()), Some(true))
+        .await
+        .expect("a's first stream is inside its share");
+    assert!(
+        eventually(|| h.fairness_snapshot().stream_usage(Some("win-a")) == 1).await,
+        "a's stream in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    let refused = h
+        .call_stream("hold", json!({}), Some("win-a".into()), Some(true))
+        .await
+        .err()
+        .expect("a is over its stream-share ceiling");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["max"].as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["window"].as_str()),
+        Some("win-a")
+    );
+
+    // b's stream still fits: a is at its minimum so it reserves nothing.
+    let (_b_task, _b_rx) = h
+        .call_stream("hold", json!({}), Some("win-b".into()), Some(true))
+        .await
+        .expect("b's share is untouched");
+    assert!(
+        eventually(|| h.fairness_snapshot().stream_usage(Some("win-b")) == 1).await,
+        "b's stream in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    h.shutdown().await;
+    let _ = (a_task, a_rx);
+}
+
+/// Cancelled tasks free their owner's slots: win-b, previously refused
+/// at the full global cap, fills what `cancel_owner` released - up to
+/// its own share ceiling.
+#[tokio::test]
+async fn cancelled_slots_are_claimable_by_the_other_window() {
+    let (ev, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
+    h.fairness_join_window("win-a");
+    h.fairness_join_window("win-b");
+    wait_state(&h, State::Ready).await;
+
+    // a to its ceiling (3), b's one call makes the global cap full.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a's share"),
+        );
+    }
+    held.push(
+        h.call_task("hold", json!({}), Some("win-b".into()), Some(false))
+            .expect("b's share"),
+    );
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 3) && s.usage(Some("win-b")) == (0, 1)
+        })
+        .await,
+        "3+1 tasks in flight fills the global cap: {:?}",
+        h.fairness_snapshot()
+    );
+    let refused = h
+        .call("hold", json!({}), Some("win-b".into()), Some(false))
+        .await
+        .expect_err("the full global cap still binds b");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_concurrent_tasks")
+    );
+
+    // Free a's slots: b can now claim them, up to its own ceiling of 3
+    // (a stays live but idle, still reserving one slot).
+    h.cancel_owner("win-a".into()).await;
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(Some("win-a")) == (0, 0)).await,
+        "a's tasks must drain through the cancel path: {:?}",
+        h.fairness_snapshot()
+    );
+    for _ in 0..2 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-b".into()), Some(false))
+                .expect("b fills the slots a released"),
+        );
+    }
+    let refused = h
+        .call("hold", json!({}), Some("win-b".into()), Some(false))
+        .await
+        .expect_err("b stops at ITS share ceiling, not the global cap");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["max"].as_u64()),
+        Some(3)
+    );
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// A runtime crash zeroes per-owner tasks AND streams at session
+/// teardown - inside the restart backoff - and the lone live window
+/// then reaches the full global cap in the next generation.
+#[tokio::test]
+async fn a_crash_zeroes_tasks_and_streams_and_the_cap_reopens() {
+    let (ev, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    // Two plain tasks plus one stream: in_flight 3, streams 1.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("admitted"),
+        );
+    }
+    let (_st, _srx) = h
+        .call_stream("hold", json!({}), Some("win-a".into()), Some(true))
+        .await
+        .expect("the held stream is admitted too");
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 3) && s.stream_usage(Some("win-a")) == 1
+        })
+        .await,
+        "2 tasks + 1 stream in flight: {:?}",
+        h.fairness_snapshot()
+    );
+
+    // The die call is the crash trigger, fully under the test's
+    // control: the generation dies holding all four tasks.
+    let die = h
+        .call_task("die", json!({}), Some("win-a".into()), Some(false))
+        .expect("the trigger call is admitted");
+    assert!(
+        eventually(|| {
+            let s = h.fairness_snapshot();
+            s.usage(Some("win-a")) == (0, 0) && s.stream_usage(Some("win-a")) == 0
+        })
+        .await,
+        "teardown must zero tasks AND streams, not the next spawn: {:?}",
+        h.fairness_snapshot()
+    );
+    let _ = die.result.await;
+
+    // Next generation, a is still the only live window: it fills all
+    // four slots again and the refusal is the global cap.
+    wait_state(&h, State::Ready).await;
+    for _ in 0..4 {
+        held.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("a lone window re-fills the cap"),
+        );
+    }
+    let refused = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("the global cap is the only refusal left");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_concurrent_tasks")
+    );
+
+    h.shutdown().await;
+    for ct in held {
+        let _ = ct.result.await;
+    }
+}
+
+/// The host bucket gets the same rule for task slots: while `None`
+/// holds work its calls share the cap (window: null in the error);
+/// once it drains it stops being live and the real window reaches the
+/// full cap.
+#[tokio::test]
+async fn host_bucket_shares_task_slots_only_while_busy() {
+    let (ev, _rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
+    h.fairness_join_window("win-a");
+    wait_state(&h, State::Ready).await;
+
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(
+            h.call_task("hold", json!({}), None, Some(false))
+                .expect("the host bucket shares task slots like a window"),
+        );
+    }
+    assert!(
+        eventually(|| h.fairness_snapshot().usage(None) == (0, 3)).await,
+        "host tasks in flight: {:?}",
+        h.fairness_snapshot()
+    );
+    let refused = h
+        .call("hold", json!({}), None, Some(false))
+        .await
+        .expect_err("the host bucket hits its ceiling too");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("window_share")
+    );
+    assert!(
+        refused.data.as_ref().is_some_and(|d| d["window"].is_null()),
+        "the host bucket is reported as window: null"
+    );
+
+    // While None is busy it is live - and the window still fits,
+    // because the busy bucket is past its minimum and reserves
+    // nothing further.
+    let answered = h
+        .call("ok", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect("the window keeps its own share");
+    assert_eq!(answered, json!({"ok": "ok"}));
+
+    // Cancel the host tasks (owner_allows: host tasks are cancellable
+    // by anyone). Collect task ids BEFORE cancelling - awaiting a held
+    // call's result now would block until the cancel resolves it.
+    let mut task_ids = Vec::new();
+    let mut results = Vec::new();
+    for ct in held {
+        task_ids.push(ct.task.await.expect("task id was delivered"));
+        results.push(ct.result);
+    }
+    for t in task_ids {
+        let _ = h.cancel(t, None).await;
+    }
+    for r in results {
+        let _ = r.await;
+    }
+    assert!(
+        eventually(|| !h.fairness_snapshot().is_live(None)).await,
+        "an idle host bucket must stop reserving: {:?}",
+        h.fairness_snapshot()
+    );
+
+    // Now lone-live win-a reaches the full cap.
+    let mut held2 = Vec::new();
+    for _ in 0..4 {
+        held2.push(
+            h.call_task("hold", json!({}), Some("win-a".into()), Some(false))
+                .expect("with an idle host bucket, the window fills the cap"),
+        );
+    }
+    let refused = h
+        .call("hold", json!({}), Some("win-a".into()), Some(false))
+        .await
+        .expect_err("the global cap is the only refusal left");
+    assert_eq!(
+        refused.data.as_ref().and_then(|d| d["limit"].as_str()),
+        Some("max_concurrent_tasks")
+    );
+
+    h.shutdown().await;
+    for ct in held2 {
+        let _ = ct.result.await;
+    }
 }
