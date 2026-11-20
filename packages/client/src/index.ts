@@ -62,6 +62,13 @@ export const LIMIT_EXCEEDED = -32040;
  * "stream_buffer_bytes", "stream_buffer_bytes_total", "max_stream_credit",
  * "max_frame", "max_isolated_workers", "frame_out_queue"), `.max` carries
  * the configured bound when the host reported one.
+ *
+ * `.limit === "window_share"` is the per-window fairness refusal
+ * (docs/decisions/0005): the calling window exceeded its share of a
+ * resource another live window needs. Then `.max` is this window's
+ * current ceiling (not the global cap) and `data.window` carries the
+ * offending owner's label (`null` for host-side calls). Retrying once
+ * the flood drains is safe — nothing was committed.
  */
 export class LimitExceededError extends PythonError {
   readonly limit: string;

@@ -88,10 +88,14 @@ test("flag set, chunk missing: reports a failing verdict and rejects", { timeout
  */
 const DENIED = { denied: true, code: -32050, fn: "add", window: "win-b" };
 
-function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture = true) {
+function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture = true, opts = {}) {
+  const { fairness = false, fairnessProbe = { ok: true, value: "hello" } } = opts;
   const calls = [];
   const cancelHooks = new Map();
   let nextTask = 1;
+  let heldN = 0;
+  let holdCalls = 0;
+  let bSeen = 0;
   const later = (f) => setTimeout(f, 0);
   return {
     calls,
@@ -107,6 +111,11 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       calls.push({ cmd, args });
       const task = nextTask++;
       const { fnName, input } = args;
+      if (fairness && fnName === "hold" && holdCalls >= 3) {
+        // Over the owner's share ceiling: refused before a task exists —
+        // the invoke itself rejects, the call never reaches a task id.
+        throw { code: -32040, message: "over your share of task slots", data: { limit: "window_share", max: 3, window: "main" } };
+      }
       later(() => {
         if (fnName === "log_stderr") {
           onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
@@ -115,6 +124,36 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           // permissions (CI appends it); absent means FUNCTION_NOT_FOUND.
           if (fixture) onEvent({ task, done: true, result: null });
           else onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+        } else if (fnName === "holds_active") {
+          // The fairness fixture; absent means FUNCTION_NOT_FOUND.
+          if (fairness) onEvent({ task, done: true, result: heldN });
+          else onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+        } else if (fnName === "b_seen") {
+          if (fairness) {
+            // win-b's ping lands between main's polls: first read sees
+            // 0, every later read sees >= 1.
+            if (bSeen === 0) later(() => { bSeen = 1; });
+            onEvent({ task, done: true, result: bSeen });
+          } else {
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          }
+        } else if (fnName === "b_ping") {
+          if (fairness) {
+            bSeen += 1;
+            onEvent({ task, done: true, result: bSeen });
+          } else {
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          }
+        } else if (fnName === "hold") {
+          holdCalls += 1;
+          heldN += 1;
+          // Held until cancelled: no terminal until the abort lands.
+          cancelHooks.set(task, () =>
+            later(() => {
+              heldN -= 1;
+              onEvent({ task, done: true, error: { code: -32010, message: "cancelled" } });
+            }),
+          );
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -142,6 +181,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
             sawStderr: 0,
             sawStderrAny: 0,
             ...(denyProbe ? { denyProbe } : {}),
+            ...(fairness ? { fairnessProbe } : {}),
           }),
         );
       return () => {};
@@ -168,11 +208,13 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "stream-order",
     "call",
     "cancel",
+    "window-fairness",
     "event-scoping",
     "fn-permission",
   ]);
   assert.equal(ok, true, JSON.stringify(checks));
   assert.match(checks["stderr-delivery"], /^skipped: /);
+  assert.match(checks["window-fairness"], /^skipped: /);
   assert.equal(checks["fn-permission"], "ok");
 });
 
@@ -212,4 +254,48 @@ test("flag set: win-b getting through to the denied function fails the verdict",
   const { ok, checks } = await ownerVerdict({ viaCall: through, viaRaw: DENIED });
   assert.equal(ok, false);
   assert.match(checks["fn-permission"], /^FAIL: .*not denied/);
+});
+
+test("flag set: the window-fairness leg passes when the share refusal and b-probe land", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { fairness: true });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(checks["window-fairness"], "ok", JSON.stringify(checks));
+  assert.equal(ok, true, JSON.stringify(checks));
+});
+
+test("flag set: a refused flood that names the global cap fails window-fairness", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  // win-b is live (b_seen answers) but the bridge still refuses with the
+  // GLOBAL cap rather than window_share — the check must fail.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    fairness: true,
+    fairnessProbe: { ok: true },
+  });
+  const orig = b.invokeChannel;
+  b.invokeChannel = async (cmd, args, onEvent) => {
+    if (args.fnName === "hold") {
+      throw { code: -32040, message: "too many in-flight tasks", data: { limit: "max_concurrent_tasks", max: 64 } };
+    }
+    return orig(cmd, args, onEvent);
+  };
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false);
+  assert.match(checks["window-fairness"], /^FAIL: .*max_concurrent_tasks/);
 });

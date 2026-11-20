@@ -118,19 +118,21 @@ recipes and known limitations: [docs/wrap.md](docs/wrap.md).
   that stay in the group die with it (SIGTERM-ignoring grandchildren
   included), but a child that deliberately detaches (`setsid`, a new
   process group, a double-fork daemon) escapes the group kill.
-- **Resource limits are per runtime, not per window.** Concurrent tasks,
-  streams, queued commands, buffered stream bytes (per-stream and total),
-  outstanding stream credit, isolated workers and frame size are all
-  bounded (`Limits` on `SupervisorConfig`, `PYLAIR_MAX_*` env overrides;
-  effective values are logged at startup). A webview that floods the
-  bridge can starve every other window. Limits exist to keep one
-  runtime's failure bounded and explicit, not to guarantee fairness
-  between windows. On a hit the call/stream fails with
-  `LIMIT_EXCEEDED` (`-32040`), surfaced in JS as `LimitExceededError`
-  with `.limit` naming the cap. If the host itself stops draining, the
-  Python outbound queue fills, the runtime logs `outbound queue full`
-  and exits rather than growing without bound: callers see
-  `RUNTIME_CRASHED`, not a silent hang.
+- **Resource limits are bounded per runtime, and admission is
+  per-window fair.** Concurrent tasks, streams, queued commands and
+  isolated workers are additionally split per live window
+  (`docs/decisions/0005`): each window keeps a guaranteed minimum share,
+  and a window flooding past its share gets `LIMIT_EXCEEDED` with
+  `data.limit = "window_share"` instead of starving the others. The
+  buffered-stream-bytes total stays a global backstop by design
+  (decisions 0005 §5.1). All caps live on `Limits`/`SupervisorConfig`
+  with `PYLAIR_MAX_*` env overrides, logged at startup;
+  `PYLAIR_PER_WINDOW_FAIRNESS=0` restores pure global caps. On a hit the
+  call/stream fails with `LIMIT_EXCEEDED` (`-32040`), surfaced in JS as
+  `LimitExceededError` with `.limit` naming the cap. If the host itself
+  stops draining, the Python outbound queue fills, the runtime logs
+  `outbound queue full` and exits rather than growing without bound:
+  callers see `RUNTIME_CRASHED`, not a silent hang.
 - **Ints beyond ±2^53 can't cross the bridge.** The call fails with
   `INTERNAL: integer … exceeds the JSON safe-integer range`: an
   explicit error rather than a silently rounded value. Return large

@@ -98,3 +98,46 @@ def fn_permissions_fixture() -> None:
     # per-function permissions, so selftest-winb.json's deny entry for win-b
     # must be honoured (CI appends the same function to scaffolded apps).
     return None
+
+
+# Per-window fairness self-test (docs/decisions/0005): `hold` occupies a
+# task slot until cancelled (or the timeout passes); `holds_active` is the
+# rendezvous win-b polls to learn that main is actually holding before it
+# probes its own share. Presence arms the self-test's window-fairness check
+# (CI appends the same functions to scaffolded apps).
+_holds_active = 0
+
+
+@expose
+async def hold(seconds: float = 30.0) -> str:
+    global _holds_active
+    _holds_active += 1
+    try:
+        await asyncio.sleep(seconds)
+        return "held"
+    finally:
+        _holds_active -= 1
+
+
+@expose
+def holds_active() -> int:
+    return _holds_active
+
+
+# `b_ping` is win-b's liveness mark: the call itself is the bridge command
+# that subscribes win-b to the fairness live set, so `b_seen` >= 1 on the
+# main window is deterministic proof win-b holds a live entry before the
+# flood — no event, no timing (CI appends the same functions).
+_b_seen = 0
+
+
+@expose
+def b_ping() -> int:
+    global _b_seen
+    _b_seen += 1
+    return _b_seen
+
+
+@expose
+def b_seen() -> int:
+    return _b_seen

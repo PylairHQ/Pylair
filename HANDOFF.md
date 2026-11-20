@@ -188,6 +188,18 @@ Merged since rc.17 (d7daaaf):
 - PR 107: create-pylair wordmark + TTY prompts, wrap framework
   variants, `pylair wrap`/`init` framework prompts; `ui/` shared by
   build-time copy so create-pylair stays dependency-free.
+- PRs 110-115: per-window fairness for shared runtime limits
+  (`docs/decisions/0005`). Queue, task, stream and isolated-worker
+  admission are split per live window with a guaranteed minimum share;
+  an over-share window's new calls get `LIMIT_EXCEEDED` with
+  `data.limit = "window_share"`. `PYLAIR_PER_WINDOW_FAIRNESS=0` restores
+  pure global caps; the total stream-byte buffer stays global by
+  design. The two-window self-test proves the real-webview path (win-b
+  subscribes through `WindowRegistry` and gets its share while main is
+  over share). Crate-side work plus a client selftest/doc touch: the
+  next release needs a crate bump (`0.1.0-rc.18`), scaffold pins and
+  the template `Cargo.lock`, and the npm trio; `python/` is unchanged,
+  so no PyPI step.
 
 - PR 88: per-function permissions (crate `fn_scope`, client
   `PermissionDeniedError`, CLI capability checks, self-test

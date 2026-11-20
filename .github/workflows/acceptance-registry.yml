@@ -285,6 +285,57 @@ jobs:
             else
               echo "resolved crate predates stderr scoping — stderr probe skipped"
             fi
+            # Per-window fairness: the hold fixture arms the client's
+            # window-fairness check. Only worth appending when the resolved
+            # crate actually enforces shares (src/supervisor/fairness.rs) —
+            # an older published client never calls it, and a new client
+            # skips cleanly when the fixture is absent.
+            FAIRRS=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" \
+              -path "*tauri-plugin-pylair-$CRATE_VER/src/supervisor/fairness.rs" -print -quit 2>/dev/null)
+            if [ -n "$FAIRRS" ]; then
+              cat >> ../backend/app.py <<'PYEOF'
+
+
+          # Per-window fairness self-test (decisions 0005): `hold`
+          # occupies a task slot until cancelled; `holds_active` is the
+          # rendezvous win-b polls before probing its own share. `b_ping`
+          # is win-b's liveness mark (the call itself subscribes it), so
+          # `b_seen` >= 1 proves win-b is live before the flood starts.
+          _holds_active = 0
+          _b_seen = 0
+
+
+          @expose
+          async def hold(seconds: float = 30.0) -> str:
+              global _holds_active
+              _holds_active += 1
+              try:
+                  await asyncio.sleep(seconds)
+                  return "held"
+              finally:
+                  _holds_active -= 1
+
+
+          @expose
+          def holds_active() -> int:
+              return _holds_active
+
+
+          @expose
+          def b_ping() -> int:
+              global _b_seen
+              _b_seen += 1
+              return _b_seen
+
+
+          @expose
+          def b_seen() -> int:
+              return _b_seen
+          PYEOF
+              echo "hold/holds_active appended (resolved crate $CRATE_VER carries per-window fairness)"
+            else
+              echo "resolved crate predates per-window fairness — window-fairness check skipped"
+            fi
           else
             echo "resolved crate predates python_selftest_b_report — two-window self-test skipped"
           fi
@@ -345,7 +396,7 @@ jobs:
             # Two-window event-scoping test — only when the resolved crate
             # carried the selftest-winb capability (see the capability step).
             if [ "$PYLAIR_WINB_CAP" = "1" ]; then
-              PYLAIR_SELF_TEST_WEBVIEW=1 timeout 120 xvfb-run -a /r/usr/bin/app-under-test
+              PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/app-under-test
             fi
             # Lifecycle containment: clean close, SIGKILL of the host,
             # restart — the script asserts no runtime/worker survivors.
@@ -381,10 +432,12 @@ jobs:
           # carried the selftest-winb capability (see the capability step).
           if ($env:PYLAIR_WINB_CAP -eq '1') {
             $env:PYLAIR_SELF_TEST_WEBVIEW = '1'
+            $env:PYLAIR_MAX_TASKS = '4'
             $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP -PassThru
             if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Error 'webview self-test timed out'; exit 1 }
             if ($p.ExitCode -ne 0) { Write-Error "webview self-test exit $($p.ExitCode)"; exit 1 }
             $env:PYLAIR_SELF_TEST_WEBVIEW = $null
+            $env:PYLAIR_MAX_TASKS = $null
           }
 
       - name: Dogfood lifecycle (Windows — close, kill, restart)
@@ -442,7 +495,7 @@ jobs:
           # Two-window event-scoping test — only when the resolved crate
           # carried the selftest-winb capability (see the capability step).
           if [ "$PYLAIR_WINB_CAP" = "1" ]; then
-            env -i PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 "$ISOLATED/Contents/MacOS/$(basename "$APP" .app)"
+            env -i PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 "$ISOLATED/Contents/MacOS/$(basename "$APP" .app)"
           fi
 
   # Wrap mode from the shipped artifacts: ci.yml's wrap-acceptance gives

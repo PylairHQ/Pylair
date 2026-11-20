@@ -14,6 +14,12 @@ for await (const token of stream<string>("generate", { prompt })) {
 }
 ```
 
+Errors surface as `PythonError` subclasses: `LimitExceededError` when a
+bounded resource refuses the call (`.limit` names the cap — including
+`"window_share"` when a window exceeds its per-window share, with
+`data.window` naming the over-share owner), and `PermissionDeniedError`
+when the window's capability does not permit the function.
+
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
 `npm i @pylair/client@0.1.0-rc.23`.

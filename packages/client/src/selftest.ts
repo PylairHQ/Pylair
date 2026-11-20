@@ -9,8 +9,8 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
-import { CMD, ipc } from "./internal.js";
+import { call, LimitExceededError, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
+import { CMD, ipc, liveTasks } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
 
@@ -137,6 +137,7 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     sawStderr?: number;
     sawStderrAny?: number;
     denyProbe?: DenyProbe;
+    fairnessProbe?: { ok?: boolean; skipped?: string; error?: string; value?: unknown };
   }>((res) => {
     void ipc().then((b) => b.listen("pylair://selftest-b", res));
   });
@@ -209,6 +210,105 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     if (code !== -32010) throw new Error(`expected TASK_CANCELLED, got ${String(code)} after ${seen} chunks`);
     if (seen >= 100) throw new Error(`producer kept running (${seen} chunks)`);
   });
+  // Per-window fairness (docs/decisions/0005): with main and win-b both
+  // live, main floods `hold` calls until the host refuses — and the
+  // refusal must be main's SHARE (window_share naming "main"), never the
+  // global cap. win-b's own call, made while main is held, must still be
+  // admitted: that is the whole point of the share. The held calls are
+  // then cancelled and the owner's count drains. This is the only check
+  // that proves a real webview subscribes through WindowRegistry and gets
+  // its share — the Rust-side tests drive the counters through hooks.
+  // The fixture lives in the backend (hold/holds_active): its absence
+  // means the resolved app predates it — a skip, never a failure.
+  let fairnessArmed = true;
+  await run("window-fairness", async () => {
+    try {
+      await within(call<number>("holds_active", {}), 15_000, "holds_active");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) {
+        fairnessArmed = false;
+        return;
+      }
+      throw e;
+    }
+    // win-b must be LIVE before the flood — a lone main would be refused
+    // on the global cap, never window_share. `b_seen` is the proof: the
+    // intruder's `b_ping` call is itself the bridge command that
+    // subscribes it, so a nonzero count means win-b already holds a live
+    // entry. Poll Python state, not an event — an emit can arrive before
+    // this window's listener exists and is gone forever.
+    for (let i = 0; ; i++) {
+      const seen = await within(call<number>("b_seen", {}), 15_000, "b_seen");
+      if (seen > 0) break;
+      if (i === 119) throw new Error("win-b never pinged (b_seen stayed 0)");
+      await sleep(500);
+    }
+    const ac = new AbortController();
+    const held: Promise<unknown>[] = [];
+    try {
+      // Flood `hold` calls, pacing each on liveTasks growth: an admitted
+      // call lands in liveTasks when its task id arrives, a refused one
+      // rejects during the invoke and is never tracked. Waiting for one
+      // or the other keeps every call inside in_flight before the next
+      // goes, so the refusal comes from the TASK share — a burst would
+      // hit the queue share instead.
+      let refused: LimitExceededError | undefined;
+      for (let i = 0; i < 80 && !refused; i++) {
+        const before = liveTasks.size;
+        const p = call("hold", { seconds: 30 }, { signal: ac.signal });
+        held.push(p);
+        p.catch(() => {});
+        const outcome = await Promise.race([
+          p.then(
+            () => "answered" as const,
+            (e: unknown) => e,
+          ),
+          (async () => {
+            for (let j = 0; j < 600 && liveTasks.size <= before; j++) await sleep(50);
+            return liveTasks.size > before ? ("registered" as const) : ("stall" as const);
+          })(),
+        ]);
+        if (outcome instanceof LimitExceededError) refused = outcome;
+        else if (outcome instanceof Error) throw outcome;
+        else if (outcome === "stall")
+          throw new Error("a hold call neither registered nor was refused");
+        else if (outcome !== "answered" && outcome !== "registered")
+          throw new Error(`hold call threw ${String(outcome)}`);
+      }
+      if (!refused) throw new Error("80 held calls and still no refusal");
+      if (refused.limit !== "window_share")
+        throw new Error(`flood refused on limit "${refused.limit}", expected window_share`);
+      const d = refused.data as { window?: unknown; max?: unknown } | undefined;
+      if (d?.window !== "main")
+        throw new Error(`window_share named window ${String(d?.window)}, expected "main"`);
+      if (typeof d?.max !== "number")
+        throw new Error("window_share refusal carried no share ceiling");
+      // win-b's probe ran while main held (the intruder gates its report
+      // on it): its call must have been admitted.
+      const b = await within(bReport, 60_000, "win-b report");
+      if (!b.fairnessProbe) throw new Error("win-b reported no fairness probe");
+      if (b.fairnessProbe.skipped)
+        throw new Error(`win-b skipped its probe: ${b.fairnessProbe.skipped}`);
+      if (!b.fairnessProbe.ok)
+        throw new Error(
+          `win-b's call failed while main was held: ${b.fairnessProbe.error ?? "no detail"}`,
+        );
+    } finally {
+      ac.abort();
+      await Promise.allSettled(held);
+    }
+    // Counts drain: the runtime-side hold counter returns to 0 and a
+    // fresh call is admitted — released slots are claimable again.
+    for (let i = 0; i < 100; i++) {
+      if ((await within(call<number>("holds_active", {}), 15_000, "holds_active")) === 0) break;
+      if (i === 99) throw new Error("held calls never drained (holds_active stayed >0)");
+      await sleep(100);
+    }
+    const v = await within(call<number>(spec.add, { a: 2, b: 2 }), 15_000, "post-drain call");
+    if (v !== 4) throw new Error(`post-drain add returned ${String(v)}`);
+  });
+  if (!fairnessArmed && checks["window-fairness"] === "ok")
+    checks["window-fairness"] = "skipped: backend has no hold/holds_active fixture";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
@@ -300,11 +400,16 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   void emit("pylair://stream", { task: 3, done: true, result: "FORGED-EARLY-BY-B" }).catch(() => {});
 
   // Wait until the runtime is up so task 2 (the owner's stream) is live.
+  // Every python_state invoke also SUBSCRIBES this window, which joins it
+  // to the fairness live set — the `b_ping` call below is the observable
+  // mark main polls before it floods (Python state, not an emit: an emit
+  // can arrive before main's listener exists and is gone forever).
   for (let i = 0; i < 120; i++) {
     const s = await invoke<string>("plugin:pylair|python_state").catch(() => "");
     if (s === "ready") break;
     await sleep(500);
   }
+  await call<number>("b_ping", {}).catch(() => -1);
 
   // Mid-stream forgeries at task 2: plain emit, emitTo("main"), terminal.
   void emit("pylair://stream", { task: 2, seq: 999, value: "FORGED-BY-B", done: false }).catch(
@@ -362,11 +467,48 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   }).then(() => ({ denied: false }) as DenyOutcome, outcome);
   const denyProbe: DenyProbe = { viaCall, viaRaw };
 
+  // Per-window fairness probe (docs/decisions/0005): while main floods
+  // `hold` calls to its share ceiling, this window's plain call must
+  // still be admitted — that is what the share is for. `holds_active`
+  // is the rendezvous: it reads >0 only while main's held calls are in
+  // flight, so the probe provably lands inside the hold window. A
+  // backend without the fixture is a skip, never a failure.
+  let fairnessProbe: { ok?: boolean; skipped?: string; error?: string; value?: unknown };
+  {
+    const first = await call<number>("holds_active", {}).then(
+      (n) => n,
+      (e) => (e instanceof PythonError && e.code === -32601 ? -1 : -2),
+    );
+    if (first === -1) {
+      fairnessProbe = { ok: true, skipped: "backend has no holds_active fixture" };
+    } else {
+      let heldN = first;
+      for (let i = 0; i < 60 && heldN <= 0; i++) {
+        await sleep(500);
+        heldN = await call<number>("holds_active", {}).catch(() => -2);
+      }
+      if (heldN <= 0) {
+        fairnessProbe = {
+          ok: false,
+          error: `main never held (holds_active = ${String(heldN)} after 30s)`,
+        };
+      } else {
+        fairnessProbe = await call<string>("hello", { name: "win-b" }).then(
+          (value) => ({ ok: true, value }),
+          (e: unknown) => ({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        );
+      }
+    }
+  }
+
   // The report cannot ride emit/emitTo: a `core:event:deny-emit(-to)` entry
   // (as the default template ships) denies those commands origin-wide —
   // Tauri ignores window scoping for denials — so win-b relays through an
   // ACL-checked command whose Rust side emits for it.
   await invoke("plugin:pylair|python_selftest_b_report", {
-    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe },
+    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe, fairnessProbe },
   }).catch(() => {});
 }
