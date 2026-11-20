@@ -256,7 +256,8 @@ describe("the finished output matches the console", () => {
     assert.equal(await run([], p), 0);
     const shown = p.plain();
     assert.match(shown, /1\) a new UI that calls Python/);
-    assert.match(shown, /\[ok\] project name: p-app/);
+    // askText: no resolved line in plain mode - the typed answer is already on screen
+    assert.equal(p.text().split("project name: p-app").length - 1, 1);
     assert.match(shown, /\[ok\] what are you building\? a new UI that calls Python/);
     const tail =
       "Created p-app/ (bridge)\n\n" +

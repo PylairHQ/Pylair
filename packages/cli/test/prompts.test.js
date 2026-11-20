@@ -40,6 +40,9 @@ describe("prompts: askText", () => {
     p.input.write("  my-app  \n");
     assert.equal(await q, "my-app");
     assert.match(p.plain(), /project name: /);
+    const raw = p.text();
+    // the echoed input line is erased, then the resolved line takes its place
+    assert.match(raw, /\u001b\[1A\u001b\[0J✔ project name: /);
     assert.match(p.plain(), /✔ project name: my-app/, "an answered text prompt ends with a resolved line");
   });
 
@@ -52,6 +55,26 @@ describe("prompts: askText", () => {
     p.input.write("good\n");
     assert.equal(await q, "good");
     assert.match(p.plain(), /use lowercase/);
+    // attempt line + error line + final prompt line are all erased (3 rows)
+    assert.match(p.text(), /\u001b\[3A\u001b\[0J✔ project name: \u001b\[90mgood/);
+  });
+
+  test("a wrapped answer erases every row it occupied", async () => {
+    const p = io();
+    p.output.columns = 20;
+    const q = askText(p, "project name");
+    p.input.write("abcdefghij\n"); // "project name: " + 10 chars wraps on 20 cols
+    assert.equal(await q, "abcdefghij");
+    assert.match(p.text(), /\u001b\[2A\u001b\[0J✔ project name: /);
+  });
+
+  test("plain: no resolved line - the typed answer stays on screen once", async () => {
+    const p = io(PLAIN);
+    const q = askText(p, "project name");
+    p.input.write("p-app\n");
+    assert.equal(await q, "p-app");
+    assert.equal(p.text().split("project name: p-app").length - 1, 1);
+    assert.doesNotMatch(p.text(), /\[ok\] project name/);
   });
 
   test("an empty answer re-asks instead of accepting nothing", async () => {

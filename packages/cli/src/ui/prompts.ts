@@ -94,9 +94,10 @@ function keypressLoop(
 }
 
 /** Echo printable input and return it on Enter. Backspace edits; other
- * control keys are ignored. `onEnter` inspects the buffered line: return
- * the answer to finish, or a message to reject and keep asking. The whole
- * retry stays inside one keypress loop so no input is lost between tries. */
+ * control keys are ignored. `onEnter` inspects the buffered line exactly as
+ * echoed: return the answer to finish, or a message to reject and keep
+ * asking. The whole retry stays inside one keypress loop so no input is
+ * lost between tries. */
 async function readLineRetry(
   io: PromptIo,
   start: () => void,
@@ -107,7 +108,7 @@ async function readLineRetry(
   await keypressLoop(io, (str, key) => {
     // \r -> "return" (raw TTY), \n -> "enter" (cooked or piped input)
     if (key.name === "return" || key.name === "enter") {
-      const bad = onEnter(buf.trim());
+      const bad = onEnter(buf);
       if (bad === undefined) {
         write("\n");
         return true;
@@ -154,20 +155,37 @@ export async function askText(
   label: string,
   validate?: (value: string) => string | undefined,
 ): Promise<string> {
+  const prefix = `${label}${questionSuffix(label)}`;
   let answer = "";
+  // What each attempt echoed (failed ones included), so the prompt region
+  // can be erased exactly once the answer is accepted.
+  const attempts: { typed: string; error: string }[] = [];
   await readLineRetry(
     io,
-    () => io.output.write(`${label}${questionSuffix(label)}`),
-    (v) => {
+    () => io.output.write(prefix),
+    (raw) => {
+      const v = raw.trim();
       const bad = v ? validate?.(v) : "a value is required";
       if (bad === undefined) {
         answer = v;
         return undefined;
       }
+      attempts.push({ typed: raw, error: bad });
       return bad;
     },
   );
-  resolved(io, label, answer);
+  // Fancy consoles erase the prompt region (last prompt line and any prior
+  // attempt and error lines) so the question appears once: the resolved
+  // line. Plain consoles cannot move the cursor, and the typed answer is
+  // already on screen, so they show no resolved line at all.
+  if (io.caps.fancy) {
+    const cols = (io.output as { columns?: number }).columns ?? 0;
+    const rowsOf = (text: string) => (cols > 0 ? Math.max(1, Math.ceil(text.length / cols)) : 1);
+    let rows = rowsOf(prefix + answer);
+    for (const a of attempts) rows += rowsOf(a.error) + rowsOf(prefix + a.typed);
+    io.output.write(`\x1b[${rows}A\x1b[0J`);
+    resolved(io, label, answer);
+  }
   return answer;
 }
 
