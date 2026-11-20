@@ -50,6 +50,7 @@ async fn self_test_call(spec: SpawnSpec, origin: &str) -> i32 {
                     eprintln!("[runtime state] {from:?} -> {to:?}: {detail}")
                 }
                 RuntimeEvent::Exposes(_) => {}
+                RuntimeEvent::HealthChanged(_) => {}
             }
         }
     });

@@ -247,21 +247,10 @@ impl Handle {
                 },
             )
         };
-        let transport = if !live {
-            "unknown"
-        } else if missed_pongs > 0 {
-            "missing"
-        } else {
-            "ok"
-        };
-        let loop_verdict = if !live || self.kind == RuntimeKind::Web {
-            "unknown"
-        } else {
-            match loop_stale_ms {
-                Some(Some(ms)) if ms >= super::run::LOOP_STALL_WARN.as_millis() as u64 => "busy",
-                _ => "ok",
-            }
-        };
+        // Same rule the pylair://health event emits on
+        // (health.rs::verdicts) — one source, snapshot and event
+        // cannot drift apart.
+        let (transport, loop_verdict) = self.health.lock().unwrap().verdicts(self.kind, live);
         let f = self.fair.lock().unwrap();
         let totals = f.snapshot().totals;
         let self_usage = match (self.limits.per_window_fairness, owner) {

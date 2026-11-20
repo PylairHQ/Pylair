@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use super::config::RuntimeKind;
+
 /// Shared with the actor — the `FairnessRef` precedent
 /// (docs/decisions/0006 §1).
 pub(super) type HealthRef = Arc<Mutex<HealthShared>>;
@@ -75,6 +77,14 @@ pub(super) struct HealthShared {
     /// at ~`missed_pongs_to_kill` entries — a wedged runtime cannot
     /// grow it.
     pub(super) ping_sent: BTreeMap<u64, Instant>,
+    /// The verdict pair a `pylair://health` event last carried —
+    /// `None` until this generation emits its first. At spawn the
+    /// baseline is the assumed `{ok, ok}` (the runtime just reached
+    /// Ready; a literal first emit would carry no news). After
+    /// teardown `reset_generation` reseeds `{unknown, unknown}` — the
+    /// value observers last saw — so a new generation's first verdict
+    /// always emits even when it reads `{ok, ok}` again (0006 §5).
+    pub(super) emitted: Option<(&'static str, &'static str)>,
 }
 
 /// The shared block, created in `spawn()` beside the fairness map.
@@ -91,6 +101,7 @@ pub(super) fn new(backoff: Duration) -> HealthRef {
         last_loop_stale: None,
         missed_pongs: 0,
         ping_sent: BTreeMap::new(),
+        emitted: None,
     }))
 }
 
@@ -159,11 +170,104 @@ impl HealthShared {
             .count() as u32;
     }
 
+    /// The §2 verdicts over the shared block — the same inputs
+    /// `Handle::health` reads, so an emitted event can never disagree
+    /// with the snapshot. `live` is the caller's "generation alive"
+    /// fact; `Handle::health` derives its own from the state watch.
+    pub(super) fn verdicts(&self, kind: RuntimeKind, live: bool) -> (&'static str, &'static str) {
+        let transport = if !live {
+            "unknown"
+        } else if self.missed_pongs > 0 {
+            "missing"
+        } else {
+            "ok"
+        };
+        let loop_verdict = if !live || kind == RuntimeKind::Web {
+            "unknown"
+        } else {
+            match self.last_loop_stale {
+                Some(d) if d >= super::run::LOOP_STALL_WARN => "busy",
+                _ => "ok",
+            }
+        };
+        (transport, loop_verdict)
+    }
+
+    /// The §5 event check: recompute the verdicts and, on a real
+    /// change from the last emitted pair, record and return the
+    /// broadcast payload `{version, generation, liveness}` — no
+    /// per-window data. `None` on steady state: one emit per flip,
+    /// never one per tick.
+    pub(super) fn health_event(
+        &mut self,
+        kind: RuntimeKind,
+        live: bool,
+        missed_pongs_to_kill: u32,
+    ) -> Option<serde_json::Value> {
+        let (transport, loop_verdict) = self.verdicts(kind, live);
+        // Nothing emitted yet reads as the assumed-healthy baseline:
+        // generation 1's first {ok, ok} is not news and does not emit.
+        if self.emitted.unwrap_or(("ok", "ok")) == (transport, loop_verdict) {
+            return None;
+        }
+        self.emitted = Some((transport, loop_verdict));
+        let liveness = LivenessSnapshot {
+            last_pong_age_ms: if live {
+                self.last_pong_at.map(|t| t.elapsed().as_millis() as u64)
+            } else {
+                None
+            },
+            rtt_ms: if live {
+                self.last_rtt.map(|d| d.as_millis() as u64)
+            } else {
+                None
+            },
+            missed_pongs: if live { self.missed_pongs } else { 0 },
+            missed_pongs_to_kill,
+            loop_stale_ms: (kind == RuntimeKind::Bridge).then(|| {
+                if live {
+                    self.last_loop_stale.map(|d| d.as_millis() as u64)
+                } else {
+                    None
+                }
+            }),
+            transport,
+            loop_verdict,
+        };
+        Some(serde_json::json!({
+            "version": 1,
+            "generation": self.generation,
+            "liveness": liveness,
+        }))
+    }
+
+    /// Generation teardown (`Session::drop`): the generation's
+    /// verdicts go `unknown`. Emits only to correct a verdict this
+    /// generation actually sent — "a real change from the last
+    /// emitted value" (0006 §5) — then resets the block so the next
+    /// generation's first verdict always emits. Returns the payload
+    /// to broadcast, if any.
+    pub(super) fn end_generation(
+        &mut self,
+        kind: RuntimeKind,
+        missed_pongs_to_kill: u32,
+    ) -> Option<serde_json::Value> {
+        let ev = if self.emitted.is_some() {
+            self.health_event(kind, false, missed_pongs_to_kill)
+        } else {
+            None
+        };
+        self.reset_generation();
+        ev
+    }
+
     /// Generation teardown (`Session::drop`): the per-generation
     /// liveness block dies with it. Outside a live generation
     /// `Handle::health` reports these null and both verdicts
     /// `"unknown"` regardless — the reset keeps the shared block
-    /// honest for reads in between.
+    /// honest for reads in between, and reseeds the emitted baseline
+    /// to the `unknown` pair observers last saw so the next
+    /// generation's first verdict always emits.
     pub(super) fn reset_generation(&mut self) {
         self.ready_at = None;
         self.last_pong_at = None;
@@ -171,6 +275,7 @@ impl HealthShared {
         self.last_loop_stale = None;
         self.missed_pongs = 0;
         self.ping_sent.clear();
+        self.emitted = Some(("unknown", "unknown"));
     }
 }
 

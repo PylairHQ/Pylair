@@ -79,12 +79,19 @@ impl Drop for Session<'_> {
             .end_generation();
         // Per-generation liveness dies with the Session
         // (decisions 0006 §1): pong ages, RTT and the seq map mean
-        // nothing once the child is gone.
-        self.sup
-            .health
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reset_generation();
+        // nothing once the child is gone. A verdict the generation
+        // emitted is corrected to `unknown` first (0006 §5); a
+        // generation that never emitted stays silent.
+        let health_ev = {
+            let mut h = self.sup.health.lock().unwrap_or_else(|e| e.into_inner());
+            h.end_generation(self.sup.config.kind, self.sup.config.missed_pongs_to_kill)
+        };
+        if let Some(payload) = health_ev {
+            let _ = self
+                .sup
+                .events
+                .try_send(RuntimeEvent::HealthChanged(payload));
+        }
     }
 }
 
@@ -98,11 +105,21 @@ impl Session<'_> {
             .pings_sent
             .load(Ordering::Relaxed)
             .saturating_sub(self.pongs_received) as u32;
-        self.sup
-            .health
-            .lock()
-            .unwrap()
-            .note_missed(pongs_outstanding);
+        let health_ev = {
+            let mut h = self.sup.health.lock().unwrap();
+            h.note_missed(pongs_outstanding);
+            h.health_event(
+                self.sup.config.kind,
+                true,
+                self.sup.config.missed_pongs_to_kill,
+            )
+        };
+        if let Some(payload) = health_ev {
+            let _ = self
+                .sup
+                .events
+                .try_send(RuntimeEvent::HealthChanged(payload));
+        }
         if pongs_outstanding >= self.sup.config.missed_pongs_to_kill {
             self.sup.set_state(
                 State::Unresponsive,
@@ -239,11 +256,21 @@ impl Session<'_> {
                         self.pongs_received += 1;
                         // Transport is alive. Is the loop SERVING?
                         let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
-                        self.sup.health.lock().unwrap().note_pong(
-                            p["seq"].as_u64(),
-                            stale,
-                            self.sup.config.ping_interval,
-                        );
+                        let health_ev = {
+                            let mut h = self.sup.health.lock().unwrap();
+                            h.note_pong(p["seq"].as_u64(), stale, self.sup.config.ping_interval);
+                            h.health_event(
+                                self.sup.config.kind,
+                                true,
+                                self.sup.config.missed_pongs_to_kill,
+                            )
+                        };
+                        if let Some(payload) = health_ev {
+                            let _ = self
+                                .sup
+                                .events
+                                .try_send(RuntimeEvent::HealthChanged(payload));
+                        }
                         match classify_pong(stale, self.sup.config.loop_stall_kill) {
                             PongVerdict::StallKill => {
                                 self.sup.set_state(

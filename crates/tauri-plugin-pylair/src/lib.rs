@@ -41,6 +41,9 @@ pub mod events {
     pub const STDERR: &str = "pylair://stderr";
     /// The exposes manifest after handshake.
     pub const EXPOSES: &str = "pylair://exposes";
+    /// Liveness verdict changes only (docs/decisions/0006 §5):
+    /// `{version, generation, liveness}`.
+    pub const HEALTH: &str = "pylair://health";
 }
 
 #[cfg(test)]

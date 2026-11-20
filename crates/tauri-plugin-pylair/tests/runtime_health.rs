@@ -4,6 +4,7 @@
 
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri_plugin_pylair::supervisor::{
     spawn, ExitKind, Handle, Limits, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
@@ -102,8 +103,13 @@ while True:
 /// Pongs every ping, but slower than the 50ms tick: each pong lands
 /// just after the NEXT ping went out. The newest ping is in flight,
 /// not missed — the miss count at pong arrival must be 0, not 1.
+/// Pongs every ping but one seq BEHIND: ping seq s gets a pong for
+/// s-1. At every pong arrival the newest queued ping is structurally
+/// a fraction of an interval old — in flight, never missed — no
+/// sleeps, so no runner jitter can flip the verdict (the earlier
+/// sleep-based version flaked on macOS CI with 50ms margins).
 const FAKE_SLOW_PONG: &str = r#"
-import sys, struct, json, time
+import sys, struct, json
 def w(o):
     b = json.dumps(o).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
@@ -114,8 +120,57 @@ while True:
     n, = struct.unpack(">I", h)
     m = json.loads(sys.stdin.buffer.read(n))
     if m["method"] == "ping":
-        time.sleep(0.06)
-        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
+        s = m["params"]["seq"]
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": s - 1 if s else 0, "loop_stale_ms": 0}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
+/// loop_stale_ms flips by ping seq: healthy → 2500 (seqs 3-5) →
+/// healthy (seq ≥6). Exactly two verdict flips: `{ok,busy}` then
+/// `{ok,ok}` — the assumed-healthy baseline makes generation 1's
+/// first `{ok,ok}` a non-event.
+const FAKE_FLAP_LOOP: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        s = m["params"]["seq"]
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": s, "loop_stale_ms": 2500 if 3 <= s <= 5 else 0}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
+/// Pongs seqs 1-2 healthy, lets seqs 3-4 go unanswered (missed climbs
+/// to 2), then pongs every seq ≥5 with `loop_stale_ms: 2500`:
+/// unresponsive-from-missed-pongs → unresponsive-from-stalled-loop —
+/// the intra-state cause flip `onState` cannot see. The transport
+/// verdict stays `missing` throughout (seqs 3-4 never resolve).
+const FAKE_MISSED_THEN_STALE: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        s = m["params"]["seq"]
+        if s <= 2:
+            w({"jsonrpc":"2.0","method":"pong","params":{"seq": s, "loop_stale_ms": 0}})
+        elif s >= 5:
+            w({"jsonrpc":"2.0","method":"pong","params":{"seq": s, "loop_stale_ms": 2500}})
+        # seqs 3,4 are read but never answered
     elif m["method"] == "shutdown":
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
 "#;
@@ -214,6 +269,48 @@ async fn eventually(cond: impl Fn() -> bool) -> bool {
     })
     .await
     .is_ok()
+}
+
+/// Collect every runtime event into a shared log so assertions can
+/// count health payloads and state transitions together.
+fn pump(mut rx: mpsc::Receiver<RuntimeEvent>) -> Arc<Mutex<Vec<RuntimeEvent>>> {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let sink = log.clone();
+    tokio::spawn(async move {
+        while let Some(e) = rx.recv().await {
+            sink.lock().unwrap().push(e);
+        }
+    });
+    log
+}
+
+/// The `pylair://health` payloads seen so far, in arrival order.
+fn health_events(log: &Arc<Mutex<Vec<RuntimeEvent>>>) -> Vec<serde_json::Value> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            RuntimeEvent::HealthChanged(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many times `onState` carried a transition *into* Unresponsive.
+fn unresponsive_arrivals(log: &Arc<Mutex<Vec<RuntimeEvent>>>) -> usize {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                RuntimeEvent::StateChanged {
+                    to: State::Unresponsive,
+                    ..
+                }
+            )
+        })
+        .count()
 }
 
 /// A ready bridge runtime: the §4 schema fields all present with
@@ -349,12 +446,13 @@ async fn missing_pongs_report_missing_then_kill() {
     );
 }
 
-/// A pong slower than the ping interval still answers every ping: the
-/// ping queued just before it lands is in flight, not missed, so at
-/// the pong the transport verdict is `ok` with `missed_pongs == 0`
-/// (the #120-review counting fix). Between pongs the tick correctly
-/// reports one in-flight miss — the assertion reads the pong-arrival
-/// instant, which `rtt_ms.is_some()` guarantees.
+/// A pong answering one seq behind still clears the transport: the
+/// ping queued just before it lands is in flight — under one interval
+/// old — not missed, so at the pong the transport verdict is `ok`
+/// with `missed_pongs == 0` (the #120-review counting fix). Between
+/// pongs the tick correctly reports one in-flight miss — the
+/// assertion reads the pong-arrival instant, which `rtt_ms.is_some()`
+/// guarantees.
 #[tokio::test]
 async fn a_pong_after_the_next_ping_is_not_a_miss() {
     let mut c = fast_config();
@@ -500,4 +598,105 @@ async fn a_second_owner_shrinks_self_ceilings() {
     assert_eq!(sa.queued.cap, 64);
     assert_eq!(sa.streams.cap, 32);
     assert_eq!(sa.isolated.cap, 8);
+}
+
+/// §5: one emit per verdict flip, none on steady state. Generation 1's
+/// baseline is assumed `{ok, ok}` (the runtime just reached Ready), so
+/// a `0 → 2500 → 0` loop staleness flap emits exactly twice — busy,
+/// then ok — and repeated identical pongs emit nothing.
+#[tokio::test]
+async fn a_stale_loop_flap_emits_busy_then_ok_and_stays_quiet() {
+    let (events, rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_FLAP_LOOP), fast_config(), events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+    assert!(
+        eventually(|| health_events(&log).len() >= 2).await,
+        "the busy and recovery flips never emitted"
+    );
+    let seen = health_events(&log);
+    assert_eq!(seen[0]["liveness"]["transport"], json!("ok"));
+    assert_eq!(seen[0]["liveness"]["loop"], json!("busy"));
+    assert_eq!(seen[1]["liveness"]["transport"], json!("ok"));
+    assert_eq!(seen[1]["liveness"]["loop"], json!("ok"));
+    // §5 payload shape: versioned, generation-scoped, no window data.
+    for e in &seen {
+        assert_eq!(e["version"], json!(1));
+        assert!(e["generation"].is_u64());
+        assert!(e.get("self").is_none());
+        assert!(e["liveness"].is_object());
+    }
+    // Repeated identical pongs emit nothing further: let five more
+    // ping intervals elapse past the flap, then count again.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        health_events(&log).len(),
+        2,
+        "identical verdicts must not re-emit: {seen:?}"
+    );
+}
+
+/// §5: a dead transport emits `missing` exactly once at the first miss
+/// — identical subsequent misses re-emit nothing — and the
+/// generation's end corrects the last verdict to `unknown`. The
+/// restart's first verdict then emits again because the reset reseeded
+/// the baseline.
+#[tokio::test]
+async fn a_dead_transport_emits_missing_once_then_unknown_at_teardown() {
+    let (events, rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_NO_PONG), fast_config(), events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+    assert!(
+        eventually(|| health_events(&log).len() >= 2).await,
+        "missing-then-teardown events never arrived"
+    );
+    let seen = health_events(&log);
+    // Exactly one `missing` event before the kill, at the first miss;
+    // the climbing count changes no verdict.
+    assert_eq!(seen[0]["liveness"]["transport"], json!("missing"));
+    assert_eq!(seen[0]["liveness"]["missed_pongs"], json!(1));
+    // Teardown: the emitted verdict is corrected to unknown — a real
+    // change from the last broadcast, not a steady-state echo.
+    assert_eq!(seen[1]["liveness"]["transport"], json!("unknown"));
+    assert_eq!(seen[1]["liveness"]["loop"], json!("unknown"));
+    assert_eq!(seen[0]["generation"], seen[1]["generation"]);
+    // The restarted generation's first verdict emits too — its
+    // baseline was reseeded to the `unknown` observers last saw.
+    assert!(
+        eventually(|| health_events(&log)
+            .iter()
+            .any(|e| e["generation"] != seen[0]["generation"]))
+        .await,
+        "the restarted generation never emitted its first verdict"
+    );
+}
+
+/// §5's motivating case: unresponsive-from-missed-pongs →
+/// unresponsive-from-stalled-loop emits a health event while `onState`
+/// cannot — `set_state` dedupes the same-state transition, so the
+/// cause flip is invisible to state listeners. The transport stays
+/// `missing` (seqs 3-4 never resolve); only the loop verdict flips.
+/// Asserting a single `Unresponsive` arrival over two health events is
+/// the onState byte-identity check.
+#[tokio::test]
+async fn the_unresponsive_cause_flip_emits_health_not_state() {
+    let (events, rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_MISSED_THEN_STALE), fast_config(), events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+    assert!(
+        eventually(|| health_events(&log).len() >= 2).await,
+        "the missed→stalled flip never emitted"
+    );
+    let seen = health_events(&log);
+    assert_eq!(seen[0]["liveness"]["transport"], json!("missing"));
+    assert_eq!(seen[0]["liveness"]["loop"], json!("ok"));
+    assert_eq!(seen[1]["liveness"]["transport"], json!("missing"));
+    assert_eq!(seen[1]["liveness"]["loop"], json!("busy"));
+    assert_eq!(
+        unresponsive_arrivals(&log),
+        1,
+        "the intra-state cause flip must not produce a second onState event"
+    );
 }
