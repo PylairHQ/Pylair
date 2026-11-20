@@ -70,7 +70,13 @@ impl Drop for Session<'_> {
     /// instead of leaking into it (queue debt is untouched - a queued
     /// command still owes its release when dequeued).
     fn drop(&mut self) {
-        self.sup.fair.lock().unwrap().end_generation();
+        // into_inner, not unwrap: a poisoned mutex must not panic in
+        // drop - a second panic while unwinding aborts the process.
+        self.sup
+            .fair
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_generation();
     }
 }
 
