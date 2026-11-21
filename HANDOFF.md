@@ -67,6 +67,28 @@ Remaining order for rc.24: pack-mode acceptance green on this commit,
 then the npm trio under `--tag next`, then registry acceptance with
 `source=registry` and `expect_version 0.1.0-rc.24`.
 
+The next train is runtime health (PRs 118-124, `docs/decisions/0006`),
+crate `0.1.0-rc.19` plus npm `0.1.0-rc.25`: `health()` returns the
+host-observed snapshot through the new `python_health` command (state,
+generation, restart accounting, transport + loop liveness verdicts,
+load totals, the calling window's fairness row) and `onHealth`
+delivers `pylair://health` only on a liveness-verdict change. `self`
+is scoped to `window.label()`, never JS input; health polling is
+read-only — the fairness live set is joined on calls only, so a
+poller reserves no share. The installed-webview self-test gained a
+`health` check (clean skip when the resolved crate predates rc.19,
+mandatory on `--local` legs and — via the acceptance-registry version
+gate — on pack/registry legs once the resolved crate carries
+`python_health`). PyPI is skipped this train (`python/` unchanged).
+
+This commit bumps the crate to `0.1.0-rc.19`; the publish itself is
+manual. Remaining order: crates.io `tauri-plugin-pylair 0.1.0-rc.19` →
+pins PR (npm trio `0.1.0-rc.25`, scaffold crate pin `=0.1.0-rc.19`,
+both template `Cargo.lock` files regenerated against the published
+crate) → pack-mode acceptance green → npm trio under `--tag next` →
+registry acceptance `source=registry` with `expect_version
+0.1.0-rc.25`.
+
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
 Wrap mode ships in 0.1.0. W1 is the plumbing only; nothing user-facing

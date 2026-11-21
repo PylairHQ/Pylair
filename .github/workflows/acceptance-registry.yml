@@ -336,6 +336,25 @@ jobs:
             else
               echo "resolved crate predates per-window fairness — window-fairness check skipped"
             fi
+            # Runtime health: python_health first ships in crate
+            # 0.1.0-rc.19. On a crate that new a "skipped" health check
+            # would hide a real break — e.g. allow-python-health missing
+            # from pylair:default is an ACL regression the client's
+            # uncoded rejection cannot tell from "command absent" — so
+            # the self-test steps fail on it, mirroring ci.yml's
+            # --local guard. Below rc.19 a skip stays legitimate.
+            case "$CRATE_VER" in
+              0.1.0-rc.*)
+                RC_N=${CRATE_VER##0.1.0-rc.}
+                if [ "$RC_N" -ge 19 ]; then HEALTH_OK=1; fi ;;
+              *) HEALTH_OK=1 ;; # any non-rc line is at/past rc.19
+            esac
+            if [ -n "$HEALTH_OK" ]; then
+              echo "PYLAIR_HEALTH_EXPECTED=1" >> "$GITHUB_ENV"
+              echo "resolved crate $CRATE_VER carries python_health — a skipped health check fails the leg"
+            else
+              echo "resolved crate $CRATE_VER predates python_health (< 0.1.0-rc.19) — a skip stays legitimate"
+            fi
           else
             echo "resolved crate predates python_selftest_b_report — two-window self-test skipped"
           fi
@@ -386,8 +405,8 @@ jobs:
           for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
           # Bare ubuntu:22.04 has NO python — --self-test exits before the
           # Tauri loop/GTK init but still needs its linked system libs.
-          docker run --rm -e PYLAIR_WINB_CAP -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
-            set -e; export DEBIAN_FRONTEND=noninteractive
+          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
+            set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
             for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
             apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
             /r/usr/bin/app-under-test --self-test
@@ -396,7 +415,16 @@ jobs:
             # Two-window event-scoping test — only when the resolved crate
             # carried the selftest-winb capability (see the capability step).
             if [ "$PYLAIR_WINB_CAP" = "1" ]; then
-              PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/app-under-test
+              PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 timeout 120 xvfb-run -a /r/usr/bin/app-under-test | tee /tmp/wst.log
+              # rc.19+ carries python_health — a skipped check hides an
+              # ACL regression, so it fails the leg (ci.yml --local guard).
+              # Exact key — a loose "health.*skipped" would also match a
+              # later legitimately-skipped check on the one-line JSON.
+              # Escaped double quotes — inside the quoted docker script.
+              if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q "\"health\":\"skipped" /tmp/wst.log; then
+                echo "health skipped but resolved crate carries python_health" >&2
+                exit 1
+              fi
             fi
             # Lifecycle containment: clean close, SIGKILL of the host,
             # restart — the script asserts no runtime/worker survivors.
@@ -433,9 +461,23 @@ jobs:
           if ($env:PYLAIR_WINB_CAP -eq '1') {
             $env:PYLAIR_SELF_TEST_WEBVIEW = '1'
             $env:PYLAIR_MAX_TASKS = '4'
-            $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP -PassThru
+            # stdout/stderr redirected so the verdict JSON lands in the
+            # log and the health skip-guard can read it (a GUI exe's
+            # output otherwise never reaches the runner log — ci.yml).
+            $out = Join-Path $env:TEMP 'wst-out.txt'
+            $err = Join-Path $env:TEMP 'wst-err.txt'
+            $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP `
+                  -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
             if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Error 'webview self-test timed out'; exit 1 }
+            Get-Content $out,$err -ErrorAction SilentlyContinue
             if ($p.ExitCode -ne 0) { Write-Error "webview self-test exit $($p.ExitCode)"; exit 1 }
+            # rc.19+ carries python_health — a skipped check hides an
+            # ACL regression, so it fails the leg (ci.yml --local guard).
+            if ($env:PYLAIR_HEALTH_EXPECTED -eq '1' -and
+                (Select-String -Path $out -Pattern '"health":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
+              Write-Error 'health skipped but resolved crate carries python_health'
+              exit 1
+            }
             $env:PYLAIR_SELF_TEST_WEBVIEW = $null
             $env:PYLAIR_MAX_TASKS = $null
           }
@@ -457,7 +499,9 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app-under-test
         run: |
-          set -e
+          # pipefail: the webview self-test tees its log below — without
+          # it a failing app exit is masked by tee's 0.
+          set -eo pipefail
           # Take the app from the DMG — the artifact a user downloads,
           # not the intermediate under bundle/macos. Proves the signed
           # app is what ships in the image.
@@ -495,7 +539,13 @@ jobs:
           # Two-window event-scoping test — only when the resolved crate
           # carried the selftest-winb capability (see the capability step).
           if [ "$PYLAIR_WINB_CAP" = "1" ]; then
-            env -i PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 "$ISOLATED/Contents/MacOS/$(basename "$APP" .app)"
+            env -i PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WEBVIEW=1 PYLAIR_MAX_TASKS=4 "$ISOLATED/Contents/MacOS/$(basename "$APP" .app)" | tee /tmp/wst.log
+            # rc.19+ carries python_health — a skipped check hides an
+            # ACL regression, so it fails the leg (ci.yml --local guard).
+            if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q '"health":"skipped' /tmp/wst.log; then
+              echo "health skipped but resolved crate carries python_health" >&2
+              exit 1
+            fi
           fi
 
   # Wrap mode from the shipped artifacts: ci.yml's wrap-acceptance gives
@@ -688,6 +738,9 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: ${{ env.APP_DIR }}
         run: |
+          # pipefail: the wrap self-test tees its log below — without it a
+          # failing app exit is masked by tee's 0.
+          set -eo pipefail
           APP="$PWD/$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)"
           touch /tmp/wrap-restart-trigger
           # A clean environment, run from outside the checkout (as the
