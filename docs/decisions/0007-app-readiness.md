@@ -1,6 +1,6 @@
 # 0007: App-defined readiness
 
-Status: proposed
+Status: accepted
 
 ## Question
 
@@ -298,10 +298,16 @@ the first post-hello flush carries it, coalesced like anything else
 `ready`). Reports after shutdown still record silently — never
 raise, since the caller cannot do anything about a report anyway.
 The registry also carries `requires=` declarations (§2): a
-declared-but-unreported component exists Python-side as `loading`
-but produces **no wire traffic by itself** — the host learns
-components only from reports (or the sweep's `failed`), so the wire
-carries reports, never declarations.
+declared-but-unreported component exists Python-side as `loading`.
+A declaration is **not** a stream of frames — but it is sent
+exactly once: the first post-hello flush emits one `loading`
+`app.component` frame per declared component, so `health().app`
+shows `"model": "loading"` from the start instead of nothing until
+a hook reports. Latest-wins still rules that flush: a component a
+hook already reported `ready`/`failed` skips the declared
+`loading` shot — it fires only for declarations with no report.
+After it the component follows normal reporting, and the sweep
+still turns a never-reported declaration into `failed`.
 
 **Host side — bounds in the notification arm** (`session.rs`): the
 component map is per-generation, stored in `HealthShared` beside the
@@ -437,6 +443,11 @@ bridge-only by design, only by where the reporter lives.
 - Reports before the server exists are kept: `loading()` then
   `ready()` at import produce exactly one `ready` frame in the
   first post-hello flush.
+- Declared components ride that first flush too: a `requires=` name
+  with no report emits exactly one `loading` frame post-hello (one
+  shot, once) so `health().app` shows it loading from the start; a
+  component already reported `ready`/`failed` does not get a second
+  `loading`.
 - Shutdown mid-hook: async hook cancelled; sync hook doesn't block
   the shared deadline.
 
