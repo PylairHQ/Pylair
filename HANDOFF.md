@@ -81,13 +81,15 @@ mandatory on `--local` legs and — via the acceptance-registry version
 gate — on pack/registry legs once the resolved crate carries
 `python_health`). PyPI is skipped this train (`python/` unchanged).
 
-This commit bumps the crate to `0.1.0-rc.19`; the publish itself is
-manual. Remaining order: crates.io `tauri-plugin-pylair 0.1.0-rc.19` →
-pins PR (npm trio `0.1.0-rc.25`, scaffold crate pin `=0.1.0-rc.19`,
-both template `Cargo.lock` files regenerated against the published
-crate) → pack-mode acceptance green → npm trio under `--tag next` →
-registry acceptance `source=registry` with `expect_version
-0.1.0-rc.25`.
+The crate `0.1.0-rc.19` is published on crates.io; this pins commit
+moves the npm trio to `0.1.0-rc.25`, the scaffold crate pin to
+`=0.1.0-rc.19`, and regenerates both template `Cargo.lock` files
+against the published crate. Remaining order for rc.25: pack-mode
+acceptance green on this commit, then the npm trio under `--tag
+next`, then registry acceptance with `source=registry` and
+`expect_version 0.1.0-rc.25` — the first run where
+`PYLAIR_HEALTH_EXPECTED` arms (`python_health` first ships in
+rc.19), so a `health` skip fails the leg on every OS.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
