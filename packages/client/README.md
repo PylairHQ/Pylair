@@ -45,7 +45,7 @@ it.
 
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
-`npm i @pylair/client@0.1.0-rc.24`.
+`npm i @pylair/client@0.1.0-rc.25`.
 
 Pylair builds on [Tauri](https://tauri.app) but is not affiliated with
 or endorsed by the Tauri project.
