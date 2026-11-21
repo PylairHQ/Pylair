@@ -755,12 +755,9 @@ def test_hook_failures_sweep_and_gated_errors_end_to_end():
         expected = {"model", "startup:quiet_hook", "sidecar", "ghost"}
         frames = _collect_until(
             rt,
-            lambda f: expected
-            <= {
-                p["name"]
-                for p in f
-                if p["phase"] in ("ready", "failed")
-            },
+            lambda f: (
+                expected <= {p["name"] for p in f if p["phase"] in ("ready", "failed")}
+            ),
         )
         by_name = {p["name"]: p for p in frames}
         assert by_name["model"]["phase"] == "failed"
