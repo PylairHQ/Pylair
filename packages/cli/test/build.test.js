@@ -599,6 +599,7 @@ describe("downloadWithRetry", () => {
   const fakeRequest = () => {
     const req = new EventEmitter();
     req.setTimeout = (ms, fn) => {
+      req._timeoutFn = fn; // tests can fire the idle timeout deterministically
       req._t = setTimeout(fn, ms);
       return req;
     };
@@ -650,8 +651,18 @@ describe("downloadWithRetry", () => {
     const { dir, to } = tmp();
     let calls = 0;
     const lines = [];
-    const get = rangeGet((u, h, cb) => cb(++calls === 1 ? stalled() : full()));
-    await downloadWithRetry("https://x/a", to, opts(get, { timeoutMs: 50, log: (l) => lines.push(l) }));
+    const reqs = [];
+    // No wall-clock race: the stalled request fires its own idle-timeout
+    // callback (setTimeout is assigned synchronously when the request is
+    // made, before this handler's microtask runs), and the healthy attempt
+    // gets a real budget it cannot exhaust even on a loaded runner.
+    const get = rangeGet((u, h, cb, req) => {
+      reqs.push(req);
+      cb(++calls === 1 ? stalled() : full());
+      if (calls === 1) setImmediate(() => req._timeoutFn());
+    });
+    await downloadWithRetry("https://x/a", to, opts(get, { timeoutMs: 5000, log: (l) => lines.push(l) }));
+    for (const r of reqs) clearTimeout(r._t);
     assert.equal(calls, 2);
     assert.deepEqual(readFileSync(to), BODY);
     assert.equal(lines.length, 1, "one line per retry");
