@@ -118,12 +118,32 @@ is the common path and the loop stays `ok` while components report
 
 **Contract:**
 
-- *Exceptions* become a component failure, never a crash: a hook that
-  raises marks the component it was inside `loading()` as `failed`,
-  or the synthesized component `"startup"` if it reported nothing.
+- *Exceptions* become component failures, never a crash. Each hook
+  runs under a `contextvars.ContextVar` carrying the set of
+  component names it touched: every `loading()`/`ready()`/`failed()`
+  call records its name in the current context's set (§4's registry).
+  A hook that raises marks every touched component still in
+  `loading` as `failed` with the exception as `detail`; a hook that
+  touched none marks `failed("startup:<fn.__name__>")` instead.
+  Sync hooks run through `contextvars.copy_context().run` inside
+  `run_in_executor` — executor threads do not propagate context, so
+  without the copy a sync hook's reports would land unattributed.
   The runtime keeps serving (the app decides whether the failure is
   fatal — e.g. every `requires=` call on the dead component then
   fails fast per §2). A hook does not block later hooks.
+- *End-of-startup sweep*: when every `on_startup` hook has finished
+  (success or failure), every declared component still not
+  `ready`/`failed` is marked `failed` — `requires=` declarations and
+  reported-`loading`-but-never-completed alike — so no gated wait
+  can hang past the end of startup. Detail is
+  `"never reported by a startup hook"` for a component with no
+  reports at all; a component that reported `loading` but never
+  completed gets `"startup hook finished without reporting ready"`.
+  With *zero* hooks the sweep fires at startup end — i.e.
+  immediately — so `requires=` on a component no hook will ever
+  report is an app bug surfaced at once, not at first call. (The
+  escape hatch is simply not declaring `requires=`: a lazy
+  load-inside-call still works and can report progress as it goes.)
 - *Shutdown*: hooks draw from the same shared `_deadline` the drain
   uses (`_server.py:385-390`). An async hook is cancelled at drain;
   a sync hook on an executor cannot be interrupted — same
@@ -154,15 +174,45 @@ and a `cancel` lands through the ordinary path — the caller's
 `AbortSignal`/`timeoutMs` is the only bound needed (matches
 `docs/cancellation.md`: cancellation is always caller-driven).
 
-- Component `ready` → the wait returns immediately (no latency
-  added to steady-state calls — one set lookup).
-- Component `failed` (now or when it fails mid-wait) → immediate
-  `INTERNAL` error with `data: {"component": "<name>",
+**Declaration at decoration closes the first-call race.** Hooks run
+*concurrently* with dispatch, so components otherwise spring into
+existence only when a hook's first `loading()` reports — a
+`requires=("model",)` call arriving between hello and that first
+report would see "unknown component" and error, which is precisely
+the call the gate exists to serve. Instead every `requires=` name
+**declares its component at decoration time**: the decorator enters
+it in the readiness registry in phase `loading`, during the import
+that already precedes hello. At dispatch a `requires=` name is
+declared by construction — the call waits, which is the designed
+semantics. The only remaining dispatch-time app error is a
+`requires=` name with *no declaration path* — a name that cannot be
+a component at all (not a non-empty string, or a registry mutated
+past it): an app bug that errors loudly, never hangs.
+
+- Component `ready` at dispatch → the wait returns immediately (no
+  latency added to steady-state calls — one set lookup).
+- Component `failed` (already failed at dispatch, or fails mid-wait)
+  → immediate `INTERNAL` error with `data: {"component": "<name>",
   "phase": "failed"}` — the `data` channel is the established
   extension point (`data.type`, `data.limit`; protocol §8), so **no
   new error code**.
-- Component `loading` indefinitely → the call waits; the caller's
-  timeout/cancel ends it as `TASK_CANCELLED`.
+- Component `loading` (declared, reported, or swept) → the call
+  waits; the end-of-startup sweep (§1) guarantees a terminal phase,
+  so the wait can never be permanent; the caller's timeout/cancel
+  may still end it earlier as `TASK_CANCELLED`.
+
+**The wait still costs a slot.** A waiting `requires=` call is a
+started task: it holds a `max_concurrent_tasks` slot and counts
+toward the caller's window share for the whole wait — the host
+charges the task when it forwards the call and cannot see inside the
+gate (fairness `in_flight`/queue cells, decisions 0005). For
+`isolated` functions the gate sits *before* the worker spawn inside
+`_run_isolated` (`_tasks.py:270`): no worker is created until every
+required component is ready, so a waiting isolated call holds its
+isolated share without paying for a live worker. A component that
+never arrives would burn that share for the wait's duration — one
+more reason the sweep's guaranteed `failed` is a correctness rule,
+not a convenience.
 
 **Rejected:**
 
@@ -239,9 +289,19 @@ costs one frame per interval — the `_out` tripwire
 (`_server.py:199-216`) can never be reached by reporting alone.
 Callable from the loop or any thread: state writes are a single dict
 store under a `threading.Lock`; `_send` is already thread-safe.
-Calling any of the three before the server exists (import time) or
-after shutdown records the state silently — never raises, since the
-caller cannot do anything about a report anyway.
+The registry is module-level (the `_registry` precedent,
+`_expose.py:17`), so reports made *before* the server exists —
+`loading()`/`ready()`/`failed()` at import time — are **kept, not
+dropped**: `run()` hands the accumulated state to the flusher and
+the first post-hello flush carries it, coalesced like anything else
+(an import-time `loading()` followed by `ready()` sends only
+`ready`). Reports after shutdown still record silently — never
+raise, since the caller cannot do anything about a report anyway.
+The registry also carries `requires=` declarations (§2): a
+declared-but-unreported component exists Python-side as `loading`
+but produces **no wire traffic by itself** — the host learns
+components only from reports (or the sweep's `failed`), so the wire
+carries reports, never declarations.
 
 **Host side — bounds in the notification arm** (`session.rs`): the
 component map is per-generation, stored in `HealthShared` beside the
@@ -285,10 +345,10 @@ app: {
 } | null
 ```
 
-`null` when the generation has reported nothing, on the `web` kind
-(§6), and for host-side/owner-less calls — `app` is runtime-wide
-app state, not caller-scoped, so unlike `self` it does not depend
-on `owner`.
+`null` when the generation has reported nothing and on the `web`
+kind (§6) — the only two absence cases. `app` is runtime-wide app
+state, not caller-scoped, so unlike `self` it does not depend on
+`owner`: `Handle::health(None)` — a host-side read — includes it.
 
 **Event: a new `pylair://app`, not folded into `pylair://health`.**
 `RuntimeEvent::AppChanged` → `events::APP = "pylair://app"` →
@@ -355,13 +415,28 @@ bridge-only by design, only by where the reporter lives.
   dispatch — a `call` dispatched mid-hook is answered, not queued
   behind it.
 - Sync hook runs on an executor; async hook on the loop; exception
-  → `failed("startup")`; a second hook still runs after the first
-  fails.
-- `requires=`: call waits for `ready`, returns normally; cancel
-  during the wait → `TASK_CANCELLED`; component `failed` →
-  `INTERNAL` + `data.component`; unknown component name in
-  `requires=` → `FUNCTION_NOT_FOUND`-style config error at dispatch
-  (a `requires` that can never be satisfied is an app bug — say so).
+  attribution — touched-but-`loading` components → `failed` with the
+  exception detail, untouched → `failed("startup:<fn.__name__>")`;
+  the sync path attributes identically through `copy_context`
+  (proves executor-context propagation); a second hook still runs
+  after the first fails.
+- The sweep: all hooks done with a declared component still
+  `loading` → `failed`/`"never reported by a startup hook"`;
+  reported-`loading`-never-completed → `failed` with the
+  incomplete-hook detail; zero hooks → the sweep is immediate.
+- `requires=` declares at decoration: a `requires=("model",)` call
+  dispatched right after hello — before any hook ran — waits in
+  `loading`, never sees "unknown component"; the wait survives a
+  `cancel` as `TASK_CANCELLED`; a `ready` component short-circuits;
+  `failed` (including the sweep's) → `INTERNAL` + `data.component`;
+  a `requires=` name with no declaration path is a dispatch-time
+  app error.
+- A waiting `requires=` call holds its task slot and window share
+  for the wait (assert against the registry's accounting); an
+  `isolated` `requires=` wait spawns no worker until ready.
+- Reports before the server exists are kept: `loading()` then
+  `ready()` at import produce exactly one `ready` frame in the
+  first post-hello flush.
 - Shutdown mid-hook: async hook cancelled; sync hook doesn't block
   the shared deadline.
 
