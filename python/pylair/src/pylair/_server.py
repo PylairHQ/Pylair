@@ -19,7 +19,7 @@ import time
 import traceback
 from typing import Any
 
-from pylair import _json
+from pylair import _json, _readiness
 from pylair import _protocol as proto
 from pylair._expose import exposed_functions, exposes_manifest
 from pylair._tasks import MAX_STREAM_CREDIT, TaskRegistry
@@ -485,7 +485,9 @@ class Server:
         except _json.InvalidParams as e:
             self._send(proto.error_response(rid, proto.INVALID_PARAMS, str(e)))
             return
-        await self._tasks.start(task_id, rid, fn_name, ex.kind, ex.fn, input)
+        await self._tasks.start(
+            task_id, rid, fn_name, ex.kind, ex.fn, input, requires=ex.requires
+        )
         # Handlers emit the response: value calls on completion, stream
         # calls at the terminal message (protocol §3.1).
 
@@ -510,6 +512,13 @@ class Server:
         for t in self._tasks.all():
             if t.asyncio_task is not None:
                 t.asyncio_task.cancel()
+
+    async def _startup(self) -> None:
+        """Run the @on_startup hooks, then the end-of-startup sweep
+        (decision 0007 §1). Shares the drain path: at shutdown this task
+        is cancelled like lag/beat — async hooks cancel, sync executor
+        hooks are discarded the same way inline sync calls are."""
+        await _readiness.run_startup()
 
     async def _loop_heartbeat(self) -> None:
         """Stamp loop progress. If the loop is blocked this stops advancing,
@@ -544,9 +553,16 @@ class Server:
         )
         writer.start()
         self._send(proto.hello(exposes_manifest()))
+        # The first post-hello flush carries everything reported before
+        # the server existed — import-time reports and requires=
+        # declarations alike, one frame per component (0007 §4).
+        _readiness.attach(self._send)
         reader.start()
         lag = asyncio.create_task(self._lag_monitor())
         beat = asyncio.create_task(self._loop_heartbeat())
+        # Startup hooks run beside lag/beat, concurrent with dispatch —
+        # calls are served while components still load (0007 §1).
+        startup = asyncio.create_task(self._startup())
 
         while not self._stopping:
             prio, _, msg = await self._in.get()
@@ -557,7 +573,7 @@ class Server:
                 break
             await self._handle(msg)
 
-        for t in (lag, beat):
+        for t in (lag, beat, startup):
             t.cancel()
             try:
                 await t

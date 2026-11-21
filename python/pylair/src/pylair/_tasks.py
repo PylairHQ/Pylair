@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from pylair import _json
+from pylair import _json, _readiness
 from pylair import _protocol as proto
 
 ISOLATED_GRACE_S = 3.0
@@ -107,6 +107,7 @@ class TaskRegistry:
         kind: str,
         fn: Callable[..., Any],
         input: dict,
+        requires: tuple[str, ...] = (),
     ) -> None:
         if kind == "isolated" and self._isolated >= MAX_ISOLATED_WORKERS:
             # Worker processes are the heaviest resource — refuse past the
@@ -130,15 +131,20 @@ class TaskRegistry:
             # after `call` (protocol §3.1). Starting at zero here avoids a
             # double grant (64 + host's 64).
             task.credit = 0
-            task.asyncio_task = asyncio.create_task(self._pump_stream(task, fn, input))
-        elif kind == "async":
-            task.asyncio_task = asyncio.create_task(self._run_async(task, fn, input))
-        elif kind == "isolated":
-            task.asyncio_task = asyncio.create_task(
-                self._run_isolated(task, fn_name, input)
+
+        # A `requires=` wait lives inside the task coroutine (0007 §2):
+        # the slot and window share are already charged here, cancel
+        # lands through the normal path, and for isolated calls the
+        # gate runs before the worker spawn inside _run_isolated. The
+        # runner is built lazily so a gated-out or pre-step-cancelled
+        # call never allocates a coroutine it must close.
+        if requires:
+            coro = self._run_gated(
+                task, requires, lambda: self._runner(task, kind, fn_name, fn, input)
             )
-        else:  # sync inline — uncancellable per docs/cancellation.md
-            task.asyncio_task = asyncio.create_task(self._run_sync(task, fn, input))
+        else:
+            coro = self._runner(task, kind, fn_name, fn, input)
+        task.asyncio_task = asyncio.create_task(coro)
 
         # Control frames that beat the call here land now, not never.
         early_credit = self._pending_credit.pop(task_id, 0)
@@ -155,6 +161,55 @@ class TaskRegistry:
                 asyncio.create_task(self._ensure_terminal(task))
 
     # ---- execution modes -------------------------------------------------
+
+    def _runner(
+        self,
+        task: Task,
+        kind: str,
+        fn_name: str,
+        fn: Callable[..., Any],
+        input: dict,
+    ):
+        """The kind's handler coroutine for this task."""
+        if kind == "generator":
+            return self._pump_stream(task, fn, input)
+        if kind == "async":
+            return self._run_async(task, fn, input)
+        if kind == "isolated":
+            return self._run_isolated(task, fn_name, input)
+        return self._run_sync(task, fn, input)  # uncancellable inline sync
+
+    async def _run_gated(
+        self,
+        task: Task,
+        requires: tuple[str, ...],
+        make_body: Callable[[], Any],
+    ) -> None:
+        """Wait for required components, then run the kind's handler.
+
+        A component that is already `ready` returns immediately; a
+        `failed` component ends the call as INTERNAL with
+        data {"component", "phase": "failed"} (0007 §2 — the data
+        channel is the extension point, no new error code). Cancellation
+        is the ordinary path: the wait raises CancelledError like any
+        other task suspension.
+        """
+        try:
+            await _readiness.wait_ready(requires)
+        except asyncio.CancelledError:
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id, proto.TASK_CANCELLED, "task cancelled"
+                ),
+            )
+        except _readiness.GateError as e:
+            self._finish(
+                task,
+                proto.error_response(task.call_id, proto.INTERNAL, str(e), e.data),
+            )
+            return
+        await make_body()
 
     async def _run_async(self, task: Task, fn: Callable[..., Any], input: dict) -> None:
         try:
