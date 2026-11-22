@@ -101,6 +101,10 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // "hostless": the package fixture answers but a pre-rc.20 crate
   // reports no app block at all.
   const { appReadiness = "ok" } = opts;
+  // "busyHealth": the first N python_health reads report one straggler
+  // task still draining — the pre-flood quiet gate must keep polling
+  // until load.tasks reaches 0 before any `hold` goes out.
+  const { busyHealth = 0 } = opts;
   const calls = [];
   const listens = [];
   const cancelHooks = new Map();
@@ -108,6 +112,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   let heldN = 0;
   let holdCalls = 0;
   let bSeen = 0;
+  let healthCalls = 0;
   const later = (f) => setTimeout(f, 0);
   const CELL = { in_use: 0, ceiling: 3, cap: 4 };
   return {
@@ -123,6 +128,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
         if (health === "missing")
           throw new Error("pylair.python_health not allowed. Command not found");
         if (health === "error") throw { code: -32000, message: "health blew up" };
+        healthCalls += 1;
         return {
           version: 1,
           kind: "bridge",
@@ -145,7 +151,13 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
             transport: "ok",
             loop: "ok",
           },
-          load: { tasks: 0, streams: 0, isolated: 0, queued: 0, stream_bytes_total: 0 },
+          load: {
+            tasks: healthCalls <= busyHealth ? 1 : heldN,
+            streams: 0,
+            isolated: 0,
+            queued: 0,
+            stream_bytes_total: 0,
+          },
           self: {
             window: "main",
             tasks: CELL,
@@ -370,6 +382,42 @@ test("flag set: a refused flood that names the global cap fails window-fairness"
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, false);
   assert.match(checks["window-fairness"], /^FAIL: .*max_concurrent_tasks/);
+  // The refusal names the wrong limit because SOMETHING held a global
+  // slot — the report must say what was in flight.
+  assert.match(checks["window-fairness"], /in flight: liveTasks=/);
+  assert.match(checks["window-fairness"], /load=/);
+});
+
+test("flag set: the flood waits for a quiet runtime before refusing on share", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  // Two early health reads still show a straggler draining; the gate
+  // must keep polling until load.tasks reaches 0 before any `hold`.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    fairness: true,
+    busyHealth: 2,
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(checks["window-fairness"], "ok", JSON.stringify(checks));
+  assert.equal(ok, true, JSON.stringify(checks));
+  const firstHold = b.calls.findIndex(
+    (c) => c.cmd === "plugin:pylair|python_call_stream" && c.args?.fnName === "hold",
+  );
+  assert.ok(firstHold > 0, "a hold call was attempted");
+  const healthBefore = b.calls
+    .slice(0, firstHold)
+    .filter((c) => c.cmd === "plugin:pylair|python_health").length;
+  assert.ok(
+    healthBefore >= 3,
+    `quiet gate polled health ${healthBefore}x before flooding, expected >=3`,
+  );
 });
 
 test("flag set: a crate without python_health skips health, never fails", { timeout: 20_000 }, async () => {
