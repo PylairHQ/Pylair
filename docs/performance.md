@@ -53,7 +53,10 @@ Identical shapes on every layer, provided by `bench_*` fixtures
 PYLAIR_SELF_TEST_BENCH=1 ./<the installed app>
 
 # host <-> Python leg: real `python -m pylair testapp`, no webview
-cargo test -p tauri-plugin-pylair --test bench_latency -- --ignored --nocapture
+# (--release: the baseline CI run used the debug test profile, which
+# inflates serde_json by roughly an order of magnitude - see the profile
+# section below. CI runs release since perf-2.)
+cargo test --release -p tauri-plugin-pylair --test bench_latency -- --ignored --nocapture
 
 # Python dispatch alone
 cd python/pylair && uv run python tests/bench_dispatch.py
@@ -170,14 +173,139 @@ Attribution, using the p50 columns above:
 These are measurements, not verdicts - a slow cell here does not by
 itself prove an optimization is worthwhile.
 
-Known targets for later work (identified, deliberately not implemented
-in the baseline PR):
+## Profile: where the 64 KiB round trip went
 
-- the stdin writer task in `supervisor/spawn.rs` is unbuffered and does
-  two writes per frame;
-- `coerce_kwargs` runs `inspect.signature` and `get_type_hints` on every
-  call;
-- `dumps` re-parses its output for the integer guard.
+Perf-2 profiled `call_64k` with one monotonic clock stamped at each hop
+of the round trip (bench call start, actor serialization done, writer
+write done, response header parsed, call end) plus per-phase timings
+inside the runtime. Two runs matter because the CI `rust` leg ran under
+`cargo test`'s default **debug** profile.
+
+Debug profile (`cargo test`, what run 45014043565 measured), p50 hop
+costs:
+
+| hop | p50 (ms) | share |
+|---|---|---|
+| call start -> `serde_json::to_vec` done | 1.542 | ~60% |
+| serialized -> frame written on stdin | 0.170 | |
+| request written -> response header back | 0.510 | |
+| response parsed -> call returned | 0.132 | |
+| **total `call_64k` p50** | **2.594** | |
+
+The debug elephant was `serde_json::to_vec` itself: 1.44 ms p50 alone.
+That is a **test-profile artifact** - serde_json compiles without
+optimizations under `cargo test`. Re-running the identical instrumented
+binary with `--release` collapses it:
+
+Release profile (what ships), p50 hop costs, **before** the perf-2
+changes:
+
+| hop | p50 (ms) |
+|---|---|
+| call start -> frame serialized (incl. 4-byte prefix) | 0.112 |
+| serialized -> frame written on stdin | 0.155 |
+| request written -> response header back (**Python's turn**) | 0.487 |
+| response parsed -> call returned | 0.110 |
+| **total `call_64k` p50** | **1.143** |
+
+Inside the runtime during that ~0.49 ms window (instrumented run, so
+absolute values carry eprintln overhead): the 64 KiB request arrives in
+**one** pipe read (`read_chunks` = 1, ~0.03 ms), `loads` ~0.06 ms,
+`coerce_kwargs` ~0.03 ms, the echo itself ~0.08 ms, the int-guard
+re-parse ~0.05 ms, `dumps` ~0.10 ms, the stdout write ~0.08 ms. Both
+suspected pipe pathologies were disproven: no small/partial reads on the
+Python side, no chunking on either pipe. The remaining real costs were
+exactly the three cheap targets: two unbuffered writes per frame on the
+Rust writer, per-call signature/hint resolution, and the int-guard
+re-parse.
+
+## What perf-2 changed
+
+- **`_json.dumps` gained a single pre-walk** (`check_wire`): one
+  iterative traversal checks nesting depth, the ±2^53 int range, and
+  NaN/Infinity on the pre-serialization object, expanding the same nodes
+  `_default` would (dict/list/tuple/set items, dataclass fields, enum
+  values). Then `json.dumps` runs once - the `json.loads` re-parse is
+  gone. `exceeds_depth` is gone; depth limits now ride inside `dumps`
+  via a `depth_limit` parameter (callers: `_send` uses `MAX_DEPTH`,
+  stream chunks `MAX_DEPTH - 4`, the worker `MAX_DEPTH - 2`).
+- **`coerce_kwargs` caches `inspect.signature` + `get_type_hints`** per
+  function object, and the dataclass path caches `fields()` + resolved
+  hints per class - all in `WeakKeyDictionary`s, resolved lazily on
+  first call (forward refs may not exist at `@expose` time), so dev
+  reload's new function objects get fresh entries and dead ones collect.
+- **`wire.rs::frame_bytes`** serializes each frame directly into a
+  buffer that starts with its 4-byte length prefix, so the stdin writer
+  in `spawn.rs` issues **one** `write_all` per frame instead of the old
+  unbuffered header+body pair. Wire format, control-lane priority,
+  ping slot and flush ordering are unchanged - the prefix bytes are
+  identical, just written together.
+
+Semantics preserved: NaN is still an error, the ±2^53 guard still fires
+(including inside dataclasses - the pre-walk descends into fields),
+`$b64` handling is unchanged, and no wire bytes changed.
+
+## After perf-2
+
+Local release-mode verification (Windows, same machine as the profile):
+`call_64k` p50 **1.14 -> 0.53 ms**, `call_noop` 0.77 -> 0.22 ms. Python
+leg: `coerce_nested` 0.066 -> 0.013 ms, `dumps_64k` 0.144 -> 0.076 ms.
+Instrumented hops after: Python's turn 0.487 -> 0.391 ms; the writer now
+reports `writes: 1` per frame.
+
+CI comparison from bench.yml: **before** = run
+[45014043565](https://github.com/PylairHQ/Pylair/actions/runs/45014043565)
+(debug rust leg), **after** = run
+[45018732722](https://github.com/PylairHQ/Pylair/actions/runs/45018732722)
+(release rust leg). The rust before/after conflates the code wins with
+the profile fix - the local release pair above is the like-for-like rust
+comparison. Webview and python legs compare cleanly. Cells are p50 ms.
+
+### ubuntu-22.04
+
+| leg | case | before | after |
+|---|---|---|---|
+| webview | call_64k | 3 | 1 |
+| rust | call_noop | 0.45 | 0.10 |
+| rust | call_64k | 3.00 | 0.32 |
+| rust | call_nested | 0.62 | 0.13 |
+| rust | stream_first_chunk | 0.58 | 0.13 |
+| python | coerce_nested | 0.114 | 0.016 |
+| python | dumps_64k | 0.192 | 0.102 |
+
+### windows-latest
+
+| leg | case | before | after |
+|---|---|---|---|
+| webview | call_64k | 6.2 | 6.8 |
+| rust | call_noop | 0.71 | 0.60 |
+| rust | call_64k | 2.54 | 1.30 |
+| rust | call_nested | 0.77 | 0.70 |
+| rust | stream_first_chunk | 1.01 | 0.88 |
+| python | coerce_nested | 0.066 | 0.038 |
+| python | dumps_64k | 0.144 | 0.122 |
+
+### macos-latest
+
+| leg | case | before | after |
+|---|---|---|---|
+| webview | call_64k | 4 | 2 |
+| rust | call_noop | 0.29 | 0.18 |
+| rust | call_64k | 2.53 | 0.49 |
+| rust | call_nested | 0.42 | 0.23 |
+| rust | stream_first_chunk | 0.46 | 0.20 |
+| python | coerce_nested | 0.053 | 0.016 |
+| python | dumps_64k | 0.197 | 0.140 |
+
+Read: the host<->Python leg is now well under a millisecond for the 64
+KiB echo on Linux and macOS (and ~1.3 ms on Windows), versus ~2.5-3 ms
+at baseline - and that baseline was already inflated by the debug test
+profile. The webview layer barely moves on `call_64k`: the remaining
+end-to-end cost is the Tauri IPC hop serializing the payload twice more,
+which these changes did not touch. Windows' webview p50 ticked up
+(6.2 -> 6.8); that leg measures webview-side serialization of the same
+payload and is noisy at this scale - the rust and python legs on the
+same runner both improved, so it is not treated as a regression signal.
 
 Re-run the three layers after each change and compare against this
 baseline.
