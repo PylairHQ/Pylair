@@ -37,8 +37,8 @@ class _Point:
 
 
 def test_dumps_rejects_big_int_inside_dataclass():
-    # The guard runs on the emitted text, so conversions in _default
-    # can't smuggle an unsafe int past it.
+    # The pre-walk descends into dataclass fields, so conversions in
+    # _default can't smuggle an unsafe int past it.
     with pytest.raises(ValueError, match="safe-integer range"):
         _json.dumps(_Point(1, 1 << 60))
 
@@ -56,6 +56,41 @@ def test_dumps_still_rejects_nan():
 def test_dumps_float_unaffected():
     # Big floats keep double semantics — only int precision is guarded.
     assert _json.loads(_json.dumps({"x": 1e300}))["x"] == 1e300
+
+
+def test_check_wire_shared_container_rewalked_at_a_deeper_reference():
+    # A shared container first seen shallow must be measured again when
+    # reached deeper: json.dumps expands every reference, so the deeper
+    # copy's contents sit deeper in the emitted text than the first walk
+    # measured. Dict order walks "x" (depth 2) before "y" (depth 4); the
+    # second copy puts 1 at emitted depth 6 > 5.
+    shared = [[1]]
+    with pytest.raises(_json.DepthExceeded):
+        _json.dumps({"y": [[shared]], "x": shared}, depth_limit=5)
+
+
+def test_check_wire_diamond_within_the_limit_passes():
+    # Same object twice is legal JSON — both copies emit, so the walk
+    # checks each occurrence's depth but validates the contents once.
+    shared = [1]
+    obj = {"x": shared, "y": [shared]}
+    assert _json.loads(_json.dumps(obj, depth_limit=5)) == {
+        "x": [1],
+        "y": [[1]],
+    }
+
+
+def test_check_wire_cycle_terminates():
+    cyc = []
+    cyc.append(cyc)
+    # No depth limit: revisits are skipped, the walk ends, and json.dumps
+    # raises its own circular-reference error as before.
+    with pytest.raises(ValueError, match="Circular"):
+        _json.dumps(cyc)
+    # With a limit the re-walk climbs to DepthExceeded instead —
+    # either way the walk cannot spin forever.
+    with pytest.raises(_json.DepthExceeded):
+        _json.dumps(cyc, depth_limit=32)
 
 
 # ---- input validation (coerce/coerce_kwargs) --------------------------------

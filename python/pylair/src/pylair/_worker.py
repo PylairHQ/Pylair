@@ -141,7 +141,9 @@ def main() -> int:
         else:
             fn = entry.fn
             result = fn(**_json.coerce_kwargs(fn, input))
-            if _json.exceeds_depth(result, _transport.MAX_DEPTH - 2):
+            try:
+                _json.check_wire(result, _transport.MAX_DEPTH - 2)
+            except _json.DepthExceeded:
                 # A result deeper than the host's parser limit would arrive
                 # as a malformed frame and kill the runtime — the parent maps
                 # `code` through, so fail this call with the typed error.

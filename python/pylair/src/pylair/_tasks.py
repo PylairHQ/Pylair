@@ -266,8 +266,12 @@ class TaskRegistry:
                 task.credit -= 1
                 # A chunk deeper than the host's parser limit is a
                 # malformed frame on arrival — end THIS stream with the
-                # typed error instead of killing the runtime.
-                if _json.exceeds_depth(value, MAX_DEPTH - 4):
+                # typed error instead of killing the runtime. The check
+                # rides inside dumps' single pre-walk (MAX_DEPTH - 4
+                # leaves room for the notification envelope).
+                try:
+                    _body = _json.dumps(value, MAX_DEPTH - 4).encode()
+                except _json.DepthExceeded:
                     self._finish(
                         task,
                         proto.error_response(
@@ -281,7 +285,7 @@ class TaskRegistry:
                 # A chunk over the frame cap would be rejected by the host
                 # reader and kill the runtime — end THIS stream with the
                 # typed error instead (RC.8A).
-                if len(_json.dumps(value).encode()) + 256 > MAX_FRAME:
+                if len(_body) + 256 > MAX_FRAME:
                     self._finish(
                         task,
                         proto.error_response(

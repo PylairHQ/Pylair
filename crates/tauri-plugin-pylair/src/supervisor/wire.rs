@@ -23,11 +23,25 @@ pub(super) enum SendFail {
     Oversize(usize),
 }
 
+/// Serialize `body` into a freshly-allocated frame WITH its 4-byte
+/// length prefix, so the writer task issues one write per frame instead
+/// of prefix+body as two unbuffered writes (docs/performance.md). The
+/// prefix slot is reserved up front and patched once the length is
+/// known — the serialized bytes never move.
+pub(super) fn frame_bytes(body: &Value) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(128);
+    buf.extend_from_slice(&[0; 4]);
+    serde_json::to_writer(&mut buf, body).ok()?;
+    let n = (buf.len() - 4) as u32;
+    buf[..4].copy_from_slice(&n.to_be_bytes());
+    Some(buf)
+}
+
 pub(super) fn send_frame(io: &ChildIo, body: &Value, max_frame: usize) -> Result<(), SendFail> {
-    match serde_json::to_vec(body) {
-        Ok(bytes) if bytes.len() > max_frame => Err(SendFail::Oversize(bytes.len())),
-        Ok(bytes) => io.frame_out.try_send(bytes).map_err(|_| SendFail::LaneFull),
-        Err(_) => Err(SendFail::LaneFull),
+    match frame_bytes(body) {
+        Some(bytes) if bytes.len() - 4 > max_frame => Err(SendFail::Oversize(bytes.len() - 4)),
+        Some(bytes) => io.frame_out.try_send(bytes).map_err(|_| SendFail::LaneFull),
+        None => Err(SendFail::LaneFull),
     }
 }
 
@@ -36,8 +50,10 @@ pub(super) fn send_frame(io: &ChildIo, body: &Value, max_frame: usize) -> Result
 /// Control frames are always small, but the size check is kept anyway so
 /// no path can ever write a frame the peer would reject.
 pub(super) fn send_ctrl(io: &ChildIo, body: &Value, max_frame: usize) -> bool {
-    match serde_json::to_vec(body) {
-        Ok(bytes) if bytes.len() <= max_frame => io.ctrl_out.try_send(Ctrl::Now(bytes)).is_ok(),
+    match frame_bytes(body) {
+        Some(bytes) if bytes.len() - 4 <= max_frame => {
+            io.ctrl_out.try_send(Ctrl::Now(bytes)).is_ok()
+        }
         _ => false,
     }
 }
@@ -50,8 +66,8 @@ pub(super) fn send_ctrl(io: &ChildIo, body: &Value, max_frame: usize) -> bool {
 /// ctrl-lane initial grant made this reordering deterministic on
 /// Windows).
 pub(super) fn send_ctrl_flushed(io: &ChildIo, body: &Value, max_frame: usize) -> bool {
-    match serde_json::to_vec(body) {
-        Ok(bytes) if bytes.len() <= max_frame => {
+    match frame_bytes(body) {
+        Some(bytes) if bytes.len() - 4 <= max_frame => {
             io.ctrl_out.try_send(Ctrl::FlushDataThen(bytes)).is_ok()
         }
         _ => false,

@@ -167,10 +167,7 @@ pub(super) async fn spawn_child(
             // count as a miss.
             let pending_ping = writer_ping_slot.lock().unwrap().take();
             if let Some(b) = pending_ping {
-                if w.write_all(&(b.len() as u32).to_be_bytes()).await.is_err()
-                    || w.write_all(&b).await.is_err()
-                    || w.flush().await.is_err()
-                {
+                if w.write_all(&b).await.is_err() || w.flush().await.is_err() {
                     return; // child stdin gone
                 }
                 writer_pings_sent.fetch_add(1, Ordering::Relaxed);
@@ -191,12 +188,7 @@ pub(super) async fn spawn_child(
                         // or its caller hears 'unavailable' instead of the
                         // drain's real terminal.
                         while let Ok(d) = frame_rx.try_recv() {
-                            if w.write_all(&(d.len() as u32).to_be_bytes())
-                                .await
-                                .is_err()
-                                || w.write_all(&d).await.is_err()
-                                || w.flush().await.is_err()
-                            {
+                            if w.write_all(&d).await.is_err() || w.flush().await.is_err() {
                                 return; // child stdin gone
                             }
                         }
@@ -216,12 +208,11 @@ pub(super) async fn spawn_child(
                     },
                 },
             };
-            if w.write_all(&(body.len() as u32).to_be_bytes())
-                .await
-                .is_err()
-                || w.write_all(&body).await.is_err()
-                || w.flush().await.is_err()
-            {
+            // The frame arrived with its length prefix embedded, so one
+            // write_all puts the whole frame on the pipe — the old
+            // header+body pair cost an extra unbuffered write per frame
+            // (docs/performance.md).
+            if w.write_all(&body).await.is_err() || w.flush().await.is_err() {
                 return; // child stdin gone
             }
         }

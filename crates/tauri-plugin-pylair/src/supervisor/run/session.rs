@@ -155,8 +155,8 @@ impl Session<'_> {
         // of data, never the shared control lane - a stalled
         // writer holds at most one pending ping, so liveness
         // cannot starve cancel/credit either.
-        if let Ok(bytes) = serde_json::to_vec(&body) {
-            if bytes.len() <= self.sup.config.max_frame {
+        if let Some(bytes) = super::super::wire::frame_bytes(&body) {
+            if bytes.len() - 4 <= self.sup.config.max_frame {
                 *self.io.ping_slot.lock().unwrap() = Some(bytes);
                 self.io.ping_notify.notify_one();
                 self.sup

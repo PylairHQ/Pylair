@@ -28,24 +28,16 @@ import datetime as _dt
 import enum
 import inspect
 import json
+import math
 import types
 import typing
+import weakref
 from typing import Any
 
 _B64_TAG = "$b64"
 
 # JS Number.MAX_SAFE_INTEGER — the largest int that survives JSON.parse.
 _SAFE_INT = (1 << 53) - 1
-
-
-def _guard_int(tok: str) -> int:
-    v = int(tok)
-    if abs(v) > _SAFE_INT:
-        raise ValueError(
-            f"integer {v} exceeds the JSON safe-integer range (±2^53-1); "
-            "return it as a string — $bigint tagging is tracked in docs/ideas.md"
-        )
-    return v
 
 
 class InvalidParams(Exception):
@@ -80,18 +72,99 @@ def _object_hook(d: dict) -> Any:
     return d
 
 
-def dumps(obj: Any) -> str:
-    # allow_nan=False: a bare NaN/Infinity token is invalid JSON to the
-    # Rust host (serde_json rejects it as a malformed frame) — surface
-    # it as a serialization error for this call instead.
-    s = json.dumps(obj, default=_default, separators=(",", ":"), allow_nan=False)
-    # The wire text keeps full int precision; the loss happens when JS
-    # JSON.parse reads it back as a double. Re-parse and reject integers
-    # JS can't represent exactly — a wrong number is worse than a failed
-    # call. Validates the emitted text, so dataclass/enum conversions in
-    # _default are covered too. Until $bigint tagging lands (ideas.md).
-    json.loads(s, parse_int=_guard_int)
-    return s
+class DepthExceeded(Exception):
+    """check_wire found nesting deeper than the caller's limit.
+
+    Distinct from ValueError so callers can map it to LIMIT_EXCEEDED —
+    an over-deep frame would arrive as a parse failure on the host, the
+    same class of protection as the frame cap (protocol §2, §8).
+    """
+
+
+def check_wire(obj: Any, depth_limit: int | None = None) -> None:
+    """One pre-serialization walk over `obj`: nesting depth, the int
+    range and NaN/Infinity — everything the emitted JSON must satisfy,
+    checked on the pre-dump object so `_default` conversions (dataclass
+    fields, enum values, set items) are covered exactly like the old
+    re-parse guard was. Iterative for the same reason exceeds_depth is:
+    a recursive walk hits Python's own recursion limit on the payloads
+    this exists to catch.
+    """
+    # `seen` is the deepest depth each container id was walked at. The
+    # int/NaN guards need each node visited once, but the DEPTH check
+    # needs a container re-walked whenever it is reached deeper than
+    # before: json.dumps expands every reference, so a shared container
+    # first seen shallow and later reached deeper has its second copy's
+    # contents sitting deeper in the emitted text than the first walk
+    # measured. A copy reached at or shallower than a previous visit is
+    # always covered (its subtree emits at strictly smaller depths).
+    # With no depth_limit there is no depth to re-measure, so any
+    # revisit is skipped — that is also the cycle guard, letting the
+    # structure reach json.dumps' own circular-reference error. With a
+    # limit, re-walks stay bounded: each revisit is strictly deeper, so
+    # a cycle climbs to DepthExceeded and terminates.
+    seen: dict[int, int] = {}
+    stack = [(obj, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth_limit is not None and depth > depth_limit:
+            raise DepthExceeded(depth_limit)
+        if node is None or isinstance(node, (str, bool)):
+            continue
+        if isinstance(node, int):
+            # bool was filtered above — it is a JSON literal, never an int.
+            if abs(node) > _SAFE_INT:
+                raise ValueError(
+                    f"integer {node} exceeds the JSON safe-integer range "
+                    "(±2^53-1); return it as a string — $bigint tagging is "
+                    "tracked in docs/ideas.md"
+                )
+            continue
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                raise ValueError(f"{node} is not wire-serializable")
+            continue
+        i = id(node)
+        prev = seen.get(i)
+        if prev is not None and (depth_limit is None or prev >= depth):
+            continue
+        seen[i] = depth
+        if isinstance(node, dict):
+            stack.extend((v, depth + 1) for v in node.values())
+            continue
+        if isinstance(node, (list, tuple)):
+            stack.extend((v, depth + 1) for v in node)
+            continue
+        if isinstance(node, (set, frozenset)):
+            # _default -> sorted list: items nest one level deeper.
+            stack.extend((v, depth + 1) for v in node)
+            continue
+        if isinstance(node, (bytes, bytearray)):
+            continue  # _default -> {"$b64": str} — a plain string leaf.
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            # _default -> asdict: the fields land one level deeper and can
+            # carry guarded values the old re-parse caught on the text.
+            stack.extend(
+                (getattr(node, f.name), depth + 1) for f in dataclasses.fields(node)
+            )
+            continue
+        if isinstance(node, (_dt.datetime, _dt.date, _dt.time)):
+            continue  # _default -> ISO string leaf.
+        if isinstance(node, enum.Enum):
+            # _default -> the value itself, at this position — it may be
+            # a guarded int, so it goes back through the walk.
+            stack.append((node.value, depth))
+            continue
+        # Anything else: _default raises TypeError at dumps time — the
+        # same error the caller maps today; no pre-check needed.
+
+
+def dumps(obj: Any, depth_limit: int | None = None) -> str:
+    check_wire(obj, depth_limit)
+    # allow_nan=False stays as the hard guarantee: even if a path ever
+    # reached dumps without check_wire, a bare NaN/Infinity token can
+    # still never hit the wire (serde_json rejects it as malformed).
+    return json.dumps(obj, default=_default, separators=(",", ":"), allow_nan=False)
 
 
 def loads(raw: str | bytes) -> Any:
@@ -172,13 +245,10 @@ def coerce(annotation: Any, value: Any) -> Any:
             raise InvalidParams(
                 f"expected object for {_typename(annotation)}, got {_short(value)}"
             )
-        fields = {f.name: f for f in dataclasses.fields(annotation)}
-        try:
-            # Under `from __future__ import annotations` f.type is a
-            # string — resolved hints are required for nested types.
-            hints = typing.get_type_hints(annotation)
-        except Exception:  # noqa: BLE001 - fall back to raw field types
-            hints = {}
+        fields = _dataclass_fields(annotation)
+        # Under `from __future__ import annotations` f.type is a
+        # string — resolved hints are required for nested types.
+        hints = _resolved_hints(annotation)
         try:
             kwargs = {
                 k: coerce(hints.get(k, fields[k].type), v)
@@ -247,22 +317,88 @@ def coerce(annotation: Any, value: Any) -> Any:
     return value
 
 
+# inspect.signature + get_type_hints are the two most expensive parts of
+# argument coercion (docs/performance.md) and their results are fixed per
+# function/class object. Resolved lazily on the FIRST call — not at
+# @expose time, where forward refs may not exist yet — and cached on a
+# WeakKeyDictionary: dev reload replaces function objects, so new objects
+# resolve fresh and dead objects' entries GC away.
+_SIG_CACHE: weakref.WeakKeyDictionary[Any, tuple] = weakref.WeakKeyDictionary()
+_HINTS_CACHE: weakref.WeakKeyDictionary[Any, dict] = weakref.WeakKeyDictionary()
+_FIELDS_CACHE: weakref.WeakKeyDictionary[Any, dict] = weakref.WeakKeyDictionary()
+
+
+def _sig_parts(fn: Any) -> tuple | None:
+    """(params, hints, has_varkw) for `fn`, or None when signature()
+    can't introspect it — cached per function object."""
+    try:
+        return _SIG_CACHE[fn]
+    except (KeyError, TypeError):  # TypeError: not weakref-able
+        pass
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        parts = None
+    else:
+        try:
+            hints = typing.get_type_hints(fn)
+        except Exception:  # noqa: BLE001 - unresolved refs fall back to raw anns
+            hints = {}
+        parts = (
+            sig.parameters,
+            hints,
+            any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ),
+        )
+    try:
+        _SIG_CACHE[fn] = parts
+    except TypeError:
+        pass  # un-cacheable callable — resolved per call, as before
+    return parts
+
+
+def _resolved_hints(cls: Any) -> dict:
+    """get_type_hints for a dataclass, cached per class object; {} when
+    resolution fails (same fallback as the old inline try/except)."""
+    try:
+        return _HINTS_CACHE[cls]
+    except (KeyError, TypeError):
+        pass
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 - fall back to raw field types
+        hints = {}
+    try:
+        _HINTS_CACHE[cls] = hints
+    except TypeError:
+        pass
+    return hints
+
+
+def _dataclass_fields(cls: Any) -> dict:
+    """{name: Field} map for a dataclass, cached per class object."""
+    try:
+        return _FIELDS_CACHE[cls]
+    except (KeyError, TypeError):
+        pass
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    try:
+        _FIELDS_CACHE[cls] = fields
+    except TypeError:
+        pass
+    return fields
+
+
 def coerce_kwargs(fn: Any, input: dict) -> dict:
     """Validate an incoming `input` dict against `fn`'s signature and coerce
     values to the annotated types. Raises InvalidParams for missing required
     params, unexpected keys (unless `**kwargs`), or a value the annotation
     can't hold — the function body never sees bad input."""
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
+    parts = _sig_parts(fn)
+    if parts is None:
         return input
-    try:
-        hints = typing.get_type_hints(fn)
-    except Exception:  # noqa: BLE001 - unresolved refs fall back to raw anns
-        hints = {}
-    params = sig.parameters
-
-    has_varkw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    params, hints, has_varkw = parts
     if not has_varkw:
         for k in input:
             if k not in params:
@@ -293,32 +429,3 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
             # where the function expects an object (docs/codegen.md).
             raise InvalidParams(f"param '{name}': {e}") from e
     return out
-
-
-_CONTAINER_TYPES = (dict, list, tuple, set, frozenset)
-
-
-def exceeds_depth(obj: Any, limit: int) -> bool:
-    """True if `obj` nests containers deeper than `limit` JSON levels.
-
-    Only containers add JSON nesting depth (serde's recursion limit
-    counts `[`/`{` opens), so leaves are skipped instead of pushed —
-    a million-element flat result is one cheap scan, not a million
-    stack entries. Iterative: a recursive walk would hit Python's own
-    recursion limit on exactly the payloads this is meant to catch.
-    dict keys are JSON strings (never containers), so only values are
-    descended.
-    """
-    stack = [(obj, 1)]
-    while stack:
-        node, depth = stack.pop()
-        if depth > limit:
-            return True
-        if isinstance(node, dict):
-            it = node.values()
-        elif isinstance(node, _CONTAINER_TYPES):
-            it = node
-        else:
-            continue
-        stack.extend((v, depth + 1) for v in it if isinstance(v, _CONTAINER_TYPES))
-    return False
