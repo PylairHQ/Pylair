@@ -512,10 +512,11 @@ def test_model_at_import_waits_for_startup(server, tmp_path):
     assert server.hits("/f") == 0
     assert _component("m1").managed
     asyncio.run(_readiness.run_startup())
-    _wait(lambda: (_model_dir(tmp_path) / "m1").exists(), what="auto download")
+    # The component phase is the completion signal — the file lands at
+    # os.replace, slightly before sidecar+ready report.
+    _wait(lambda: _component("m1").phase == "ready", what="model ready")
     assert (_model_dir(tmp_path) / "m1").read_bytes() == body
     assert server.hits("/f") == 1
-    assert _component("m1").phase == "ready"
 
 
 def test_model_registered_during_startup_starts(server, tmp_path):
