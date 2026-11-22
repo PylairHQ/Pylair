@@ -90,11 +90,20 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
     a recursive walk hits Python's own recursion limit on the payloads
     this exists to catch.
     """
-    # `seen` guards termination, not validation: a container referenced
-    # twice (diamond) was already checked on its first visit, and a cycle
-    # would only spin forever here — json.dumps still raises its own
-    # circular-reference ValueError once the walk completes.
-    seen: set[int] = set()
+    # `seen` is the deepest depth each container id was walked at. The
+    # int/NaN guards need each node visited once, but the DEPTH check
+    # needs a container re-walked whenever it is reached deeper than
+    # before: json.dumps expands every reference, so a shared container
+    # first seen shallow and later reached deeper has its second copy's
+    # contents sitting deeper in the emitted text than the first walk
+    # measured. A copy reached at or shallower than a previous visit is
+    # always covered (its subtree emits at strictly smaller depths).
+    # With no depth_limit there is no depth to re-measure, so any
+    # revisit is skipped — that is also the cycle guard, letting the
+    # structure reach json.dumps' own circular-reference error. With a
+    # limit, re-walks stay bounded: each revisit is strictly deeper, so
+    # a cycle climbs to DepthExceeded and terminates.
+    seen: dict[int, int] = {}
     stack = [(obj, 1)]
     while stack:
         node, depth = stack.pop()
@@ -116,9 +125,10 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
                 raise ValueError(f"{node} is not wire-serializable")
             continue
         i = id(node)
-        if i in seen:
+        prev = seen.get(i)
+        if prev is not None and (depth_limit is None or prev >= depth):
             continue
-        seen.add(i)
+        seen[i] = depth
         if isinstance(node, dict):
             stack.extend((v, depth + 1) for v in node.values())
             continue
