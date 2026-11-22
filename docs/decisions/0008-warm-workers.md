@@ -1,6 +1,6 @@
 # 0008: Warm isolated workers
 
-Status: proposed (design spike; no implementation yet)
+Status: accepted (design; implementation PRs to follow the §8 split)
 
 ## Question
 
@@ -65,6 +65,16 @@ Dev reload needs nothing new: the restart trigger (`session.rs:172-186`)
 kills the whole runtime generation; pools live inside the runtime and
 die with it.
 
+**Crash-loop limit.** A crash mid-call yields `WORKER_DIED` for the
+in-flight call and a lazy respawn on the next — but N consecutive
+deaths (default 3) without an intervening successful call stop the
+pool: it stops respawning and subsequent calls fail fast with a typed
+error naming the pool. The counter **resets on any successful call**
+(a worker that served a call end-to-end is not in a crash loop) and
+on a **new runtime generation** — dev restart clears it with the pool.
+While stopped, a `prewarm` pool's `worker:<fn>` component reports
+`failed` with the stop reason (§6).
+
 ## 2. Cooperative interrupt: what actually reaches Python
 
 Proposal: interrupt first (SIGINT / CTRL_BREAK), grace, then the
@@ -108,6 +118,20 @@ cancel ack still lands inside the host's `cancel_timeout` (5 s,
 `config.rs:397`); the `_report_isolated_cancel` bound
 (`ISOLATED_GRACE_S + 1.0`, `_tasks.py:548-551`) covers it unchanged.
 
+**The interrupt race is designed out, worker-side.** The signal can
+land after the call already finished — if it raised while the worker
+sits in `read_frame` it would kill the loop, and if it raised mid-
+`write_frame` it would leave a partial frame and corrupt the channel.
+So the handler raises `KeyboardInterrupt` **only while the user
+function is executing**: a flag set around the call site bounds the
+raise window; outside it the interrupt is recorded and ignored. A
+response that has started writing always completes — the flag clears
+after `write_frame` returns. The parent's verdict is per call id and
+unchanged: a response for the cancelled call id — normal result, app
+error, or interrupt report — means *survived*, whether or not the
+interrupt actually landed inside the window; silence past
+`cancel_grace_ms` means *stuck*.
+
 **Ack values must not change** (`wire.rs:99-101`, `cancellation.md:
 88-96`): interrupt-survived reports plain `{"cancelled": true}` — the
 work confirmed stopped, the worker merely lived; only the kill path
@@ -121,8 +145,10 @@ new outcome value.
   call registers as a normal isolated task first (slot, owner, cancel
   path all live), then waits on the pool — so it is cancellable and
   fairness-counted while queued, exactly like the `requires=` gate
-  (`_tasks.py:135-147`) already is. A per-pool queue bound is
-  unnecessary: `max_concurrent_tasks` already bounds total in-flight.
+  (`_tasks.py:135-147`) already is. The queue is **FIFO per pool**,
+  and a call cancelled while queued is dropped from the queue and
+  never reaches a worker. A per-pool queue bound is unnecessary:
+  `max_concurrent_tasks` already bounds total in-flight.
 - **Process accounting must change what it counts.** Today
   `self._isolated` counts in-flight calls (`_tasks.py:112,127,612`) —
   1:1 with live processes because process mode is per-call. Warm breaks
@@ -144,11 +170,14 @@ new outcome value.
 Each pool member is a full interpreter plus whatever the function's
 globals hold — with torch-class models, N members = N model copies
 (CPU or VRAM). Defaults: `pool: 1`, `prewarm: False` (lazy spawn),
-`idle_ttl_s: None` (a warm worker is a declared, opted-in cost; TTL
-reap/respawn machinery can come later without an API change), and
-`cancel_grace_ms: 3000` per §2. Docs guidance to write when it ships:
-one model copy per worker, prefer `pool: 1` and let the queue absorb
-bursts, raise `pool` only when throughput demands and memory allows.
+`idle_ttl_s: None`, and `cancel_grace_ms: 3000` per §2. **TTL is not
+in v1**: reap/respawn-on-idle machinery can come later without an API
+change — but a non-`None` `idle_ttl_s` is *rejected at decoration* for
+now, the same treatment `mode: "warm"` itself had
+(`_expose.py:112-115`), rather than accepted and silently ignored.
+Docs guidance to write when it ships: one model copy per worker,
+prefer `pool: 1` and let the queue absorb bursts, raise `pool` only
+when throughput demands and memory allows.
 
 ## 5. Semantics change: state survives calls
 
@@ -166,6 +195,13 @@ point (the model lives there) and the semantic difference to spell out:
   globals half-updated — the same exposure any `KeyboardInterrupt`
   path has, documented. An app needing "clean room per call" keeps
   `mode: "process"`.
+- **Threads survive the interrupt.** `KeyboardInterrupt` lands on the
+  main thread only — threads the function started keep running in a
+  warm worker after the call ends, unlike `mode: "process"` where the
+  kill ends them with the process. A worker whose threads accumulate
+  is the app's own leak; the kill path stays the bounded answer when
+  the app wants it (cancel_grace timeout) or the app kills its threads
+  cooperatively in a `finally`.
 - **No per-worker init hook needed.** The lazy-global pattern
   (`_MODEL = None; if _MODEL is None: _MODEL = load()` inside the
   function) already runs init exactly once per worker lifetime, at
@@ -183,7 +219,8 @@ point (the model lives there) and the semantic difference to spell out:
   private channel, report `ready`. Spawn failure -> `failed` with the
   spawn error as detail — `requires=("worker:<fn>",)` and
   `health().app` then work for free, and a call gated on it never sees
-  "unknown component".
+  "unknown component". A pool stopped by the crash-loop limit reports
+  `failed` with the reason for as long as it is stopped (§1).
 - **health() stays minimal for v1**: pools add nothing new to
   `health().load` — in-flight calls already count as tasks; an idle
   warm worker is a process, not load. The `worker:<fn>` component is
@@ -213,14 +250,20 @@ entry graduates).
   elapses -> kill path -> next call observes a **different pid**
   (proves respawn); crash mid-call -> `WORKER_DIED` + lazy respawn on
   next call; crash-loop limit (3 consecutive deaths -> pool stops
-  respawning, typed error).
+  respawning, typed error) plus its reset on a successful call and on
+  a new generation.
+- Interrupt-race tests (the §2 window): an interrupt sent *as the call
+  returns* leaves the response intact and the same pid serving the
+  next call; an interrupt during idle does nothing — same pid, loop
+  unbroken, no partial frames on the channel.
 - Windows-specific: `CTRL_BREAK_EVENT` actually delivered (a spawn
   flags + SIGBREAK-handler test, not just "no crash") — the §2
   proof obligation; and the kill fallback still correct when the
   interrupt path can't run.
 - Caps/fairness: warm member holds its `max_isolated_workers` slot for
   its lifetime; queued warm call counts for per-owner fairness and is
-  cancellable while queued.
+  cancellable while queued — and a call cancelled while queued never
+  reaches a worker.
 - Lifecycle: dev-restart kills pools (generation change); shutdown
   reaps idle members via `_drain`; idle worker produces no orphans on
   hard runtime death (the `_exit_with_parent` machinery already proven
@@ -237,8 +280,8 @@ entry graduates).
 2. Cooperative interrupt: POSIX SIGINT, Windows CREATE_NEW_PROCESS_GROUP
    + SIGBREAK handler, `cancel_grace_ms`, ack mapping per §2.
 3. `prewarm` + `worker:<fn>` readiness component; crash-loop limit.
-4. Cap accounting on live processes, idle_ttl if accepted, selftest
-   leg, `docs/cancellation.md`/`ideas.md` updates.
+4. Cap accounting on live processes, `idle_ttl_s` rejection at
+   decoration, selftest leg, `docs/cancellation.md`/`ideas.md` updates.
 
 **Release impact:** additive and opt-in — `mode: "warm"` was rejected
 at decoration until now (`_expose.py:112-115`); `mode: "process"`
