@@ -27,7 +27,6 @@ class File:
     if_range_stale: bool = False  # treat any If-Range as stale -> 200
     status_queue: list[int] = field(default_factory=list)  # codes first
     gate: threading.Event | None = None  # hold the response until set
-    mid_gate: threading.Event | None = None  # hold between write bursts
     throttle: int = 0  # bytes per write burst (slow the stream)
 
 
@@ -109,8 +108,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         step = f.throttle or max(len(body), 1)
         for i in range(0, len(body), step):
-            if i and f.mid_gate is not None:
-                f.mid_gate.wait(timeout=30)
             # wfile is unbuffered (wbufsize=0): one write is one send()
             # which may return short — sendall can't truncate a burst.
             self.connection.sendall(body[i : i + step])
