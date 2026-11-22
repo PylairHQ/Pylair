@@ -782,7 +782,13 @@ class TaskRegistry:
                 return None
             body = await proc.stdout.readexactly(n)
             payload = _json.loads(body)
-        except (asyncio.IncompleteReadError, OSError, ValueError):
+        except asyncio.IncompleteReadError as e:
+            _log(
+                f"warm member {proc.pid} channel closed mid-frame "
+                f"(rc={proc.returncode}, {len(e.partial)} bytes held)"
+            )
+            return None
+        except (OSError, ValueError):
             return None
         return payload if isinstance(payload, dict) else None
 

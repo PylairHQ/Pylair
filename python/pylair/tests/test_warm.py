@@ -9,6 +9,7 @@ means the pool respawned.
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import sys
 import threading
@@ -54,6 +55,22 @@ def _wait_pidfile(path, timeout: float = 15.0) -> int:
     """Poll for the worker's pidfile — never a fixed sleep."""
     _wait_file(path, timeout)
     return int(path.read_text().strip())
+
+
+def _diagnose(runtime, pid: int | None = None) -> str:
+    """Failure context for a silent/hung warm call: whether the serving
+    member is still alive plus the runtime's stderr tail — member stderr
+    is forwarded there live, so a worker exception shows up."""
+    parts = []
+    if pid is not None:
+        try:
+            os.kill(pid, 0)
+            parts.append(f"member pid {pid} is alive")
+        except OSError as e:
+            parts.append(f"member pid {pid} is gone ({e})")
+    tail = list(runtime.stderr_lines)[-30:]
+    parts.append("runtime stderr tail:\n" + ("\n".join(tail) or "<empty>"))
+    return "\n".join(parts)
 
 
 def _pid_dead(pid: int, timeout: float = 15.0) -> None:
@@ -637,8 +654,8 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
             input={"marker": str(m1), "size": size},
         )
     )
-    # The marker lands inside the fn's return tail — the raise window is
-    # closing right about now and frame write begins microseconds later.
+    # The marker lands at fn entry — the hammer starts while the fn
+    # builds its result and keeps firing through flag-clear/write/idle.
     pid = _wait_pidfile(m1)
     stop = threading.Event()
 
@@ -658,7 +675,12 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
 
     t = threading.Thread(target=hammer, daemon=True)
     t.start()
-    resp = runtime.recv(timeout=30)
+    try:
+        resp = runtime.recv(timeout=30)
+    except queue.Empty:
+        raise AssertionError(
+            f"no response under the SIGINT hammer\n{_diagnose(runtime, pid)}"
+        )
     stop.set()
     t.join(timeout=5)
     if "error" in resp:
@@ -724,10 +746,15 @@ def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
         if p1.exists():
             assert pid2 != int(p1.read_text().strip()), "killed member was reused"
     else:
-        assert msgs[9]["result"] == {"cancelled": True}
-        # The fn entered and wrote its pidfile before gate-polling —
-        # the same member must serve the next call.
-        assert _wait_pidfile(p2) == _wait_pidfile(p1), "survived member was not reused"
+        assert msgs[9]["result"] == {"cancelled": True}, _diagnose(runtime)
+        # The survived verdict itself proves the member (a response
+        # frame came back); the pidfiles prove identity. a.pid lands in
+        # the fixture's finally — the only gap is an interrupt firing
+        # during kwarg coercion, before the fn is even entered, which
+        # is a legal landing point and leaves no marker.
+        pid2 = _wait_pidfile(p2)
+        if p1.exists():
+            assert pid2 == int(p1.read_text().strip()), "survived member was not reused"
 
 
 def test_warm_worker_died_includes_stderr_tail(runtime):

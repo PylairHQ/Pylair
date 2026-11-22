@@ -44,8 +44,18 @@ class FrameChannel:
         Serialization happens on the caller's thread (_json.dumps in
         Server._send) so a TypeError/ValueError can become INTERNAL for
         that one call — a dead writer would kill the runtime (§2).
+
+        The loop is load-bearing: FileIO.write is one raw write() and a
+        signal interrupting a large transfer returns short progress —
+        without the retry the frame truncates and the reader waits on
+        bytes that never come (the warm SIGINT hammer proved it).
         """
-        self._w.write(_LEN.pack(len(body)) + body)
+        view = memoryview(_LEN.pack(len(body)) + body)
+        while view:
+            n = self._w.write(view)
+            if not n:
+                raise OSError("frame channel write returned 0 bytes")
+            view = view[n:]
 
     def _read_exactly(self, n: int) -> bytes | None:
         out = bytearray()
