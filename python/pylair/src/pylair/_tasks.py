@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import struct
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +20,9 @@ ISOLATED_GRACE_S = 3.0
 # taskkill is awaited with this bound - a hung taskkill or a nonzero
 # exit falls back to proc.kill() rather than parking the loop forever.
 TASKKILL_TIMEOUT_S = 5.0
+# A warm pool whose workers die this many times in a row with no
+# successful call in between is declared a crash loop and stops (0008 §1).
+WARM_CRASH_LIMIT = 3
 
 # RC.8A ceilings — the host enforces these on the way in; the runtime
 # clamps defensively so a host bug can't grow them without bound.
@@ -26,6 +31,10 @@ MAX_ISOLATED_WORKERS = int(os.environ.get("PYLAIR_MAX_ISOLATED_WORKERS", "8"))
 # One chunk frame can never legitimately exceed the frame cap; a value
 # this large ends the stream with a typed error instead (RC.8A).
 from pylair._transport import MAX_DEPTH, MAX_FRAME
+
+# The private worker channel uses the same 4-byte big-endian prefix as
+# the host<->runtime framing (_transport._LEN) — internal protocol.
+_LEN = struct.Struct(">I")
 
 
 def _log(msg: str) -> None:
@@ -48,6 +57,67 @@ class Task:
     asyncio_task: asyncio.Task | None = None
     worker: asyncio.subprocess.Process | None = None
     done: bool = False
+    # Warm mode (0008): the call is served by a pool member, not a
+    # per-call worker. `warm` is set at registration; `warm_queued` only
+    # while the call waits on the pool's FIFO queue — that's how cancel
+    # tells "dropped from queue" apart from "kill the serving worker".
+    warm: bool = False
+    warm_queued: bool = False
+
+
+class _WarmMember:
+    """One live worker process in a warm pool (decision 0008)."""
+
+    __slots__ = ("busy", "killed", "proc")
+
+    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+        self.proc = proc
+        self.busy = False
+        # Killed by us (cancel/drain), not a crash — a deliberate kill
+        # must not count toward the pool's crash-loop limit.
+        self.killed = False
+
+
+class _WarmPool:
+    """Per-function pool of warm workers: members, FIFO queue, crash count."""
+
+    __slots__ = (
+        "deaths",
+        "fn_name",
+        "members",
+        "queue",
+        "size",
+        "spawning",
+        "stopped",
+    )
+
+    def __init__(self, fn_name: str, size: int) -> None:
+        self.fn_name = fn_name
+        self.size = size
+        self.members: list[_WarmMember] = []
+        self.spawning = 0  # in-flight spawns — count toward size and cap
+        # Queued calls wait here in call order; an entry is (task, future).
+        self.queue: deque[tuple[Task, asyncio.Future]] = deque()
+        self.deaths = 0  # consecutive member deaths with no success
+        self.stopped = False  # crash-loop limit hit — calls fail fast
+
+
+class _PoolStopped(Exception):
+    """A queued call's acquire reached a crash-loop-stopped pool."""
+
+    def __init__(self, pool: _WarmPool) -> None:
+        super().__init__(
+            f"warm pool for {pool.fn_name!r} stopped after "
+            f"{pool.deaths} consecutive worker deaths"
+        )
+
+
+class _WarmCap(Exception):
+    """The live-worker cap blocks a warm spawn at pool-acquire time."""
+
+
+class _WarmWorkerDead(Exception):
+    """The serving member died or broke its channel mid-call."""
 
 
 class TaskRegistry:
@@ -62,7 +132,13 @@ class TaskRegistry:
         # handled. Host ids only increase and frames arrive in order, so
         # an unknown id <= the mark is finished-or-rejected, never early.
         self._highest_task_id = 0
+        # Live worker PROCESS count, split by mode (0008 §3):
+        # `self._isolated` counts in-flight process-mode calls (1:1 with
+        # live workers); `self._warm_live` counts live warm pool members
+        # (spawn to reap, including idle ones). The cap applies to the sum.
         self._isolated = 0
+        self._warm_live = 0
+        self._pools: dict[str, _WarmPool] = {}
         # Set by the server on `shutdown`: worker kills then draw their
         # wait from the shared grace budget, never a fresh ISOLATED_GRACE_S.
         self.deadline: float | None = None
@@ -108,22 +184,35 @@ class TaskRegistry:
         fn: Callable[..., Any],
         input: dict,
         requires: tuple[str, ...] = (),
+        worker: dict | None = None,
     ) -> None:
-        if kind == "isolated" and self._isolated >= MAX_ISOLATED_WORKERS:
-            # Worker processes are the heaviest resource — refuse past the
-            # cap with the typed error, don't queue (RC.8A).
+        warm = worker is not None and worker.get("mode") == "warm"
+        # Worker processes are the heaviest resource — refuse past the
+        # cap with the typed error, don't queue (RC.8A). The cap bounds
+        # LIVE processes (0008 §3): in-flight process-mode calls plus
+        # every warm member alive, idle ones included. Warm calls skip
+        # this check — they queue and spawn-check at pool-acquire.
+        if (
+            kind == "isolated"
+            and not warm
+            and self._isolated + self._warm_live >= MAX_ISOLATED_WORKERS
+        ):
             self._send(
                 proto.error_response(
                     call_id,
                     proto.LIMIT_EXCEEDED,
                     f"isolated worker cap {MAX_ISOLATED_WORKERS} reached",
-                    {"limit": "max_isolated_workers", "max": MAX_ISOLATED_WORKERS},
+                    {
+                        "limit": "max_isolated_workers",
+                        "max": MAX_ISOLATED_WORKERS,
+                    },
                 )
             )
             return
         task = Task(id=task_id, fn_name=fn_name, kind=kind, call_id=call_id)
+        task.warm = warm
         self._tasks[task_id] = task
-        if kind == "isolated":
+        if kind == "isolated" and not warm:
             self._isolated += 1
 
         if kind == "generator":
@@ -140,10 +229,12 @@ class TaskRegistry:
         # call never allocates a coroutine it must close.
         if requires:
             coro = self._run_gated(
-                task, requires, lambda: self._runner(task, kind, fn_name, fn, input)
+                task,
+                requires,
+                lambda: self._runner(task, kind, fn_name, fn, input, worker),
             )
         else:
-            coro = self._runner(task, kind, fn_name, fn, input)
+            coro = self._runner(task, kind, fn_name, fn, input, worker)
         task.asyncio_task = asyncio.create_task(coro)
 
         # Control frames that beat the call here land now, not never.
@@ -169,6 +260,7 @@ class TaskRegistry:
         fn_name: str,
         fn: Callable[..., Any],
         input: dict,
+        worker: dict | None = None,
     ):
         """The kind's handler coroutine for this task."""
         if kind == "generator":
@@ -176,6 +268,8 @@ class TaskRegistry:
         if kind == "async":
             return self._run_async(task, fn, input)
         if kind == "isolated":
+            if task.warm:
+                return self._run_warm(task, fn_name, input, worker or {})
             return self._run_isolated(task, fn_name, input)
         return self._run_sync(task, fn, input)  # uncancellable inline sync
 
@@ -395,9 +489,282 @@ class TaskRegistry:
                 ),
             )
 
+    # ---- warm pools (decision 0008) ----------------------------------------
+    #
+    # A warm call is a normal isolated task until it reaches a pool member:
+    # it registers, queues FIFO, is cancellable and fairness-counted
+    # throughout. One call at a time per member — the response maps to the
+    # serving task unambiguously, so the private channel needs no call ids.
+
+    async def _run_warm(
+        self, task: Task, fn_name: str, input: dict, worker: dict
+    ) -> None:
+        pool = self._pools.get(fn_name)
+        if pool is None:
+            pool = _WarmPool(fn_name, worker.get("pool", 1))
+            self._pools[fn_name] = pool
+        member: _WarmMember | None = None
+        try:
+            member = await self._acquire_warm(task, pool)
+            # task.worker is set before the first await so cancel's kill
+            # path reaches the serving member exactly like process mode.
+            task.worker = member.proc
+            body = _json.dumps({"op": "call", "input": input}).encode()
+            member.proc.stdin.write(_LEN.pack(len(body)) + body)
+            await member.proc.stdin.drain()
+            payload = await self._warm_response(member.proc)
+            if payload is None or ("error" not in payload and "result" not in payload):
+                raise _WarmWorkerDead
+            pool.deaths = 0  # a completed call proves the pool healthy
+        except asyncio.CancelledError:
+            if member is not None:
+                # Our cancel kill, not a crash — it must not count toward
+                # the crash-loop limit. The kill path is the same one
+                # process mode uses (SIGTERM->SIGKILL group / taskkill).
+                member.killed = True
+                await self._kill_worker(task)
+                await self._drop_warm_member(pool, member)
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id, proto.TASK_CANCELLED, "task cancelled"
+                ),
+            )
+            return
+        except _PoolStopped as e:
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id,
+                    proto.INTERNAL,
+                    str(e),
+                    {"type": "WorkerCrashLoop", "fn": fn_name},
+                ),
+            )
+            return
+        except _WarmCap:
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id,
+                    proto.LIMIT_EXCEEDED,
+                    f"isolated worker cap {MAX_ISOLATED_WORKERS} reached",
+                    {"limit": "max_isolated_workers", "max": MAX_ISOLATED_WORKERS},
+                ),
+            )
+            return
+        except BaseException as e:  # noqa: BLE001 - any failure gets a terminal
+            # Channel broke, spawn failed, or the worker died mid-call —
+            # drop the suspect member (counted) and respawn lazily.
+            if member is not None:
+                await self._drop_warm_member(pool, member)
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id,
+                    proto.WORKER_DIED,
+                    f"warm worker for {fn_name!r} died: {type(e).__name__}: {e}",
+                    {"type": type(e).__name__},
+                ),
+            )
+            return
+        finally:
+            if member is not None:
+                task.worker = None
+                if member in pool.members:
+                    member.busy = False
+                self._wake_next(pool)
+        if "error" in payload:
+            self._finish(
+                task,
+                proto.error_response(
+                    task.call_id,
+                    payload["error"].get("code", proto.INTERNAL),
+                    payload["error"]["message"],
+                    payload["error"].get("data"),
+                ),
+            )
+        else:
+            self._finish(task, proto.response(task.call_id, payload["result"]))
+
+    async def _acquire_warm(self, task: Task, pool: _WarmPool) -> _WarmMember:
+        """A live member for this call: reuse idle, spawn under size+cap,
+        else wait on the pool's FIFO queue (lazy spawn, 0008 §3).
+
+        An entry stays at the head while its owner scans — a fresh caller
+        always sees a nonempty queue and joins the tail, so a wake is
+        never stolen mid-scan. A head that cannot claim rejoins the tail
+        with a fresh future; every wake gives exactly one waiter a shot.
+        """
+        loop = asyncio.get_running_loop()
+        entry: tuple[Task, asyncio.Future] | None = None
+        try:
+            while True:
+                if pool.stopped:
+                    raise _PoolStopped(pool)
+                # Members that died between calls are discovered here.
+                for m in list(pool.members):
+                    if m.proc.returncode is not None:
+                        await self._drop_warm_member(pool, m)
+                # The dead-scan can stop the pool mid-iteration.
+                if pool.stopped:
+                    raise _PoolStopped(pool)
+                if entry is None and pool.queue:
+                    # Waiters ahead — join the tail before claiming.
+                    entry = (task, loop.create_future())
+                    pool.queue.append(entry)
+                    task.warm_queued = True
+                    continue
+                if entry is None or (pool.queue and pool.queue[0] is entry):
+                    for m in pool.members:
+                        if not m.busy:
+                            m.busy = True
+                            return m
+                    if len(pool.members) + pool.spawning < pool.size:
+                        if self._isolated + self._warm_live >= MAX_ISOLATED_WORKERS:
+                            raise _WarmCap
+                        # Reserve size and cap slots BEFORE the spawn
+                        # await — a second call arriving mid-spawn must
+                        # not overshoot either bound by one exec's width.
+                        pool.spawning += 1
+                        self._warm_live += 1
+                        try:
+                            proc = await self._spawn_warm(task, pool)
+                        except BaseException:
+                            self._warm_live -= 1
+                            raise
+                        finally:
+                            pool.spawning -= 1
+                        m = _WarmMember(proc)
+                        m.busy = True
+                        pool.members.append(m)
+                        return m
+                # No claim — wait for a wake.
+                if entry is None:
+                    entry = (task, loop.create_future())
+                    pool.queue.append(entry)
+                    task.warm_queued = True
+                elif (
+                    entry[1].done()
+                    and not entry[1].cancelled()
+                    and entry[1].exception() is None
+                ):
+                    # Spent wake, no claim — rejoin the tail fresh. A
+                    # flushed (_PoolStopped) or cancelled fut is left in
+                    # place: the bare await below re-raises it.
+                    pool.queue.remove(entry)
+                    entry = (task, loop.create_future())
+                    pool.queue.append(entry)
+                await entry[1]
+        finally:
+            if entry is not None:
+                task.warm_queued = False
+                if entry in pool.queue:
+                    pool.queue.remove(entry)
+                    # Our queue slot is vacated — the next waiter scans now.
+                    self._wake_next(pool)
+
+    async def _spawn_warm(
+        self, task: Task, pool: _WarmPool
+    ) -> asyncio.subprocess.Process:
+        """One `--serve` worker for the pool — same containment flags and
+        parent-death env as the one-shot path (0008 §1)."""
+        try:
+            module = os.environ["PYLAIR_APP_MODULE"]
+            kwargs: dict[str, Any] = {
+                "stdin": asyncio.subprocess.PIPE,
+                "stdout": asyncio.subprocess.PIPE,
+                "env": {**os.environ, "PYLAIR_WORKER_PARENT": str(os.getpid())},
+            }
+            if sys.platform == "win32":
+                kwargs["creationflags"] = 0  # taskkill /T handles the tree
+            else:
+                kwargs["start_new_session"] = True  # own process group -> killpg
+            return await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "pylair._worker",
+                "--serve",
+                module,
+                task.fn_name,
+                **kwargs,
+            )
+        except asyncio.CancelledError:
+            raise  # our cancel, not a crash — burns no crash-loop token
+        except BaseException:
+            # A worker that never lived still burns a crash-loop token —
+            # an always-failing spawn must not retry forever.
+            pool.deaths += 1
+            if pool.deaths >= WARM_CRASH_LIMIT:
+                pool.stopped = True
+                self._flush_warm_queue(pool)
+            raise
+
+    async def _warm_response(self, proc) -> dict | None:
+        """One framed reply from the serving member; None = dead channel."""
+        try:
+            hdr = await proc.stdout.readexactly(_LEN.size)
+            (n,) = _LEN.unpack(hdr)
+            if n > MAX_FRAME:
+                return None
+            body = await proc.stdout.readexactly(n)
+            payload = _json.loads(body)
+        except (asyncio.IncompleteReadError, OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    async def _drop_warm_member(self, pool: _WarmPool, m: _WarmMember) -> None:
+        """Remove a member from the pool: count a crash death unless we
+        killed it, reap the process, wake the queue to respawn lazily."""
+        if m in pool.members:
+            pool.members.remove(m)
+            self._warm_live -= 1
+            if not m.killed:
+                pool.deaths += 1
+                if pool.deaths >= WARM_CRASH_LIMIT:
+                    pool.stopped = True
+                    self._flush_warm_queue(pool)
+        if m.proc.returncode is None:
+            m.killed = True
+            await self._kill_proc(m.proc)
+        else:
+            await m.proc.wait()
+        self._wake_next(pool)
+
+    def _wake_next(self, pool: _WarmPool) -> None:
+        """Wake the first live waiter so it can re-scan the pool. Its
+        entry stays at the head until it claims or rejoins the tail —
+        a fresh caller arriving mid-wake never jumps the line. Dead
+        entries are skipped; their owners remove them while unwinding."""
+        for _task, fut in pool.queue:
+            if not fut.done():
+                fut.set_result(None)
+                return
+
+    def _flush_warm_queue(self, pool: _WarmPool) -> None:
+        """Pool stopped: every queued call fails with the crash-loop error."""
+        while pool.queue:
+            _task, fut = pool.queue.popleft()
+            if not fut.done():
+                fut.set_exception(_PoolStopped(pool))
+
+    async def _reap_warm_pools(self) -> None:
+        """Drain phase: kill every live pool member (0008 §1). Idle
+        members are not tasks, so cancel_all's per-task kills cannot
+        reach them — this is the shutdown sweep for warm pools."""
+        for pool in self._pools.values():
+            for m in list(pool.members):
+                m.killed = True
+                await self._drop_warm_member(pool, m)
+
     async def _kill_worker(self, task: Task) -> None:
         proc = task.worker
         if proc is None or proc.returncode is not None:
+            return
+        await self._kill_proc(proc)
+
+    async def _kill_proc(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
             return
         if sys.platform == "win32":
             # taskkill /T kills the whole tree - already covers
@@ -521,10 +888,16 @@ class TaskRegistry:
             task.asyncio_task.cancel()
             asyncio.create_task(self._ensure_terminal(task))
             if task.kind == "isolated":
-                if call_id is not None:
-                    asyncio.create_task(self._report_isolated_cancel(task, call_id))
-                return
-            if task.kind == "sync":
+                if task.warm_queued:
+                    # Queued on a warm pool, never reached a worker —
+                    # the drop IS the confirmed outcome; nothing ran and
+                    # nothing needed terminating (0008 §3).
+                    result = {"cancelled": True}
+                else:
+                    if call_id is not None:
+                        asyncio.create_task(self._report_isolated_cancel(task, call_id))
+                    return
+            elif task.kind == "sync":
                 # Inline sync runs on an executor thread — it cannot be
                 # interrupted. The caller sees TASK_CANCELLED; the Python
                 # may run to completion. Say so — never claim it stopped.
@@ -608,7 +981,7 @@ class TaskRegistry:
         if task.done:
             return  # a cancelled task's late result is discarded
         task.done = True
-        if task.kind == "isolated":
+        if task.kind == "isolated" and not task.warm:
             self._isolated -= 1
         try:
             self._send(terminal)  # serializes on the event loop

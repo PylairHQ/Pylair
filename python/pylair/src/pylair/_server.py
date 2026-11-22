@@ -488,7 +488,14 @@ class Server:
             self._send(proto.error_response(rid, proto.INVALID_PARAMS, str(e)))
             return
         await self._tasks.start(
-            task_id, rid, fn_name, ex.kind, ex.fn, input, requires=ex.requires
+            task_id,
+            rid,
+            fn_name,
+            ex.kind,
+            ex.fn,
+            input,
+            requires=ex.requires,
+            worker=ex.worker,
         )
         # Handlers emit the response: value calls on completion, stream
         # calls at the terminal message (protocol §3.1).
@@ -511,6 +518,10 @@ class Server:
                 await self._tasks._kill_worker(
                     t
                 )  # isolated workers must not be orphaned
+        # Idle warm-pool members are not tasks — cancel_all never reaches
+        # them. Reap them on both paths (0008 §1); kills draw from the
+        # shared deadline via _budget.
+        await self._tasks._reap_warm_pools()
         for t in self._tasks.all():
             if t.asyncio_task is not None:
                 t.asyncio_task.cancel()
