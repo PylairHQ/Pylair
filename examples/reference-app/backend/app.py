@@ -11,6 +11,7 @@ recovery, and packaged installs on machines with no Python.
 import asyncio
 import os
 import sys
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -205,3 +206,16 @@ def bench_echo(s: str) -> str:
 @expose
 def bench_nested(shape: BenchShape) -> int:
     return len(shape.points) + shape.meta["n"]
+
+
+# Warm-worker selftest witness (docs/decisions/0008 §8, docs/cancellation.md):
+# the webview "warm-workers" check drives this through the real bridge —
+# two calls must share the member, and a cancelled sleep diverges per
+# platform (POSIX interrupt survives with the same pid; Windows kill-only
+# respawns with a new pid). The report carries both, so the check asserts
+# per platform without a second fixture.
+@expose(worker={"mode": "warm"})
+def warm_selftest(seconds: float = 0.0) -> dict:
+    """Sleep `seconds`, then report the serving member's pid + platform."""
+    time.sleep(seconds)
+    return {"pid": os.getpid(), "platform": sys.platform}

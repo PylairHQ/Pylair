@@ -1,6 +1,6 @@
 # 0008: Warm isolated workers
 
-Status: accepted (design; implementation PRs to follow the §8 split)
+Status: accepted, implemented (PRs #139-#143, #144)
 
 ## Question
 

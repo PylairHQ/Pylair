@@ -309,3 +309,49 @@ same runner both improved, so it is not treated as a regression signal.
 
 Re-run the three layers after each change and compare against this
 baseline.
+
+## Cold vs warm — the warm-workers headline
+
+Decision 0008 (warm workers, PRs #139–#143+): `worker={"mode": "warm"}`
+keeps a per-function pool member resident so its imports are paid once
+instead of per call. The bench drives the same trivial function under
+both modes through the host<->Python leg: a dedicated fixture module
+(`tests/testapp_benchcost.py`) whose import sleeps a fixed ~300 ms —
+the stand-in for a torch/model import — exposing `bench_cost_cold`
+(mode "process") and `bench_cost_warm` (mode "warm") with identical
+bodies. Five warmup + 25 timed calls each, measured on all three OS
+legs of bench.yml (the cold call is spawn-dominated, so a small N is
+honest — tail percentiles at n=25 are directional, not precise).
+
+Numbers are p50/p95/p99 ms per call, from bench.yml run 45042891313
+(2026-11-22, on the PR that added the case — hosted runners, shared
+capacity, so treat tail percentiles as directional).
+
+### ubuntu-22.04
+
+| case | p50 | p95 | p99 |
+|---|---|---|---|
+| spawn_cold_process | 364.0 | 373.3 | 373.5 |
+| spawn_warm_reuse | 0.13 | 0.15 | 0.16 |
+
+### windows-latest
+
+| case | p50 | p95 | p99 |
+|---|---|---|---|
+| spawn_cold_process | 442.3 | 449.5 | 526.3 |
+| spawn_warm_reuse | 0.67 | 0.73 | 0.75 |
+
+### macos-latest
+
+| case | p50 | p95 | p99 |
+|---|---|---|---|
+| spawn_cold_process | 535.2 | 630.6 | 634.6 |
+| spawn_warm_reuse | 0.40 | 0.93 | 1.04 |
+
+Read: mode "process" pays process spawn + the ~300 ms import on every
+single call — 364-535 ms at p50 depending on the OS. The warm member
+pays it once (in warmup), after which calls cost what a plain
+host<->Python call costs — under a millisecond even on the slowest
+leg, roughly three orders of magnitude down. The gap widens with the
+real import: a 300 ms fixture is gentle; a real model load runs
+seconds.

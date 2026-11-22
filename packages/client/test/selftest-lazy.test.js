@@ -105,6 +105,12 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // task still draining — the pre-flood quiet gate must keep polling
   // until load.tasks reaches 0 before any `hold` goes out.
   const { busyHealth = 0 } = opts;
+  // Warm workers (0008): "ok" — the warm_selftest fixture answers with
+  // a pooled pid; "missing" — FUNCTION_NOT_FOUND (-32601), the skip
+  // path for pylair < 0.1.0rc13. warmPlatform picks the cancel
+  // semantics: POSIX interrupts (plain "cancelled" ack, same pid after)
+  // and win32 is kill-only ("terminated" ack, a new pid after).
+  const { warm = "ok", warmPlatform = "linux" } = opts;
   const calls = [];
   const listens = [];
   const cancelHooks = new Map();
@@ -113,6 +119,8 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   let holdCalls = 0;
   let bSeen = 0;
   let healthCalls = 0;
+  let warmPid = 4242;
+  const warmSleeps = new Set();
   const later = (f) => setTimeout(f, 0);
   const CELL = { in_use: 0, ceiling: 3, cap: 4 };
   return {
@@ -122,7 +130,11 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       calls.push({ cmd, args });
       if (cmd === "plugin:pylair|python_cancel") {
         cancelHooks.get(args.task)?.();
-        return "cancelled";
+        // A cancelled warm sleep acknowledges per platform: POSIX's
+        // interrupt keeps the member (plain cancelled); Windows kills it.
+        return warmSleeps.has(args.task) && warmPlatform === "win32"
+          ? "terminated"
+          : "cancelled";
       }
       if (cmd === "plugin:pylair|python_health") {
         if (health === "missing")
@@ -176,6 +188,20 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       calls.push({ cmd, args });
       const task = nextTask++;
       const { fnName, input } = args;
+      // A sleeping warm call registers its cancel hook BEFORE the ack
+      // resolves — the check cancels on the ack, and in the real runtime
+      // the task is registered by then too.
+      if (fnName === "warm_selftest" && warm === "ok" && (input.seconds ?? 0) > 0) {
+        warmSleeps.add(task);
+        cancelHooks.set(task, () => {
+          // On win32 the member dies with the cancelled call — the next
+          // witness reports a new pid.
+          if (warmPlatform === "win32") warmPid += 1;
+          later(() =>
+            onEvent({ task, done: true, error: { code: -32010, message: "cancelled" } }),
+          );
+        });
+      }
       if (fairness && fnName === "hold" && holdCalls >= 3) {
         // Over the owner's share ceiling: refused before a task exists —
         // the invoke itself rejects, the call never reaches a task id.
@@ -233,6 +259,15 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           else onEvent({ task, done: true, result: "pong" });
         } else if (fnName === "selftest_done") {
           onEvent({ task, done: true, result: "done" });
+        } else if (fnName === "warm_selftest") {
+          if (warm === "missing") {
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          } else if ((input.seconds ?? 0) === 0) {
+            onEvent({ task, done: true, result: { pid: warmPid, platform: warmPlatform } });
+          }
+          // seconds>0: the terminal is scheduled by the cancel hook,
+          // registered eagerly at the ack — a cancel can land before
+          // this deferred handler ever runs.
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -295,6 +330,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "window-fairness",
     "health",
     "app-readiness",
+    "warm-workers",
     "event-scoping",
     "fn-permission",
   ]);
@@ -303,9 +339,70 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
   assert.match(checks["window-fairness"], /^skipped: /);
   assert.equal(checks["health"], "ok");
   assert.equal(checks["app-readiness"], "ok");
+  assert.equal(checks["warm-workers"], "ok");
   assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
   assert.ok(b.listens.includes("pylair://app"), "onApp subscribed on the app event");
   assert.equal(checks["fn-permission"], "ok");
+});
+
+test("flag set: a pylair without warm workers skips warm-workers, never fails", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { warm: "missing" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.match(checks["warm-workers"], /^skipped: /);
+});
+
+test("flag set: Windows kill-only — terminated ack and a new member", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    warmPlatform: "win32",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.equal(checks["warm-workers"], "ok");
+});
+
+test("flag set: POSIX interrupted with a kill-path ack fails warm-workers", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true);
+  // POSIX legs must see a plain "cancelled" + the same pid — answer
+  // "terminated" + a new pid instead and the check must fail.
+  const orig = b.invoke;
+  b.invoke = async (cmd, args) => {
+    if (cmd === "plugin:pylair|python_cancel") {
+      const out = await orig(cmd, args);
+      return out === "cancelled" ? "terminated" : out;
+    }
+    return orig(cmd, args);
+  };
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["warm-workers"], /^FAIL: .*plain "cancelled" ack/);
 });
 
 /** Run the owner against a runtime whose win-b report carries `probe`. */

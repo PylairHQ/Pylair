@@ -9,7 +9,7 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, health, LimitExceededError, onApp, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
+import { call, cancel, health, LimitExceededError, onApp, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
 import { CMD, ipc, liveTasks } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
@@ -475,6 +475,75 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   if (!appReadinessArmed && checks["app-readiness"] === "ok")
     checks["app-readiness"] =
       "skipped: resolved host or package predates app readiness";
+  // Warm isolated workers (docs/decisions/0008): the fixture reports its
+  // member's pid and platform. Two calls must share a member; a cancelled
+  // sleep then diverges per platform — POSIX interrupts the call and the
+  // SAME member serves the next call (plain "cancelled" ack), Windows is
+  // kill-only ("terminated" ack, a respawned member = new pid). Needs
+  // pylair >= 0.1.0rc13 — a missing fixture is -32601, a clean skip on
+  // pack/registry legs and a failure wherever CI armed
+  // PYLAIR_WARM_EXPECTED (--local legs arm it implicitly by grep).
+  let warmArmed = true;
+  await run("warm-workers", async () => {
+    const witness = async () =>
+      within(
+        call<{ pid: number; platform: string }>("warm_selftest", { seconds: 0 }),
+        30_000,
+        "warm_selftest",
+      );
+    let w1: { pid: number; platform: string };
+    try {
+      w1 = await witness();
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) {
+        warmArmed = false;
+        return;
+      }
+      throw e;
+    }
+    const w2 = await witness();
+    if (w2.pid !== w1.pid)
+      throw new Error(`warm pool respawned between calls (pid ${w1.pid} -> ${w2.pid})`);
+    // The sleeping call runs through the raw channel so the task id is
+    // known for an explicit cancel() — the CancelOutcome it acknowledges
+    // is what this check asserts per platform.
+    const b = await ipc();
+    let termCode: number | undefined;
+    let termResolve!: () => void;
+    const terminal = new Promise<void>((res) => (termResolve = res));
+    const ack = (await b.invokeChannel(CMD.callStream, {
+      fnName: "warm_selftest",
+      input: { seconds: 30 },
+      stream: false,
+    }, (ev: { done?: boolean; error?: { code: number } }) => {
+      if (!ev.done) return;
+      termCode = ev.error ? ev.error.code : 0;
+      termResolve();
+    })) as { task?: number };
+    if (typeof ack.task !== "number")
+      throw new Error(`python_call_stream ack carried no task id: ${JSON.stringify(ack)}`);
+    const outcome = await within(cancel(ack.task), 30_000, "cancel");
+    await within(terminal, 30_000, "cancelled call's terminal");
+    if (termCode !== -32010)
+      throw new Error(`cancelled warm call ended with code ${String(termCode)}, expected -32010`);
+    const w3 = await witness();
+    if (w1.platform === "win32") {
+      if (outcome !== "terminated")
+        throw new Error(`Windows kill-only expected a "terminated" ack, got ${outcome}`);
+      if (w3.pid === w1.pid)
+        throw new Error("a member the cancel killed was reused for the next call");
+    } else {
+      if (outcome !== "cancelled")
+        throw new Error(`POSIX interrupt-first expected a plain "cancelled" ack, got ${outcome}`);
+      if (w3.pid !== w1.pid)
+        throw new Error(
+          `member did not survive the interrupt (pid ${w1.pid} -> ${w3.pid})`,
+        );
+    }
+  });
+  if (!warmArmed && checks["warm-workers"] === "ok")
+    checks["warm-workers"] =
+      "skipped: backend has no warm_selftest fixture (resolved pylair predates warm workers)";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
