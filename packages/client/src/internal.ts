@@ -11,6 +11,7 @@ import type { IpcBridge, StreamEvent } from "./index.js";
 
 export const CMD = {
   selftestReport: "plugin:pylair|python_selftest_report",
+  benchReport: "plugin:pylair|python_bench_report",
   call: "plugin:pylair|python_call",
   callStream: "plugin:pylair|python_call_stream",
   grantCredit: "plugin:pylair|python_grant_credit",

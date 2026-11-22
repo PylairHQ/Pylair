@@ -32,6 +32,12 @@ export async function maybeSelfTest(
   spec: SelfTestSpec = { add: "add", count: "count" },
 ): Promise<void> {
   if (!(globalThis as { __PYLAIR_SELF_TEST__?: boolean }).__PYLAIR_SELF_TEST__) return;
+  // The latency bench replaces the checks entirely (docs/performance.md):
+  // PYLAIR_SELF_TEST_BENCH injects both flags and spawns no second window.
+  if (
+    (globalThis as { __PYLAIR_SELF_TEST_BENCH__?: boolean }).__PYLAIR_SELF_TEST_BENCH__
+  )
+    return selfTestBench(spec);
   // Under the flag the plugin also opens a second webview, "win-b". It
   // runs the intruder role; every other label runs the owner role.
   if ((await selfTestLabel()) === "win-b") return selfTestIntruder(spec);
@@ -510,6 +516,90 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     }
   }
   await (await ipc()).invoke(CMD.selftestReport, { result: { ok, checks } });
+}
+
+// ---- latency bench ----------------------------------------------------------
+// docs/performance.md. Opt-in only (PYLAIR_SELF_TEST_BENCH injects
+// __PYLAIR_SELF_TEST_BENCH__); runs instead of the checks, on the main
+// window alone. The same four payloads are timed host-side in
+// crates/tauri-plugin-pylair/tests/bench_latency.rs and dispatch-side in
+// python/pylair/tests/bench_dispatch.py so the layer shares can be
+// subtracted. Reported as one `webview-bench:` JSON line by the host.
+
+const BENCH_64K = "x".repeat(64 * 1024);
+const BENCH_NESTED = {
+  shape: {
+    name: "tri",
+    origin: { x: 0, y: 0, label: "o" },
+    points: [
+      { x: 1, y: 2, label: "a" },
+      { x: 3, y: 4, label: "b" },
+      { x: 5, y: 6, label: "c" },
+    ],
+    meta: { n: 3 },
+  },
+};
+
+const benchQuantile = (sorted: number[], p: number): number =>
+  sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)];
+
+async function selfTestBench(spec: SelfTestSpec): Promise<void> {
+  const flags = globalThis as {
+    __PYLAIR_SELF_TEST_BENCH_N__?: number;
+    __PYLAIR_SELF_TEST_BENCH_WARMUP__?: number;
+  };
+  // Test hooks — the bench harness in CI always sees the defaults.
+  const n = flags.__PYLAIR_SELF_TEST_BENCH_N__ ?? 500;
+  const warmup = flags.__PYLAIR_SELF_TEST_BENCH_WARMUP__ ?? 50;
+
+  // Wait for the runtime to be ready — the same bounded poll as the
+  // health check, except a host predating python_health proceeds on
+  // the first failed read (calls queue behind Ready anyway).
+  for (let i = 0; i < 300; i++) {
+    const snap = await health().catch(() => null);
+    if (snap === null || snap.state === "ready") break;
+    await sleep(100);
+  }
+
+  const streamFirstChunk = async (): Promise<void> => {
+    const it = stream<number>(spec.count, { n: 3 })[Symbol.asyncIterator]();
+    try {
+      const first = await it.next();
+      if (first.done) throw new Error("stream closed without a chunk");
+    } finally {
+      await it.return?.();
+    }
+  };
+  const cases: [string, () => Promise<unknown>][] = [
+    ["call_noop", () => call("bench_noop", {})],
+    ["call_64k", () => call("bench_echo", { s: BENCH_64K })],
+    ["call_nested", () => call("bench_nested", BENCH_NESTED)],
+    ["stream_first_chunk", streamFirstChunk],
+  ];
+
+  const result: Record<string, unknown> = { warmup, n };
+  for (const [name, probe] of cases) {
+    try {
+      for (let i = 0; i < warmup; i++) await probe();
+      const samples: number[] = [];
+      for (let i = 0; i < n; i++) {
+        const t0 = performance.now();
+        await probe();
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      result[name] = {
+        p50: benchQuantile(samples, 0.5),
+        p95: benchQuantile(samples, 0.95),
+        p99: benchQuantile(samples, 0.99),
+      };
+    } catch (e) {
+      // A case that cannot run (fixtures missing on an app that did not
+      // ship them) is recorded, not fatal — the report still lands.
+      result[name] = { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  await (await ipc()).invoke(CMD.benchReport, { result });
 }
 
 /**

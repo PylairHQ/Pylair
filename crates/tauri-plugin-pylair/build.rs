@@ -12,6 +12,7 @@ const COMMANDS: &[&str] = &[
     "python_shutdown",
     "python_selftest_report",
     "python_selftest_b_report",
+    "python_bench_report",
 ];
 
 fn main() {

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-python-bench-report"
+description = "Enables the python_bench_report command without any pre-configured scope."
+commands.allow = ["python_bench_report"]
+
+[[permission]]
+identifier = "deny-python-bench-report"
+description = "Denies the python_bench_report command without any pre-configured scope."
+commands.deny = ["python_bench_report"]

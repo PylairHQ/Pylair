@@ -224,6 +224,40 @@ def nan_score() -> float:
     return float("nan")
 
 
+# Latency bench (docs/performance.md): crates/.../tests/bench_latency.rs
+# drives these through Handle::call on `python -m pylair testapp`; the
+# same fixtures live in examples/reference-app/backend/app.py for the
+# webview leg and in tests/bench_dispatch.py for the dispatch-only leg.
+@dataclass
+class BenchPoint:
+    x: float
+    y: float
+    label: str
+
+
+@dataclass
+class BenchShape:
+    name: str
+    origin: BenchPoint
+    points: list[BenchPoint]
+    meta: dict[str, int]
+
+
+@expose
+def bench_noop() -> int:
+    return 1
+
+
+@expose
+def bench_echo(s: str) -> str:
+    return s
+
+
+@expose
+def bench_nested(shape: BenchShape) -> int:
+    return len(shape.points) + shape.meta["n"]
+
+
 @expose
 def opaque_result() -> object:
     """A non-serializable result (stands in for numpy/tensor values)."""

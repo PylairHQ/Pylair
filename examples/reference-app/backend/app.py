@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from pylair import expose
 from pylair_ollama import Message, chat as ollama_chat, status as ollama_status
@@ -169,3 +170,38 @@ def selftest_ping() -> str:
 def selftest_done() -> str:
     ready("selftest")
     return "done"
+
+
+# Latency bench (docs/performance.md): PYLAIR_SELF_TEST_BENCH drives these
+# through the installed webview; the same payloads go through Handle::call
+# in crates/tauri-plugin-pylair/tests/bench_latency.rs and through
+# coerce_kwargs/dumps in python/pylair/tests/bench_dispatch.py, so each
+# layer's share of the total can be subtracted out.
+@dataclass
+class BenchPoint:
+    x: float
+    y: float
+    label: str
+
+
+@dataclass
+class BenchShape:
+    name: str
+    origin: BenchPoint
+    points: list[BenchPoint]
+    meta: dict[str, int]
+
+
+@expose
+def bench_noop() -> int:
+    return 1
+
+
+@expose
+def bench_echo(s: str) -> str:
+    return s
+
+
+@expose
+def bench_nested(shape: BenchShape) -> int:
+    return len(shape.points) + shape.meta["n"]

@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the python_bench_report command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-bench-report",
+          "markdownDescription": "Enables the python_bench_report command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_bench_report command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-bench-report",
+          "markdownDescription": "Denies the python_bench_report command without any pre-configured scope."
+        },
+        {
           "description": "Enables the python_call command without any pre-configured scope.",
           "type": "string",
           "const": "allow-python-call",

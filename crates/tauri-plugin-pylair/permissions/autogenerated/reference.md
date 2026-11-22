@@ -23,6 +23,32 @@ Call exposed Python functions, stream results, cancel tasks, read runtime state 
 <tr>
 <td>
 
+`pylair:allow-python-bench-report`
+
+</td>
+<td>
+
+Enables the python_bench_report command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:deny-python-bench-report`
+
+</td>
+<td>
+
+Denies the python_bench_report command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pylair:allow-python-call`
 
 </td>
