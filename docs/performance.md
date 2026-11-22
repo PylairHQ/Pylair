@@ -323,31 +323,35 @@ bodies. Five warmup + 25 timed calls each, measured on all three OS
 legs of bench.yml (the cold call is spawn-dominated, so a small N is
 honest — tail percentiles at n=25 are directional, not precise).
 
-Numbers are p50/p95/p99 ms per call.
+Numbers are p50/p95/p99 ms per call, from bench.yml run 45042891313
+(2026-11-22, on the PR that added the case — hosted runners, shared
+capacity, so treat tail percentiles as directional).
 
 ### ubuntu-22.04
 
 | case | p50 | p95 | p99 |
 |---|---|---|---|
-| spawn_cold_process | TBD | TBD | TBD |
-| spawn_warm_reuse | TBD | TBD | TBD |
+| spawn_cold_process | 364.0 | 373.3 | 373.5 |
+| spawn_warm_reuse | 0.13 | 0.15 | 0.16 |
 
 ### windows-latest
 
 | case | p50 | p95 | p99 |
 |---|---|---|---|
-| spawn_cold_process | TBD | TBD | TBD |
-| spawn_warm_reuse | TBD | TBD | TBD |
+| spawn_cold_process | 442.3 | 449.5 | 526.3 |
+| spawn_warm_reuse | 0.67 | 0.73 | 0.75 |
 
 ### macos-latest
 
 | case | p50 | p95 | p99 |
 |---|---|---|---|
-| spawn_cold_process | TBD | TBD | TBD |
-| spawn_warm_reuse | TBD | TBD | TBD |
+| spawn_cold_process | 535.2 | 630.6 | 634.6 |
+| spawn_warm_reuse | 0.40 | 0.93 | 1.04 |
 
 Read: mode "process" pays process spawn + the ~300 ms import on every
-single call — hundreds of milliseconds per call on every OS. The warm
-member pays it once (in warmup), after which calls cost what a plain
-in-process call costs. The gap widens with the real import: a 300 ms
-fixture is gentle; a real model load runs seconds.
+single call — 364-535 ms at p50 depending on the OS. The warm member
+pays it once (in warmup), after which calls cost what a plain
+host<->Python call costs — under a millisecond even on the slowest
+leg, roughly three orders of magnitude down. The gap widens with the
+real import: a 300 ms fixture is gentle; a real model load runs
+seconds.
