@@ -6,6 +6,44 @@ the npm trio (`@pylair/client`, `@pylair/cli`, `create-pylair`) each carry
 their own number. Entries below are keyed by the npm release tag, which is
 what the GitHub releases page publishes.
 
+## npm-v0.1.0-rc.27 (2026-11-22)
+
+Crate `0.1.0-rc.21`, `pylair 0.1.0rc13` on PyPI, npm `0.1.0-rc.27`.
+
+- **Warm isolated workers.** `worker={"mode": "warm"}` keeps a
+  per-function pool of long-lived workers, so imports and loaded models
+  survive between calls. An isolated call to a module with a ~300 ms
+  import drops from ~360-540 ms to well under 1 ms (p50, see
+  `docs/performance.md`).
+  - **Interrupt-first cancel on Linux and macOS:** a cancelled call
+    gets `KeyboardInterrupt`, and the worker stays warm. Code stuck in
+    native work is still killed after `cancel_grace_ms`. **Windows is
+    kill-only:** a cancel kills the worker, and the pool respawns it.
+  - **`prewarm=True`** starts the pool at launch and reports a
+    `worker:<fn>` readiness component, so `requires=("worker:<fn>",)`
+    and `health().app` work with no extra code.
+  - Calls queue first in, first out per pool, crash loops stop after 3
+    consecutive deaths, and `max_isolated_workers` now counts live
+    worker processes.
+  - Warm mode keeps module globals between calls, by design.
+    `mode: "process"` is unchanged.
+- **Faster bridge.** Function signatures are cached, outbound values
+  are checked in a single pass instead of serialised and re-parsed, and
+  each frame is written in one call. A 64 KiB round trip between the
+  host and Python is about 2x faster, and argument coercion about 7x.
+- **Transport fix.** A large frame write interrupted by a signal could
+  be cut short and hang the reader. Writes now loop until every byte is
+  out.
+- **Latency benchmark.** An opt-in harness across the webview, the
+  host-to-Python leg and Python dispatch, on all three OSes. The real
+  per-call overhead is about 1-2 ms, almost all of it the webview IPC
+  hop.
+
+New projects pin `tauri-plugin-pylair = "=0.1.0-rc.21"` and
+`pylair==0.1.0rc13`. Design: `docs/decisions/0008-warm-workers.md`,
+`docs/performance.md`. PRs: #136, #137, #138, #139, #140, #141, #143,
+#144, #145, #146.
+
 ## npm-v0.1.0-rc.26 (2026-11-22)
 
 Crate `0.1.0-rc.20`, `pylair 0.1.0rc12` on PyPI, npm `0.1.0-rc.26`. The
