@@ -481,6 +481,29 @@ jobs:
           @expose
           def b_seen() -> int:
               return _b_seen
+
+
+          # App-readiness self-test (decisions 0007): the startup hook
+          # reports the "selftest" component loading then ready, and
+          # selftest_ping is gated on it via requires=. The ping
+          # re-reports a loading→ready cycle so a webview that
+          # subscribed to pylair://app after startup still observes a
+          # phase transition. --local legs always resolve a pylair with
+          # readiness, so the fixture is unconditional here.
+          from pylair import loading, on_startup, ready
+
+
+          @on_startup
+          def _selftest_component() -> None:
+              loading("selftest", 0.5)
+              ready("selftest")
+
+
+          @expose(requires=("selftest",))
+          def selftest_ping() -> str:
+              loading("selftest", 0.9)
+              ready("selftest")
+              return "pong"
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a
@@ -587,6 +610,10 @@ jobs:
                 echo "health skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
+              if grep -q "\"app-readiness\":\"skipped" "$f"; then
+                echo "app-readiness skipped on a --local leg — probe must run here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -613,6 +640,10 @@ jobs:
           fi
           if grep -q '"health":"skipped' /tmp/wst.log; then
             echo "health skipped on a --local leg — probe must run here" >&2
+            exit 1
+          fi
+          if grep -q '"app-readiness":"skipped' /tmp/wst.log; then
+            echo "app-readiness skipped on a --local leg — probe must run here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -658,6 +689,10 @@ jobs:
           }
           if (Select-String -Path $out -Pattern '"health":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error 'health skipped on a --local leg — probe must run here'
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"app-readiness":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error 'app-readiness skipped on a --local leg — probe must run here'
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic
