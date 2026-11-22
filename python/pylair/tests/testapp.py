@@ -498,3 +498,20 @@ def maybe(x: str = None) -> str:  # noqa: RUF013 - implicit-optional on purpose
 @expose(isolated=True)
 def isolated_maybe(x: str = None) -> str:  # noqa: RUF013
     return repr(x)
+
+
+# ---- app data dir (decision 0009, model manager PR 1) ----------------------
+# The host hands the app's data dir to the runtime as PYLAIR_APP_DATA_DIR.
+# Same env-witness shape as isolated_env_flag: one read in the runtime,
+# one inside a warm worker — workers spawn from the runtime, so the var
+# must propagate to them with no extra plumbing.
+
+
+@expose
+def app_data_dir_env() -> str | None:
+    return os.environ.get("PYLAIR_APP_DATA_DIR")
+
+
+@expose(worker={"mode": "warm"})
+def warm_app_data_dir_env() -> str | None:
+    return os.environ.get("PYLAIR_APP_DATA_DIR")

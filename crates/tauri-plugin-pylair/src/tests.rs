@@ -355,3 +355,112 @@ fn launched_via_symlinked_dir_still_resolves_resources() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ---- PYLAIR_APP_DATA_DIR (decision 0009 §2, model manager PR 1) ---------
+
+#[test]
+fn app_data_dir_env_pushes_resolved_dir_and_creates_it() {
+    let tmp = std::env::temp_dir().join(format!("pylair-add-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mut spec = SpawnSpec::default();
+    set_app_data_dir_env(&mut spec, Ok(tmp.clone()), |_| None);
+    assert_eq!(
+        env_get(&spec, "PYLAIR_APP_DATA_DIR").as_deref(),
+        Some(tmp.to_str().unwrap()),
+        "the resolved dir must land in the child env"
+    );
+    assert!(tmp.is_dir(), "the dir is created if missing");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn app_data_dir_env_unset_on_resolve_failure() {
+    // Best-effort, never fatal: a resolve failure logs and leaves the
+    // variable absent — the spawn proceeds either way.
+    let mut spec = SpawnSpec::default();
+    set_app_data_dir_env(&mut spec, Err(tauri::Error::UnknownPath), |_| None);
+    assert!(env_get(&spec, "PYLAIR_APP_DATA_DIR").is_none());
+}
+
+#[test]
+fn app_data_dir_env_unset_when_dir_unwritable() {
+    // create_dir_all failing is the same never-fatal path — simulate it
+    // by pointing the data dir at a path under a file.
+    let tmp = std::env::temp_dir().join(format!("pylair-adf-{}", std::process::id()));
+    std::fs::write(&tmp, "a file, not a dir").unwrap();
+    let mut spec = SpawnSpec::default();
+    set_app_data_dir_env(&mut spec, Ok(tmp.join("subdir")), |_| None);
+    assert!(env_get(&spec, "PYLAIR_APP_DATA_DIR").is_none());
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn app_data_dir_env_debug_override_keeps_inherited() {
+    // The dev override precedent (debug builds only, same as the
+    // interpreter/module overrides above app_spawn_spec): an inherited
+    // PYLAIR_APP_DATA_DIR wins — nothing is pushed and the child simply
+    // inherits it. cargo test runs debug, so cfg!(debug_assertions) is
+    // live; the env map is injected, not the process environment.
+    let mut spec = SpawnSpec::default();
+    set_app_data_dir_env(
+        &mut spec,
+        Ok(PathBuf::from(if cfg!(windows) {
+            "C:/resolved"
+        } else {
+            "/resolved"
+        })),
+        fake_env(&[("PYLAIR_APP_DATA_DIR", "/override")]),
+    );
+    assert!(
+        env_get(&spec, "PYLAIR_APP_DATA_DIR").is_none(),
+        "an inherited override must not be overwritten in debug builds"
+    );
+}
+
+/// The variable has to reach the CHILD's environment, not just sit in the
+/// spec — spawn a python that echoes it (the fake-runtime form of the
+/// check testapp.py's env-flag fixtures make against a real runtime).
+#[test]
+fn app_data_dir_env_reaches_spawned_child() {
+    fn python() -> PathBuf {
+        if let Ok(p) = std::env::var("PYLAIR_TEST_PYTHON") {
+            return p.into();
+        }
+        for cand in ["python3", "python"] {
+            let ok = std::process::Command::new(cand)
+                .arg("-c")
+                .arg("import sys;sys.exit(0)")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                return cand.into();
+            }
+        }
+        panic!("no python found for the app-data-dir echo test");
+    }
+    let tmp = std::env::temp_dir().join(format!("pylair-ade-{}", std::process::id()));
+    let mut spec = SpawnSpec::default();
+    set_app_data_dir_env(&mut spec, Ok(tmp.clone()), |_| None);
+    let mut cmd = std::process::Command::new(python());
+    cmd.arg("-c")
+        .arg("import os;print(os.environ['PYLAIR_APP_DATA_DIR'])");
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    for k in &spec.env_remove {
+        cmd.env_remove(k);
+    }
+    let out = cmd.output().expect("spawn python for the env echo");
+    assert!(
+        out.status.success(),
+        "echo child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        tmp.to_string_lossy(),
+        "the spawned runtime saw a different PYLAIR_APP_DATA_DIR"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

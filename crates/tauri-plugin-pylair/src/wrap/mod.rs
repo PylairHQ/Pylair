@@ -109,7 +109,7 @@ impl WrapRuntime {
             }
             let program = std::env::var("PYLAIR_PYTHON").unwrap_or_else(|_| "python3".into());
             let dir = PathBuf::from(&self.source);
-            let spec = SpawnSpec {
+            let mut spec = SpawnSpec {
                 program: program.into(),
                 args: self.launcher.clone(),
                 env: vec![
@@ -119,6 +119,9 @@ impl WrapRuntime {
                 cwd: Some(dir),
                 ..Default::default()
             };
+            crate::spec::set_app_data_dir_env(&mut spec, app.path().app_data_dir(), |k| {
+                std::env::var(k).ok()
+            });
             return Ok(spec);
         }
         let res = crate::spec::bundled_resource_dir(app.path().resource_dir())?;
@@ -137,6 +140,9 @@ impl WrapRuntime {
             ),
         ));
         spec.cwd = Some(dir);
+        crate::spec::set_app_data_dir_env(&mut spec, app.path().app_data_dir(), |k| {
+            std::env::var(k).ok()
+        });
         Ok(spec)
     }
 }
