@@ -1,0 +1,137 @@
+name: latency-bench
+
+# Latency baseline (docs/performance.md): the installed-webview bench
+# (PYLAIR_SELF_TEST_BENCH) plus the host<->Python and Python-dispatch legs
+# on all three OSes. Manual only — nothing may depend on this job and it
+# must never gate a merge.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      APP_DIR: examples/reference-app
+      APP_BIN: reference-app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundles: "deb"
+          - os: windows-latest
+            bundles: "nsis"
+          - os: macos-latest
+            bundles: "app"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+      - name: Build workspace packages (client + cli + scaffolder dists)
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: ${{ env.APP_DIR }}/src-tauri
+      - name: Install app deps
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: |
+          pnpm install --no-frozen-lockfile
+          uv sync
+      - name: pylair build
+        working-directory: ${{ env.APP_DIR }}
+        run: pnpm exec pylair build --bundles ${{ matrix.bundles }}
+      - name: Webview bench (Linux, deb under xvfb)
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: |
+          DEB=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
+          dpkg -x "$DEB" /tmp/approot
+          # Same pattern as the webview self-test: real installed layout,
+          # real webview, output teed so the bench line lands in the log.
+          PYLAIR_SELF_TEST_BENCH=1 timeout 300 xvfb-run -a /tmp/approot/usr/bin/$APP_BIN | tee "$GITHUB_WORKSPACE/bench-webview.log"
+      - name: Webview bench (macOS)
+        if: runner.os == 'macOS'
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: |
+          set -eo pipefail
+          APP=$(find src-tauri/target/release/bundle/macos -name '*.app' | head -1)
+          cd /tmp && env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_BENCH=1 "$GITHUB_WORKSPACE/$APP_DIR/$APP/Contents/MacOS/$APP_BIN" | tee "$GITHUB_WORKSPACE/bench-webview.log"
+      - name: Webview bench (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.APP_DIR }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $i = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $i) { Write-Error 'nsis installer not found'; exit 1 }
+          $inst = Start-Process -FilePath $i.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($inst.ExitCode -ne 0) { Write-Error "nsis install exit $($inst.ExitCode)"; exit 1 }
+          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" `
+                -Recurse -Filter "$env:APP_BIN.exe" -Depth 3 -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+          if (-not $exe) { Write-Error "installed $env:APP_BIN.exe not found"; exit 1 }
+          # GUI-subsystem exe: wait on the process handle, capture
+          # redirected stdout — the same pattern as the self-test leg.
+          $env:PYLAIR_SELF_TEST_BENCH = '1'
+          $out = Join-Path $env:TEMP 'bench-out.txt'
+          $err = Join-Path $env:TEMP 'bench-err.txt'
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $env:TEMP `
+                -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); Write-Error 'webview bench timed out'; exit 1 }
+          Get-Content $out,$err -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { Write-Error "webview bench exit $($p.ExitCode)"; exit 1 }
+          Copy-Item $out "$env:GITHUB_WORKSPACE/bench-webview.log" -ErrorAction SilentlyContinue
+      - name: Host to Python leg (Rust)
+        shell: bash
+        run: |
+          cargo test -p tauri-plugin-pylair --test bench_latency -- --ignored --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/bench-rust.log"
+      - name: Python dispatch leg
+        working-directory: python/pylair
+        shell: bash
+        run: |
+          uv sync --frozen
+          uv run python tests/bench_dispatch.py | tee "$GITHUB_WORKSPACE/bench-py.log"
+      - name: Collect bench lines
+        shell: bash
+        run: |
+          mkdir -p bench-out
+          for f in "$GITHUB_WORKSPACE/bench-webview.log" "$GITHUB_WORKSPACE/bench-rust.log" "$GITHUB_WORKSPACE/bench-py.log"; do
+            [ -f "$f" ] && grep -E '^(webview|rust|py)-bench: ' "$f" || true
+          done | tee bench-out/bench-${{ runner.os }}.jsonl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-${{ runner.os }}
+          path: bench-out/bench-${{ runner.os }}.jsonl
+          if-no-files-found: error
