@@ -364,6 +364,17 @@ Merged since rc.17 (d7daaaf):
   Windows terminated+new-pid), the unmanaged `worker:<fn>` sweep
   diagnostic, the cold-vs-warm bench case with three-OS numbers in
   `docs/performance.md`, and the docs pass.
+- PR 148: #142 — the runtime entered drain but never exited on
+  Windows + newest CPython: the tp-writer thread sits inside a
+  synchronous `write()` on a pipe the host never drains, and
+  `close_write()` then blocked the main thread on the pending write
+  (proven with a `PYLAIR_DEBUG_HANG` faulthandler probe — new
+  permanent diagnostic). `_finish` now bounds the writer join and,
+  when it is still inside `write()`, leaves the dead channel open and
+  exits the process instead; `_finish_executor` applies the same
+  bound to the default executor, which `asyncio.run` teardown would
+  otherwise join unbounded (3.12) or for 300 s (3.15). The next PyPI
+  train carries it.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
