@@ -40,6 +40,43 @@ pub(super) struct LastExit {
     pub(super) at: Instant,
 }
 
+/// An app-readiness phase (docs/decisions/0007 §3). Serialized as the
+/// wire strings the runtime sends; unknown values are dropped by the
+/// `app.component` arm before they reach this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppPhase {
+    Loading,
+    Ready,
+    Failed,
+}
+
+impl AppPhase {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Loading => "loading",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One component's latest app-reported readiness (decision 0007 §4).
+/// `at` feeds `ms_ago` in the snapshot, matching `last_exit`.
+#[derive(Debug, Clone)]
+pub(super) struct AppComponent {
+    pub(super) phase: AppPhase,
+    pub(super) progress: Option<f64>,
+    pub(super) detail: Option<String>,
+    pub(super) at: Instant,
+}
+
+/// The bounds app telemetry is held to (decision 0007 §4): app-supplied
+/// state can never grow host memory or kill the runtime that carries it.
+pub(super) const APP_MAX_COMPONENTS: usize = 32;
+pub(super) const APP_NAME_MAX: usize = 64;
+pub(super) const APP_DETAIL_MAX: usize = 256;
+
 /// The actor-side health block. Field-for-field the 0006 §1 proposal:
 /// `state_since`/`generation`/`ready_at`/`last_exit`/`crashes_in_window`/
 /// `backoff` are lifecycle mirrors; the rest are per-generation
@@ -87,6 +124,10 @@ pub(super) struct HealthShared {
     /// generation's first verdict always emits even when it reads
     /// identically again (0006 §5).
     pub(super) emitted: Option<(&'static str, &'static str)>,
+    /// App-reported component readiness (decision 0007): the latest
+    /// `app.component` state per name, per generation — cleared by
+    /// `reset_generation` like the rest of the liveness block.
+    pub(super) app: BTreeMap<String, AppComponent>,
 }
 
 /// The shared block, created in `spawn()` beside the fairness map.
@@ -104,6 +145,7 @@ pub(super) fn new(backoff: Duration) -> HealthRef {
         missed_pongs: 0,
         ping_sent: BTreeMap::new(),
         emitted: None,
+        app: BTreeMap::new(),
     }))
 }
 
@@ -270,6 +312,46 @@ impl HealthShared {
         ev
     }
 
+    /// An `app.component` notification landed (decision 0007 §4).
+    /// Applies the bounds — name/detail truncation, the 32-component
+    /// cap on NEW names (existing names always update), [0,1]-clamped
+    /// progress handled by the caller — and returns the
+    /// `pylair://app` payload when the phase actually changed. A
+    /// first sighting counts as a transition: absent -> loading is
+    /// the change consumers need to show a spinner.
+    pub(super) fn note_app_component(
+        &mut self,
+        name: &str,
+        phase: AppPhase,
+        progress: Option<f64>,
+        detail: Option<String>,
+    ) -> Option<serde_json::Value> {
+        let name: String = name.chars().take(APP_NAME_MAX).collect();
+        let detail = detail.map(|d| d.chars().take(APP_DETAIL_MAX).collect());
+        let transition = match self.app.get(&name) {
+            Some(c) => c.phase != phase,
+            None if self.app.len() >= APP_MAX_COMPONENTS => return None,
+            None => true,
+        };
+        self.app.insert(
+            name.clone(),
+            AppComponent {
+                phase,
+                progress,
+                detail,
+                at: Instant::now(),
+            },
+        );
+        transition.then(|| {
+            serde_json::json!({
+                "version": 1,
+                "generation": self.generation,
+                "name": name,
+                "phase": phase.as_str(),
+            })
+        })
+    }
+
     /// Generation teardown (`Session::drop`): the per-generation
     /// liveness block dies with it. Outside a live generation
     /// `Handle::health` reports these null and both verdicts
@@ -285,6 +367,7 @@ impl HealthShared {
         self.missed_pongs = 0;
         self.ping_sent.clear();
         self.emitted = Some(("unknown", "unknown"));
+        self.app.clear();
     }
 }
 
@@ -325,6 +408,32 @@ pub struct HealthSnapshot {
     /// another window's data.
     #[serde(rename = "self")]
     pub self_usage: Option<SelfSnapshot>,
+    /// App-reported component readiness (decision 0007 §5) — `null`
+    /// when the generation has reported nothing and on the `web`
+    /// kind. Runtime-wide, not caller-scoped.
+    pub app: Option<AppSnapshot>,
+}
+
+/// App readiness, latest-report-per-component (decision 0007 §5).
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct AppSnapshot {
+    pub components: std::collections::BTreeMap<String, AppComponentSnapshot>,
+}
+
+/// One component's latest app-reported state.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct AppComponentSnapshot {
+    /// `loading` | `ready` | `failed`.
+    pub phase: AppPhase,
+    /// `null` unless the app reported a finite progress in [0, 1].
+    pub progress: Option<f64>,
+    /// Free-text detail — informational only (the
+    /// `last_exit.detail` rule: never parse it).
+    pub detail: Option<String>,
+    /// Milliseconds since the latest report for this component.
+    pub ms_ago: u64,
 }
 
 /// Crash-loop accounting (`restarts` block).

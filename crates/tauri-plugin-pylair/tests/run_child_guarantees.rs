@@ -244,6 +244,8 @@ enum Ev {
     Exposes(Value),
     /// A `pylair://health` verdict-change event fired (0006 §5).
     Health,
+    /// A `pylair://app` phase-transition event fired (0007 §5).
+    App,
 }
 
 #[derive(Clone)]
@@ -281,6 +283,7 @@ impl Rec {
                     }
                     RuntimeEvent::Exposes(x) => Ev::Exposes(x),
                     RuntimeEvent::HealthChanged(_) => Ev::Health,
+                    RuntimeEvent::AppChanged(_) => Ev::App,
                 };
                 r.log.lock().unwrap().push(ev);
                 r.bump.notify_waiters();

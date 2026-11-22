@@ -47,6 +47,10 @@ pub enum RuntimeEvent {
     /// (docs/decisions/0006 §5): `{version, generation, liveness}` —
     /// no per-window data. One emit per flip, never per tick.
     HealthChanged(Value),
+    /// An app-reported component's phase changed (docs/decisions/0007
+    /// §5): `{version, generation, name, phase}` — one emit per
+    /// transition, never per progress tick.
+    AppChanged(Value),
 }
 
 #[derive(Debug, Clone, Default)]

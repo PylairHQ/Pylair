@@ -44,6 +44,9 @@ pub mod events {
     /// Liveness verdict changes only (docs/decisions/0006 §5):
     /// `{version, generation, liveness}`.
     pub const HEALTH: &str = "pylair://health";
+    /// App component phase transitions only (docs/decisions/0007 §5):
+    /// `{version, generation, name, phase}` — progress is poll-only.
+    pub const APP: &str = "pylair://app";
 }
 
 #[cfg(test)]
