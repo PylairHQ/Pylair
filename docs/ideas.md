@@ -11,11 +11,6 @@ from this file — promote to a milestone or a decision doc first.
 - Svelte template (`packages/create-pylair/templates/svelte-ts`).
 - Temp-file-handle transport for bulk binary payloads (images, audio)
   to replace base64-in-JSON (+33% wire cost) — protocol note §2.
-- Warm/model-persistent isolated workers (`@expose(worker={"mode":
-  "warm"})`): keep imports + loaded model resident; kill on cancel,
-  lazily respawn on next call. The API is already reserved; per-call
-  workers reload everything — seconds with torch — so this is what
-  makes `isolated=True` usable for AI apps.
 - `{"$bigint": "<decimal>"}` tagging for Python ints beyond ±2^53 —
   emitted as `bigint` in generated TS. Until then the codec rejects
   out-of-range ints with a clear error (docs/codegen.md): annotate

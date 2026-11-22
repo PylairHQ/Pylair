@@ -115,6 +115,26 @@ order:
    crate and the 0.1.0rc12 package resolved), so an `app-readiness`
    skip fails the leg on every OS.
 
+The warm-workers train (PRs 139-143 + the selftest/bench PR,
+`docs/decisions/0008`) lands `worker={"mode": "warm"}`: a persistent
+per-function pool pays the import once and serves calls in
+microseconds (the bench headline: ~300 ms-import fixture,
+`spawn_cold_process` hundreds of ms/call vs `spawn_warm_reuse` under a
+millisecond on all three OS legs — docs/performance.md). POSIX cancels
+interrupt-first (SIGINT inside a `started`-handshake window, plain
+`cancelled` ack and the same member survives); Windows is kill-only
+(CTRL_BREAK cannot reach a console-less worker). `prewarm: True`
+spawns the first member at startup and reports the managed
+`worker:<fn>` readiness component. The installed-webview self-test
+gained a `warm-workers` check — mandatory on `--local` legs and, on
+pack/registry legs, armed by `PYLAIR_WARM_EXPECTED` only when the
+resolved pylair is `0.1.0rc13` or later. The next release is `pylair`
+`0.1.0rc13` on PyPI plus the npm trio at `0.1.0-rc.27` (the selftest
+client changed); the crate is unchanged (`crates/` untouched this
+train), so no crates.io step and no template `Cargo.lock`
+regeneration — the scaffold `py` pin moves to `pylair==0.1.0rc13`
+with the PyPI publish.
+
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
 Wrap mode ships in 0.1.0. W1 is the plumbing only; nothing user-facing
@@ -296,6 +316,31 @@ Merged since rc.17 (d7daaaf):
   (≥ `0.1.0rc12`) carry the feature (`PYLAIR_APP_READINESS_EXPECTED`,
   mirroring `PYLAIR_HEALTH_EXPECTED`). All three registries move —
   see the train paragraph above.
+- PR 134: rc.26 pins — crate `0.1.0-rc.20`, pylair `0.1.0rc12`, npm
+  trio at `0.1.0-rc.26`.
+- PR 135: repo front-door docs refresh.
+- PR 136: deterministic window-fairness flood in the self-test.
+- PR 137: opt-in three-layer latency benchmark — `bench.yml` on
+  workflow_dispatch, webview/rust/python `*-bench:` JSONL per OS,
+  baseline numbers in `docs/performance.md`.
+- PR 138: host↔Python latency wins (perf-2) — the 64 KiB round trip
+  cut roughly in half; see the before/after tables in
+  `docs/performance.md`.
+- PRs 139-143: warm isolated workers (`docs/decisions/0008`).
+  `@expose(worker={"mode": "warm", "pool": N})` serves calls from a
+  long-lived per-function pool — lazy spawn, per-member FIFO, live
+  members counted against `max_isolated_workers`, crash-loop stop at
+  3 consecutive deaths, `WORKER_DIED` carrying a bounded stderr tail.
+  POSIX cancels interrupt-first: the member announces its raise
+  window with a `{"started": true}` frame, the runtime `killpg`s
+  SIGINT inside `cancel_grace_ms` and a surviving member serves the
+  next call; Windows is kill-only (`GenerateConsoleCtrlEvent` cannot
+  reach console-less workers). `prewarm: True` spawns the first
+  member at startup and reports the managed `worker:<fn>` readiness
+  component (import+resolve handshake on the private channel);
+  `requires=("worker:<fn>",)` gates on it. A partial-frame transport
+  bug (single raw `write()` truncating under signals) was found and
+  fixed on the way.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2

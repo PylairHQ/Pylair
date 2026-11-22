@@ -64,6 +64,11 @@ limitations: [docs/wrap.md](docs/wrap.md).
 - **App readiness.** `@on_startup` hooks report `loading`/`ready`/
   `failed` per component, `@expose(requires=…)` gates calls on them,
   and `onApp` fires on phase changes.
+- **Warm isolated workers.** `@expose(worker={"mode": "warm"})` keeps a
+  loaded model resident in a persistent per-function pool — pay the
+  import once, call in microseconds; POSIX cancels interrupt the call
+  and keep the worker
+  ([docs/cancellation.md](docs/cancellation.md)).
 - **Bundled CPython, native installers.** End users install nothing
   Python-related; `pylair build` produces Windows, macOS and Linux
   installers on clean machines.

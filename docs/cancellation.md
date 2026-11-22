@@ -89,15 +89,33 @@ at `@expose` time, not at cancel time.
 > A call cancelled while queued is dropped and never runs (plain
 > `cancelled: true` either way). `pool` members count as live
 > workers against `max_isolated_workers` for their whole lifetime.
+>
+> **A member is one process serving many calls — its state persists.**
+> Module globals, a loaded model, an opened file: whatever a call
+> leaves behind is still there for the next call — that is the point
+> (load once, call often). Two consequences worth spelling out. State
+> is per member, not per pool: with `pool` > 1, module-level counters
+> or caches are not shared, so a call must not rely on which member
+> answers. And anything a call leaves *running* — a thread it spawned,
+> a signal handler it installed, a mutated global — survives the call
+> end, including a call ended by an interrupt: `KeyboardInterrupt`
+> unwinds the function frame, but the member process and its other
+> threads live on. A member that should not carry leftovers must clean
+> up in `finally`; a member that wedges or leaks is ended by the same
+> crash-loop supervision as process mode (0008 §4).
+>
 > `prewarm: True` spawns the first member at startup and reports the
 > `worker:<fn>` readiness component (`health().app`) — ready once the
 > member completed its import+resolve handshake, failed with detail on
 > spawn/import failure or a crash-loop stop. Any call can then gate on
 > it: `@expose(requires=("worker:embed",))` on a function that needs
-> `embed`'s warm pool loaded before it runs. `idle_ttl_s` is reserved
-> and rejected at decoration until it lands. On the wire,
-> `exposes[].kind` reports `"isolated"` either way; worker config
-> rides inside `signature.meta`.
+> `embed`'s warm pool loaded before it runs. The component exists only
+> for `prewarm: True` functions — gating on `worker:<fn>` for a
+> function that is not prewarmed (or does not exist) fails at the
+> end-of-startup sweep with a detail that names the fix.
+> `idle_ttl_s` is reserved and rejected at decoration until it lands.
+> On the wire, `exposes[].kind` reports `"isolated"` either way;
+> worker config rides inside `signature.meta`.
 
 ### Inline sync functions (non-isolated)
 
