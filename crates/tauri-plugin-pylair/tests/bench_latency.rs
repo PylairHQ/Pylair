@@ -44,14 +44,14 @@ fn python() -> PathBuf {
     panic!("no python >=3.12 found for the bench runtime");
 }
 
-fn spec() -> SpawnSpec {
+fn spec(app_module: &str) -> SpawnSpec {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
     SpawnSpec {
         program: python(),
-        args: vec!["-m".into(), "pylair".into(), "testapp".into()],
+        args: vec!["-m".into(), "pylair".into(), app_module.into()],
         env: vec![(
             "PYTHONPATH".into(),
             root.join("python/pylair/src")
@@ -79,14 +79,14 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[idx]
 }
 
-fn report(case: &str, samples: &mut [f64]) {
+fn report(case: &str, warmup: usize, n: usize, samples: &mut [f64]) {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!(
         "rust-bench: {}",
         json!({
             "case": case,
-            "warmup": WARMUP,
-            "n": N,
+            "warmup": warmup,
+            "n": n,
             "p50": percentile(samples, 0.50),
             "p95": percentile(samples, 0.95),
             "p99": percentile(samples, 0.99),
@@ -123,11 +123,26 @@ async fn probe_stream_first(h: &Handle) {
     }
 }
 
+/// Time `iterations` calls of `fn_name` (after `warmup` uncounted ones)
+/// and report the percentile row.
+async fn probe_case(h: &Handle, case: &str, fn_name: &str, warmup: usize, n: usize) {
+    for _ in 0..warmup {
+        probe_call(h, fn_name, &json!({})).await;
+    }
+    let mut samples = Vec::with_capacity(n);
+    for _ in 0..n {
+        let t0 = Instant::now();
+        probe_call(h, fn_name, &json!({})).await;
+        samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    report(case, warmup, n, &mut samples);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "latency bench — run manually or from bench.yml"]
 async fn bench_host_python_latency() {
     let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
-    let (h, actor) = spawn(spec(), SupervisorConfig::default(), ev);
+    let (h, actor) = spawn(spec("testapp"), SupervisorConfig::default(), ev);
     tokio::spawn(actor);
     wait_ready(&h).await;
 
@@ -155,7 +170,7 @@ async fn bench_host_python_latency() {
         probe_call(&h, "bench_noop", &json!({})).await;
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    report("call_noop", &mut samples);
+    report("call_noop", WARMUP, N, &mut samples);
 
     // call_64k
     let input = json!({"s": s64});
@@ -168,7 +183,7 @@ async fn bench_host_python_latency() {
         probe_call(&h, "bench_echo", &input).await;
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    report("call_64k", &mut samples);
+    report("call_64k", WARMUP, N, &mut samples);
 
     // call_nested
     for _ in 0..WARMUP {
@@ -180,7 +195,7 @@ async fn bench_host_python_latency() {
         probe_call(&h, "bench_nested", &nested).await;
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    report("call_nested", &mut samples);
+    report("call_nested", WARMUP, N, &mut samples);
 
     // stream_first_chunk
     for _ in 0..WARMUP {
@@ -192,7 +207,36 @@ async fn bench_host_python_latency() {
         probe_stream_first(&h).await;
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    report("stream_first_chunk", &mut samples);
+    report("stream_first_chunk", WARMUP, N, &mut samples);
 
     h.shutdown().await;
+
+    // Cold-vs-warm (decision 0008 §8, docs/performance.md): the same
+    // trivial call in mode "process" (spawn + ~300 ms import per call)
+    // vs mode "warm" (the member pays it once, then serves). This is
+    // the warm-workers headline — a small N is honest here: the cold
+    // iteration cost is dominated by the spawn, not by tail noise.
+    let (ev2, _rx2) = mpsc::channel::<RuntimeEvent>(256);
+    let (h2, actor2) = spawn(spec("testapp_benchcost"), SupervisorConfig::default(), ev2);
+    tokio::spawn(actor2);
+    wait_ready(&h2).await;
+    const SPAWN_N: usize = 25;
+    const SPAWN_WARMUP: usize = 5;
+    probe_case(
+        &h2,
+        "spawn_cold_process",
+        "bench_cost_cold",
+        SPAWN_WARMUP,
+        SPAWN_N,
+    )
+    .await;
+    probe_case(
+        &h2,
+        "spawn_warm_reuse",
+        "bench_cost_warm",
+        SPAWN_WARMUP,
+        SPAWN_N,
+    )
+    .await;
+    h2.shutdown().await;
 }
