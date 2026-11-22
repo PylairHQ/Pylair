@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import struct
+import subprocess
 import sys
 import time
 from collections import deque
@@ -23,6 +24,8 @@ TASKKILL_TIMEOUT_S = 5.0
 # A warm pool whose workers die this many times in a row with no
 # successful call in between is declared a crash loop and stops (0008 §1).
 WARM_CRASH_LIMIT = 3
+# Bounded tail kept per warm member for WORKER_DIED diagnostics.
+WARM_STDERR_TAIL = 8192
 
 # RC.8A ceilings — the host enforces these on the way in; the runtime
 # clamps defensively so a host bug can't grow them without bound.
@@ -63,12 +66,21 @@ class Task:
     # tells "dropped from queue" apart from "kill the serving worker".
     warm: bool = False
     warm_queued: bool = False
+    # Interrupt-first cancel (0008 §2): pending = the interrupt was sent
+    # and the response is awaited; survived = the member answered inside
+    # the grace window (the reporter maps it to the plain cancelled ack).
+    # `warm_started` is set when the worker's "started" frame lands —
+    # the raise window is open and an interrupt is worth sending.
+    warm_cancel_pending: bool = False
+    warm_survived: bool = False
+    warm_grace_s: float = 3.0
+    warm_started: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _WarmMember:
     """One live worker process in a warm pool (decision 0008)."""
 
-    __slots__ = ("busy", "killed", "proc")
+    __slots__ = ("busy", "killed", "proc", "stderr_tail", "stderr_task")
 
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
         self.proc = proc
@@ -76,6 +88,10 @@ class _WarmMember:
         # Killed by us (cancel/drain), not a crash — a deliberate kill
         # must not count toward the pool's crash-loop limit.
         self.killed = False
+        # Bounded tail of the member's stderr — a crash's last lines
+        # ride the next WORKER_DIED (the #140 review fix).
+        self.stderr_tail = b""
+        self.stderr_task: asyncio.Task | None = None
 
 
 class _WarmPool:
@@ -211,6 +227,9 @@ class TaskRegistry:
             return
         task = Task(id=task_id, fn_name=fn_name, kind=kind, call_id=call_id)
         task.warm = warm
+        if warm:
+            # Interrupt-first cancel's response window (0008 §2).
+            task.warm_grace_s = (worker or {}).get("cancel_grace_ms", 3000) / 1000.0
         self._tasks[task_id] = task
         if kind == "isolated" and not warm:
             self._isolated += 1
@@ -512,10 +531,46 @@ class TaskRegistry:
             body = _json.dumps({"op": "call", "input": input}).encode()
             member.proc.stdin.write(_LEN.pack(len(body)) + body)
             await member.proc.stdin.drain()
-            payload = await self._warm_response(member.proc)
-            if payload is None or ("error" not in payload and "result" not in payload):
+            # Frames until the terminal: {"started": true} marks the
+            # raise window open on the worker — a pending interrupt is
+            # now worth sending (0008 §2). Anything else that is not a
+            # terminal payload is a broken channel.
+            payload: dict | None = None
+            while True:
+                payload = await self._warm_response(member.proc)
+                if payload is None:
+                    raise _WarmWorkerDead
+                if payload.get("started") is True:
+                    task.warm_started.set()
+                    continue
+                break
+            if not any(k in payload for k in ("result", "error", "interrupted")):
                 raise _WarmWorkerDead
-            pool.deaths = 0  # a completed call proves the pool healthy
+            # A framed response — any shape — proves the member healthy.
+            pool.deaths = 0
+            if task.warm_cancel_pending:
+                # A response for the cancelled call = survived (0008 §2):
+                # the interrupt either fired inside the raise window or
+                # the call raced to completion — the member is alive and
+                # returns to the pool either way.
+                task.warm_survived = True
+                self._finish(
+                    task,
+                    proto.error_response(
+                        task.call_id, proto.TASK_CANCELLED, "task cancelled"
+                    ),
+                )
+                return
+            if "interrupted" in payload:
+                # A KeyboardInterrupt with no cancel in flight — the call
+                # died but the worker is fine and returns to the pool.
+                self._finish(
+                    task,
+                    proto.error_response(
+                        task.call_id, proto.INTERNAL, "worker call interrupted"
+                    ),
+                )
+                return
         except asyncio.CancelledError:
             if member is not None:
                 # Our cancel kill, not a crash — it must not count toward
@@ -558,13 +613,18 @@ class TaskRegistry:
             # drop the suspect member (counted) and respawn lazily.
             if member is not None:
                 await self._drop_warm_member(pool, member)
+            data: dict[str, Any] = {"type": type(e).__name__}
+            if member is not None and member.stderr_tail:
+                # The member's last stderr lines — a crash on import or
+                # mid-call becomes visible to the caller (#140 review).
+                data["stderr"] = member.stderr_tail.decode(errors="replace")[-2000:]
             self._finish(
                 task,
                 proto.error_response(
                     task.call_id,
                     proto.WORKER_DIED,
                     f"warm worker for {fn_name!r} died: {type(e).__name__}: {e}",
-                    {"type": type(e).__name__},
+                    data,
                 ),
             )
             return
@@ -636,6 +696,9 @@ class TaskRegistry:
                         finally:
                             pool.spawning -= 1
                         m = _WarmMember(proc)
+                        m.stderr_task = asyncio.create_task(
+                            self._drain_member_stderr(m)
+                        )
                         m.busy = True
                         pool.members.append(m)
                         return m
@@ -674,10 +737,20 @@ class TaskRegistry:
             kwargs: dict[str, Any] = {
                 "stdin": asyncio.subprocess.PIPE,
                 "stdout": asyncio.subprocess.PIPE,
+                # stderr is piped into a bounded per-member tail so a
+                # crash's last lines ride WORKER_DIED — the drain task
+                # starts the moment the member object exists.
+                "stderr": asyncio.subprocess.PIPE,
                 "env": {**os.environ, "PYLAIR_WORKER_PARENT": str(os.getpid())},
             }
             if sys.platform == "win32":
-                kwargs["creationflags"] = 0  # taskkill /T handles the tree
+                # CREATE_NEW_PROCESS_GROUP costs nothing and keeps the
+                # worker's group addressable + shields it from console
+                # CTRL broadcasts (0008 §2 — Windows itself is kill-only,
+                # but a console-attached embedding would deliver
+                # CTRL_BREAK to exactly this group). taskkill /T and Job
+                # containment cover the tree for the kill path.
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
                 kwargs["start_new_session"] = True  # own process group -> killpg
             return await asyncio.create_subprocess_exec(
@@ -709,9 +782,33 @@ class TaskRegistry:
                 return None
             body = await proc.stdout.readexactly(n)
             payload = _json.loads(body)
-        except (asyncio.IncompleteReadError, OSError, ValueError):
+        except asyncio.IncompleteReadError as e:
+            _log(
+                f"warm member {proc.pid} channel closed mid-frame "
+                f"(rc={proc.returncode}, {len(e.partial)} bytes held)"
+            )
+            return None
+        except (OSError, ValueError):
             return None
         return payload if isinstance(payload, dict) else None
+
+    async def _drain_member_stderr(self, m: _WarmMember) -> None:
+        """Keep a bounded tail of a member's stderr for WORKER_DIED
+        diagnostics, forwarding chunks to our own stderr so worker
+        logs stay visible exactly like an inherited fd would."""
+        try:
+            while True:
+                chunk = await m.proc.stderr.read(4096)
+                if not chunk:
+                    return
+                m.stderr_tail = (m.stderr_tail + chunk)[-WARM_STDERR_TAIL:]
+                try:
+                    sys.stderr.write(chunk.decode(errors="replace"))
+                    sys.stderr.flush()
+                except (ValueError, OSError):
+                    pass
+        except (OSError, ValueError):
+            return
 
     async def _drop_warm_member(self, pool: _WarmPool, m: _WarmMember) -> None:
         """Remove a member from the pool: count a crash death unless we
@@ -729,6 +826,16 @@ class TaskRegistry:
             await self._kill_proc(m.proc)
         else:
             await m.proc.wait()
+        # Let the drain finish reading what is already in the pipe so the
+        # tail is complete for WORKER_DIED — bounded, because a grandchild
+        # can hold the pipe open past the member's death.
+        if m.stderr_task is not None:
+            done, _pending = await asyncio.wait({m.stderr_task}, timeout=1.0)
+            if not done:
+                m.stderr_task.cancel()
+            elif not m.stderr_task.cancelled():
+                m.stderr_task.exception()  # retrieve — no "never retrieved" noise
+            m.stderr_task = None
         self._wake_next(pool)
 
     def _wake_next(self, pool: _WarmPool) -> None:
@@ -756,6 +863,23 @@ class TaskRegistry:
             for m in list(pool.members):
                 m.killed = True
                 await self._drop_warm_member(pool, m)
+
+    def _interrupt_warm(self, task: Task) -> None:
+        """Interrupt the serving member's call, worker-side (0008 §2):
+        the signal raises KeyboardInterrupt only while the user function
+        executes. POSIX-only — killpg(SIGINT) targets the worker's own
+        session group. Windows is deliberately not attempted: a
+        CTRL_BREAK_EVENT needs a shared console and embedded workers
+        have none, so the documented fallback is the kill path. A member
+        that already died needs no interrupt — its response EOF reads as
+        dead anyway."""
+        proc = task.worker
+        if proc is None or proc.returncode is not None or sys.platform == "win32":
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except (ProcessLookupError, OSError) as e:
+            _log(f"warm interrupt for task {task.id} failed: {e!r}")
 
     async def _kill_worker(self, task: Task) -> None:
         proc = task.worker
@@ -885,6 +1009,34 @@ class TaskRegistry:
         elif task.done:
             result = {"cancelled": False, "reason": "task_not_found"}
         elif task.asyncio_task is not None and not task.asyncio_task.done():
+            if (
+                task.kind == "isolated"
+                and task.warm
+                and not task.warm_queued
+                # Interrupt-first is POSIX-only (0008 §2 fallback):
+                # CTRL_BREAK reaches a console-attached target group,
+                # but the embedded runtime spawns workers console-less —
+                # GenerateConsoleCtrlEvent reports success and delivers
+                # nothing (probed). Waiting the grace for a signal that
+                # cannot land only delays the kill, so Windows cancels
+                # go straight to the kill path below.
+                and sys.platform != "win32"
+            ):
+                # Running warm call — interrupt first (0008 §2). The
+                # task coroutine is NOT cancelled — it must keep waiting
+                # on the response frame so a survived member can answer.
+                # The reporter waits for the worker's "started" frame
+                # inside the grace (the signal is only useful once the
+                # raise window is open), interrupts, then classifies —
+                # falling back to the kill path on silence. It also owns
+                # the worker-None window: a cancel that lands mid-spawn
+                # or mid-import gets the same started-wait instead of an
+                # interrupt that would arrive before the window exists.
+                task.warm_cancel_pending = True
+                asyncio.create_task(self._ensure_terminal(task))
+                if call_id is not None:
+                    asyncio.create_task(self._report_warm_cancel(task, call_id))
+                return
             task.asyncio_task.cancel()
             asyncio.create_task(self._ensure_terminal(task))
             if task.kind == "isolated":
@@ -928,6 +1080,81 @@ class TaskRegistry:
             result = {"cancelled": True, "status": "terminated"}
         # An outcome we can't classify means "may still be running".
         except BaseException:  # noqa: BLE001 - deliberate catch-all
+            result = {"cancelled": True, "status": "termination_in_progress"}
+        self._send(proto.response(call_id, result))
+
+    async def _report_warm_cancel(self, task: Task, call_id: int | str) -> None:
+        """Interrupt-first verdict (0008 §2). The signal is only useful
+        inside the worker's raise window, so first wait for its
+        "started" frame — inside the same cancel_grace_ms budget — then
+        interrupt and wait for the response. A response inside the
+        grace means survived: plain `cancelled`, the work confirmed
+        stopped and the member returns to the pool. Silence means
+        stuck: the existing kill path runs and reports `terminated`
+        exactly like process mode. Started-wait, interrupt wait and the
+        kill share one budget (ISOLATED_GRACE_S + 1.0) so the ack stays
+        inside the host's 5 s cancel_timeout either way."""
+        deadline = time.monotonic() + ISOLATED_GRACE_S + 1.0
+
+        def budget() -> float:
+            return max(0.0, min(task.warm_grace_s, deadline - time.monotonic()))
+
+        try:
+            if not task.warm_started.is_set() and not task.asyncio_task.done():
+                # Wait for "started" OR the task itself ending (a fast
+                # call's response, or a dead member's EOF) — whichever
+                # first, bounded by the grace.
+                started_wait = asyncio.ensure_future(task.warm_started.wait())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {started_wait, task.asyncio_task},
+                        timeout=budget(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    started_wait.cancel()
+                if not done:
+                    raise TimeoutError  # never started inside the grace
+            if not task.asyncio_task.done():
+                # Started -> the raise window is open, or the call just
+                # finished and its frame is in flight — either way the
+                # interrupt is safe to send.
+                self._interrupt_warm(task)
+            await asyncio.wait_for(asyncio.shield(task.asyncio_task), timeout=budget())
+            result = (
+                {"cancelled": True}
+                if task.warm_survived
+                else {"cancelled": True, "status": "terminated"}
+            )
+            self._send(proto.response(call_id, result))
+            return
+        except asyncio.CancelledError:
+            self._send(
+                proto.response(call_id, {"cancelled": True, "status": "terminated"})
+            )
+            return
+        except BaseException:  # noqa: BLE001 - silence past the grace = stuck
+            _log(
+                f"warm task {task.id} unanswered past its interrupt grace — "
+                "killing the member"
+            )
+        # Stuck: cancelling the task runs the same kill path as process
+        # mode inside its CancelledError handler; what is left of the
+        # shared budget bounds the reap wait.
+        task.asyncio_task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task.asyncio_task),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            result = (
+                {"cancelled": True}
+                if task.warm_survived
+                else {"cancelled": True, "status": "terminated"}
+            )
+        except asyncio.CancelledError:
+            result = {"cancelled": True, "status": "terminated"}
+        except BaseException:  # noqa: BLE001 - unclassifiable outcome
             result = {"cancelled": True, "status": "termination_in_progress"}
         self._send(proto.response(call_id, result))
 

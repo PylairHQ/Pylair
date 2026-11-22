@@ -125,8 +125,10 @@ crate at `0.1.0-rc.20`). Check each registry for its latest RC.
   Objects cover that case.
 - **`isolated=True` respawns a worker per call.** Fine for short calls;
   `worker={"mode": "warm", "pool": N}` keeps a persistent per-function
-  pool instead — cancel is still kill-only (cooperative interrupt and
-  prewarm are not implemented yet; see docs/cancellation.md).
+  pool instead — on POSIX a cancel interrupts the call first and a
+  surviving worker serves the next call; Windows is kill-only
+  (CTRL_BREAK cannot reach a console-less worker), and `prewarm` is
+  not implemented yet (see docs/cancellation.md).
 - **Worker kill covers the worker's process group.** A descendant that
   deliberately detaches (`setsid`, a new process group) escapes it.
 - **Ints beyond ±2^53 can't cross the bridge.** Return large integers as

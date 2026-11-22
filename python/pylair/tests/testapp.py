@@ -244,6 +244,97 @@ def warm2_sleep(seconds: float, pidfile: str | None = None) -> str:
     return "slept"
 
 
+@expose(worker={"mode": "warm"})
+def warm_interrupt_immune(seconds: float, pidfile: str | None = None) -> str:
+    """Ignores the interrupt signal entirely — the stuck path: the grace
+    expires and the kill fallback runs."""
+    import signal as _signal
+
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    if sys.platform == "win32":
+        _signal.signal(_signal.SIGBREAK, _signal.SIG_IGN)
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(worker={"mode": "warm", "cancel_grace_ms": 150})
+def warm_immune_fastgrace(seconds: float, pidfile: str | None = None) -> str:
+    """Same ignoring worker with a 150 ms grace — proves the configured
+    bound reaches the stuck path far faster than the 3 s default."""
+    import signal as _signal
+
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    if sys.platform == "win32":
+        _signal.signal(_signal.SIGBREAK, _signal.SIG_IGN)
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(worker={"mode": "warm"})
+def warm_break_witness(witness: str, seconds: float, started: str | None = None) -> str:
+    """Installs its own interrupt handler that writes `witness` before
+    raising KeyboardInterrupt — a delivered-signal proof: the file can
+    only exist if the interrupt actually reached this worker. `started`
+    is a running-gate marker the test polls before cancelling."""
+    import signal as _signal
+
+    def _on_interrupt(_signum, _frame) -> None:
+        with open(witness, "w") as f:
+            f.write("break")
+        raise KeyboardInterrupt
+
+    if sys.platform == "win32":
+        _signal.signal(_signal.SIGBREAK, _on_interrupt)
+    else:
+        _signal.signal(_signal.SIGINT, _on_interrupt)
+    if started:
+        with open(started, "w") as f:
+            f.write("running")
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(worker={"mode": "warm"})
+def warm_gated_start(gate: str, pidfile: str | None = None, seconds: float = 0) -> str:
+    """Poll `gate` before doing the real work — the call sits inside the
+    raise window doing nothing until the test releases it. The pidfile
+    lands in `finally`: an interrupt firing at the earliest legal point
+    (fn entry, before any write) still records which member ran."""
+    try:
+        deadline = time.time() + 120
+        while not os.path.exists(gate):
+            assert time.time() < deadline, "gate never released"
+            time.sleep(0.05)
+        time.sleep(seconds)
+        return "slept"
+    finally:
+        if pidfile:
+            _write_pidfile(pidfile, os.getpid())
+
+
+@expose(worker={"mode": "warm"})
+def warm_crash_stderr(marker: str) -> None:
+    """Write a marker to stderr then die hard — the member's bounded
+    stderr tail must carry it into WORKER_DIED."""
+    print(marker, file=sys.stderr, flush=True)
+    os._exit(3)
+
+
+@expose(worker={"mode": "warm"})
+def warm_gated_result(marker: str, size: int) -> dict:
+    """Write `marker` (carrying this worker's pid) then return a payload
+    big enough that building and writing its frame takes measurable
+    time — the interrupt-vs-completion race test lands signals inside
+    exactly that window."""
+    with open(marker, "w") as f:
+        f.write(str(os.getpid()))
+    return {"pid": os.getpid(), "items": ["x"] * size}
+
+
 @expose
 def move(p: Point, dx: float = 0.0) -> Point:
     """Translate a point; dataclass in, dataclass out."""
