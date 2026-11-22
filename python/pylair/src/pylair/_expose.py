@@ -3,8 +3,9 @@
 Kinds reported in the handshake (protocol §4): sync | async | generator |
 isolated. `worker` selects how an isolated call runs (decision 0008):
 {"mode": "process"} is today's per-call worker; {"mode": "warm"} is a
-long-lived per-function pool. `prewarm` and `idle_ttl_s` are reserved
-and rejected at decoration until they land.
+long-lived per-function pool (prewarm spawns the first member at
+startup and reports the worker:<fn> readiness component). `idle_ttl_s`
+is reserved and rejected at decoration until it lands.
 """
 
 from __future__ import annotations
@@ -43,9 +44,8 @@ def _normalize_worker(worker: dict) -> dict:
     """Validate a `worker=` mapping at decoration and fill defaults.
 
     `mode` selects the execution mode; every other key must be known.
-    Options the design reserves but v1 does not implement are rejected
-    here rather than silently ignored (0008 §4): `prewarm` (lands with
-    readiness integration) and `idle_ttl_s` (no TTL reaping in v1).
+    `idle_ttl_s` is reserved by the design but not implemented in v1 —
+    it is rejected here rather than silently ignored (0008 §4).
     """
     mode = worker.get("mode")
     if mode not in ("process", "warm"):
@@ -58,8 +58,9 @@ def _normalize_worker(worker: dict) -> dict:
         )
     if mode == "process":
         return {"mode": "process"}
-    if worker.get("prewarm") not in (None, False):
-        raise ValueError("worker['prewarm'] is not implemented yet (0008 PR 3)")
+    prewarm = worker.get("prewarm", False)
+    if not isinstance(prewarm, bool):
+        raise TypeError(f"worker['prewarm'] must be a bool, got {prewarm!r}")
     if worker.get("idle_ttl_s") is not None:
         raise ValueError(
             "worker['idle_ttl_s'] is not implemented in v1 (0008 §4); "
@@ -78,7 +79,10 @@ def _normalize_worker(worker: dict) -> dict:
             f"worker['cancel_grace_ms'] must be within "
             f"0..{WARM_CANCEL_GRACE_MAX_MS} ms, got {grace_ms!r}"
         )
-    return {"mode": "warm", "pool": pool, "cancel_grace_ms": grace_ms}
+    cfg = {"mode": "warm", "pool": pool, "cancel_grace_ms": grace_ms}
+    if prewarm:
+        cfg["prewarm"] = True
+    return cfg
 
 
 def _kind_of(fn: Callable[..., Any], isolated: bool) -> str:
@@ -159,7 +163,9 @@ def expose(
     (same as isolated=True alone); {"mode": "warm", "pool": N} serves
     calls from a long-lived per-function pool — `cancel_grace_ms`
     (0..3000, default 3000) is the interrupt grace before the kill
-    fallback. `prewarm` and `idle_ttl_s` are rejected until implemented.
+    fallback, and `prewarm: True` spawns the first member at startup and
+    reports readiness on the `worker:<fn>` component.
+    `idle_ttl_s` is rejected until implemented.
 
     `requires` names readiness components the call waits on before
     running (decision 0007 §2): each name is declared in phase
@@ -201,6 +207,11 @@ def expose(
         # health().app shows it from the start.
         for n in names:
             _readiness.declare(n)
+        # prewarm declares `worker:<fn>` at decoration too (0008 §6) —
+        # managed because the runtime, not a startup hook, reports it:
+        # the end-of-startup sweep must not fail a still-spawning pool.
+        if worker is not None and worker.get("prewarm"):
+            _readiness.declare(f"worker:{func.__name__}", managed=True)
 
         @functools.wraps(func)
         def wrapper(*args: object, **kwargs: object) -> object:
