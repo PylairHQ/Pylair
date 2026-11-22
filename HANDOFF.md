@@ -91,15 +91,19 @@ next`, then registry acceptance with `source=registry` and
 `PYLAIR_HEALTH_EXPECTED` arms (`python_health` first ships in
 rc.19), so a `health` skip fails the leg on every OS.
 
-The next train is app readiness (PRs 128-131 plus the selftest/docs
-PR, `docs/decisions/0007`) — the first train since rc.21 that touches
-all three registries. `@on_startup` hooks report named components
-`loading`/`ready`/`failed`, coalesced into `app.component`
+The next train is app readiness (PRs 128-132, `docs/decisions/0007`)
+— the first train since rc.21 that touches all three registries.
+This bump commit moves the crate to `0.1.0-rc.20` and `pylair` to
+`0.1.0rc12`; no npm version moves here — the npm trio publishes only
+after both registries carry the new versions, so the scaffold pins
+(`rs`, `py`) and the template `Cargo.lock` stay at rc.19/rc11 until
+the pins PR. What rc.20/rc12 ship: `@on_startup` hooks report named
+components `loading`/`ready`/`failed`, coalesced into `app.component`
 notifications; `@expose(requires=…)` gates calls on them (a `failed`
 requirement answers `INTERNAL` with `data.component`); the host keeps
 a bounded per-generation component map in `health().app` and emits
 `pylair://app` (`onApp`) on phase transitions only — progress reads
-stay poll-only. Order:
+stay poll-only. Remaining order:
 
 1. publish crate `0.1.0-rc.20`;
 2. publish `pylair 0.1.0rc12` to PyPI (`release.yml`,
