@@ -476,6 +476,27 @@ def test_wait_ready_cancellation():
     asyncio.run(go())
 
 
+def test_notify_waiters_never_raises_on_a_cancelled_future():
+    """A waiter cancelled between the done() check and the scheduled
+    callback must not surface InvalidStateError on the loop."""
+
+    async def go() -> None:
+        reg = Readiness()
+        errors: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, ctx: errors.append(ctx)
+        )
+        fut = asyncio.get_running_loop().create_future()
+        reg._waiters.append(fut)
+        reg._notify_waiters()  # schedules the resolve callback
+        fut.cancel()  # lands before the callback runs
+        await asyncio.sleep(0.01)
+        assert fut.cancelled()
+        assert not errors, errors
+
+    asyncio.run(go())
+
+
 # ---- expose(requires=) -----------------------------------------------------
 
 
@@ -723,6 +744,33 @@ def test_cancel_during_readiness_wait_is_task_cancelled():
         # Unwedge for a clean teardown.
         rt.send(call(3, "release_hooks", task=3))
         rt.recv_until(lambda m: m.get("id") == 3)
+
+
+def test_cancelled_gated_call_never_runs_the_body():
+    """`_run_gated`'s CancelledError branch must return — regression
+    test: `_finish` dedupes the late result frame, so only a
+    side-effect witness proves the function itself never ran."""
+    with Runtime("testapp_readiness") as rt:
+        rt.recv()
+        rt.send(call(1, "chat", task=7, input={"prompt": "x"}))
+        rt.send(proto.request(2, "cancel", {"task": 7}))
+        ack = rt.recv_until(lambda m: m.get("id") == 2)
+        assert ack["result"]["cancelled"] is True
+        terminal = rt.recv_until(lambda m: m.get("id") == 1)
+        assert terminal["error"]["code"] == proto.TASK_CANCELLED
+        # The gates open; exactly one response for call 1 exists — the
+        # TASK_CANCELLED already seen — and `chat` never runs.
+        rt.send(call(3, "release_hooks", task=3))
+        msgs: list[dict] = []
+        deadline = time.time() + 20
+        while not any(m.get("id") == 3 for m in msgs):
+            msgs.append(rt.recv(timeout=max(0.1, deadline - time.time())))
+        assert not any(m.get("id") == 1 for m in msgs), (
+            "a second terminal arrived for the cancelled call"
+        )
+        rt.send(call(4, "chat_runs", task=4))
+        runs = rt.recv_until(lambda m: m.get("id") == 4)
+        assert runs["result"] == 0, "the cancelled call still ran chat"
 
 
 def test_isolated_requires_wait_holds_share_without_spawning(tmp_path):

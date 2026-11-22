@@ -13,6 +13,7 @@ from pylair import expose, loading, on_startup, ready
 _async_gate: asyncio.Event | None = None
 _sync_gate = threading.Event()
 _records: dict[str, object] = {}
+_runs: dict[str, int] = {"chat": 0}
 
 
 @on_startup
@@ -57,7 +58,16 @@ def hook_records() -> dict:
 
 @expose(requires=("model", "index"))
 def chat(prompt: str) -> str:
+    _runs["chat"] += 1
     return f"answered:{prompt}"
+
+
+@expose
+def chat_runs() -> int:
+    """Side-effect witness: proves a cancelled gated call's body never
+    ran — `_finish` dedupes the late result frame, so only the counter
+    is honest."""
+    return _runs["chat"]
 
 
 @expose(requires="model")

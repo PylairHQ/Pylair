@@ -76,6 +76,15 @@ class _Component:
         self.reported = False
 
 
+def _resolve_waiter(f: asyncio.Future[None]) -> None:
+    """Resolve a wait_ready() future unless it finished in the
+    meantime — set_result on an already-done future raises
+    InvalidStateError (the waiter may have been cancelled between
+    _notify_waiters' done() check and this callback running)."""
+    if not f.done():
+        f.set_result(None)
+
+
 class Readiness:
     """The component-state registry + coalescing flusher.
 
@@ -306,7 +315,7 @@ class Readiness:
         for f in waiters:
             if not f.done():
                 try:
-                    f.get_loop().call_soon_threadsafe(f.set_result, None)
+                    f.get_loop().call_soon_threadsafe(_resolve_waiter, f)
                 except RuntimeError:
                     pass  # the waiter's loop already closed
 

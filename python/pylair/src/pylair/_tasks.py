@@ -203,6 +203,7 @@ class TaskRegistry:
                     task.call_id, proto.TASK_CANCELLED, "task cancelled"
                 ),
             )
+            return
         except _readiness.GateError as e:
             self._finish(
                 task,
