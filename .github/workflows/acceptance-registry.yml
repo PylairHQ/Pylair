@@ -32,7 +32,7 @@ on:
         options: [pack, registry]
         default: pack
       expect_version:
-        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.26)"
+        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.27)"
         type: string
         required: false
         default: ""

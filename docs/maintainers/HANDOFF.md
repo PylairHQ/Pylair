@@ -138,21 +138,18 @@ by `PYLAIR_WARM_EXPECTED` only when the resolved pylair is
 `0.1.0rc13` or later. npm needs `0.1.0-rc.27` (the selftest client
 changed).
 
-This pins commit moves the crate manifest to `0.1.0-rc.21` (workspace
-`Cargo.lock` and the reference app's `src-tauri/Cargo.lock` version
-lines with it) and `pylair` to `0.1.0-rc.13` (`pyproject.toml` +
-both `uv.lock` entries); `pylair-ollama` stays `0.1.0-rc.3`. Scaffold
-pins and npm versions are deliberately unchanged here — they move in
-the pins PR after both registries publish. Remaining order:
+The crate `0.1.0-rc.21` is published on crates.io and `pylair
+0.1.0rc13` on PyPI; `pylair-ollama` stays `0.1.0-rc.3`. This pins
+commit moves the npm trio to `0.1.0-rc.27`, the scaffold pins to
+`rs =0.1.0-rc.21` / `py pylair==0.1.0rc13`, and regenerates both
+template `Cargo.lock` files against the published crate (checksum
+`8b949ad3…f585`). Remaining order:
 
-1. crate `0.1.0-rc.21` publish on crates.io, then `pylair 0.1.0rc13`
-   on PyPI (release.yml `package=pylair`);
-2. pins PR: npm trio `0.1.0-rc.27`, scaffold pins `rs =0.1.0-rc.21` /
-   `py pylair==0.1.0rc13`, template `Cargo.lock` regenerated against
-   the published crate;
-3. pack-mode acceptance green on the pins commit, then the npm trio
-   under `--tag next`;
-4. registry acceptance with `source=registry` and
+1. pack-mode acceptance green on this commit — expected-red until the
+   npm publish lands is NOT in play here (scaffolded pins resolve
+   crate rc.21 + pylair rc13, both live), so legs should be green;
+2. the npm trio under `--tag next`;
+3. registry acceptance with `source=registry` and
    `expect_version 0.1.0-rc.27` — the first run where
    `PYLAIR_WARM_EXPECTED` arms (resolved pylair 0.1.0rc13), so a
    `warm-workers` skip fails the leg on every OS.
