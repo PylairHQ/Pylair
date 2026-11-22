@@ -242,7 +242,9 @@ class Readiness:
         'never reported by a startup hook'; a reported-but-unfinished
         component gets the incomplete-hook detail. Managed components
         (0008 §6 worker:<fn>) are skipped — the runtime keeps reporting
-        on them past startup."""
+        on them past startup. A `worker:`-prefixed name that reaches
+        the sweep unmanaged means a requires= gate on a function that
+        is not prewarmed — the detail says so."""
         with self._lock:
             changed = False
             for name, c in self._components.items():
@@ -250,11 +252,17 @@ class Readiness:
                     continue
                 c.phase = "failed"
                 c.progress = None
-                c.detail = (
-                    "startup hook finished without reporting ready"
-                    if c.reported
-                    else "never reported by a startup hook"
-                )
+                if name.startswith("worker:"):
+                    c.detail = (
+                        f"worker:{name[7:]} exists only for a function exposed "
+                        "with prewarm=True (0008 §6)"
+                    )
+                else:
+                    c.detail = (
+                        "startup hook finished without reporting ready"
+                        if c.reported
+                        else "never reported by a startup hook"
+                    )
                 self._dirty.add(name)
                 changed = True
         if changed:

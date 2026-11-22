@@ -394,6 +394,26 @@ def test_sweep_leaves_terminal_components():
     assert comps["b"].detail == "bad"  # sweep must not overwrite detail
 
 
+def test_sweep_points_worker_prefixed_gates_at_prewarm():
+    """0008 §6 follow-up: requires=("worker:<fn>",) on a function that
+    is not prewarmed fails at the sweep with a detail that names the
+    fix — the component only exists for prewarm=True functions."""
+    _readiness.declare("worker:embed")
+    _readiness._default.sweep()
+    c = _readiness._default._components["worker:embed"]
+    assert c.phase == "failed"
+    assert "prewarm=True" in c.detail
+
+
+def test_sweep_skips_managed_components():
+    """Managed components (worker:<fn> for prewarmed fns) outlive
+    startup — the sweep must not fail a still-spawning pool."""
+    _readiness.declare("worker:embed", managed=True)
+    _readiness._default.sweep()
+    c = _readiness._default._components["worker:embed"]
+    assert c.phase == "loading"
+
+
 def test_run_startup_with_zero_hooks_sweeps_immediately():
     _readiness.declare("ghost")
 
