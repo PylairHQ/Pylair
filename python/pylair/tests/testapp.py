@@ -275,10 +275,11 @@ def warm_immune_fastgrace(seconds: float, pidfile: str | None = None) -> str:
 
 
 @expose(worker={"mode": "warm"})
-def warm_break_witness(witness: str, seconds: float) -> str:
+def warm_break_witness(witness: str, seconds: float, started: str | None = None) -> str:
     """Installs its own interrupt handler that writes `witness` before
     raising KeyboardInterrupt — a delivered-signal proof: the file can
-    only exist if the interrupt actually reached this worker."""
+    only exist if the interrupt actually reached this worker. `started`
+    is a running-gate marker the test polls before cancelling."""
     import signal as _signal
 
     def _on_interrupt(_signum, _frame) -> None:
@@ -290,6 +291,23 @@ def warm_break_witness(witness: str, seconds: float) -> str:
         _signal.signal(_signal.SIGBREAK, _on_interrupt)
     else:
         _signal.signal(_signal.SIGINT, _on_interrupt)
+    if started:
+        with open(started, "w") as f:
+            f.write("running")
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(worker={"mode": "warm"})
+def warm_gated_start(gate: str, pidfile: str | None = None, seconds: float = 0) -> str:
+    """Poll `gate` before doing the real work — the call sits inside the
+    raise window doing nothing until the test releases it."""
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    deadline = time.time() + 120
+    while not os.path.exists(gate):
+        assert time.time() < deadline, "gate never released"
+        time.sleep(0.05)
     time.sleep(seconds)
     return "slept"
 

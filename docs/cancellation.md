@@ -71,15 +71,21 @@ at `@expose` time, not at cancel time.
 > (decision 0008 §2): the worker gets SIGINT on its own process group,
 > which raises `KeyboardInterrupt` only while the user function runs —
 > outside that window the signal is recorded and ignored, and a
-> response already writing always completes. If the call answers
+> response already writing always completes. The worker announces the
+> window with a `{"started": true}` frame sent just before invoking the
+> function, and the runtime interrupts only after it arrives — waiting
+> inside the same grace budget if it has not (a signal sent earlier
+> would be ignored and the call would run on). If the call answers
 > within `cancel_grace_ms` (default 3000, kept inside the host's 5 s
 > `cancel_timeout`) the member *survives*: plain `cancelled: true`
 > ack and the same worker serves the next call. Silence past the
 > grace means the call is stuck (native-blocked or signal-ignoring):
 > the existing kill path runs (`terminated` ack) and the pool
 > respawns lazily. **Windows is kill-only** — `CTRL_BREAK_EVENT`
-> requires a shared console that embedded workers do not have, so a
-> running warm cancel terminates the member exactly like process mode.
+> requires a shared console that embedded workers do not have
+> (`GenerateConsoleCtrlEvent` reports success but delivers nothing),
+> so a running warm cancel terminates the member exactly like process
+> mode.
 > A call cancelled while queued is dropped and never runs (plain
 > `cancelled: true` either way). `pool` members count as live
 > workers against `max_isolated_workers` for their whole lifetime.

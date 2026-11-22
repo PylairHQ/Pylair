@@ -98,13 +98,14 @@ existing kill+reap.
   reaches exactly that process. CPython maps CTRL_BREAK to `SIGBREAK`
   — default disposition is **terminate**, so the worker must install
   `signal.signal(signal.SIGBREAK, <raise KeyboardInterrupt>)` early in
-  `main()`. One open point to prove in the test plan: the signal only
-  travels to processes sharing the caller's console; the runtime is
-  console-subsystem `python.exe` (it allocates a console under a GUI
-  parent), and the worker shares it as long as no `CREATE_NEW_CONSOLE`/
-  `DETACHED_PROCESS` flag appears. If that assumption fails on a
-  supported configuration, Windows falls back to kill-only — the
-  documented answer, not a hidden gap.
+  `main()`. **Resolved (PR 2): kill-only.** The probe failed as
+  predicted for the embedded case — `GenerateConsoleCtrlEvent` only
+  reaches groups attached to a console, the Tauri-spawned runtime has
+  none, and `os.kill(pid, CTRL_BREAK_EVENT)` *reports success while
+  delivering nothing* to a console-less worker. The flags and the
+  SIGBREAK handler stay (a console-attached embedding would deliver
+  correctly), but Windows cancels take the kill path directly —
+  documented in `cancellation.md`, not a hidden gap.
 
 **Interrupted vs. stuck** needs no worker cooperation: the verdict is
 parent-side. After the interrupt is sent, the runtime waits
@@ -131,6 +132,22 @@ unchanged: a response for the cancelled call id — normal result, app
 error, or interrupt report — means *survived*, whether or not the
 interrupt actually landed inside the window; silence past
 `cancel_grace_ms` means *stuck*.
+
+**The pre-start race needs a handshake, not just the window.** The
+raise window alone leaves a hole: a cancel that lands while the member
+is still spawning, importing the app module, or has only just read the
+request sends a signal the worker correctly ignores — the call then
+runs normally, nothing stops it, and the grace expires and kills a
+healthy member for nothing (seen on the first CI legs of the PR 2
+branch). So the private protocol gains one small frame: the worker
+writes `{"started": true}` immediately before the raise window opens.
+The runtime interrupts only once `started` has arrived; if it has not
+arrived yet it waits for it inside the same `cancel_grace_ms` budget,
+then interrupts; if the budget runs out first — e.g. a slow
+first-call import — it takes the kill path exactly like the stuck
+case. The budget is therefore: started-wait + interrupt-wait <=
+`cancel_grace_ms`, then kill+reap inside the shared
+`ISOLATED_GRACE_S + 1.0` bound.
 
 **Ack values must not change** (`wire.rs:99-101`, `cancellation.md:
 88-96`): interrupt-survived reports plain `{"cancelled": true}` — the

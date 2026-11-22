@@ -69,9 +69,12 @@ class Task:
     # Interrupt-first cancel (0008 §2): pending = the interrupt was sent
     # and the response is awaited; survived = the member answered inside
     # the grace window (the reporter maps it to the plain cancelled ack).
+    # `warm_started` is set when the worker's "started" frame lands —
+    # the raise window is open and an interrupt is worth sending.
     warm_cancel_pending: bool = False
     warm_survived: bool = False
     warm_grace_s: float = 3.0
+    warm_started: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _WarmMember:
@@ -528,10 +531,20 @@ class TaskRegistry:
             body = _json.dumps({"op": "call", "input": input}).encode()
             member.proc.stdin.write(_LEN.pack(len(body)) + body)
             await member.proc.stdin.drain()
-            payload = await self._warm_response(member.proc)
-            if payload is None or not any(
-                k in payload for k in ("result", "error", "interrupted")
-            ):
+            # Frames until the terminal: {"started": true} marks the
+            # raise window open on the worker — a pending interrupt is
+            # now worth sending (0008 §2). Anything else that is not a
+            # terminal payload is a broken channel.
+            payload: dict | None = None
+            while True:
+                payload = await self._warm_response(member.proc)
+                if payload is None:
+                    raise _WarmWorkerDead
+                if payload.get("started") is True:
+                    task.warm_started.set()
+                    continue
+                break
+            if not any(k in payload for k in ("result", "error", "interrupted")):
                 raise _WarmWorkerDead
             # A framed response — any shape — proves the member healthy.
             pool.deaths = 0
@@ -994,8 +1007,6 @@ class TaskRegistry:
                 task.kind == "isolated"
                 and task.warm
                 and not task.warm_queued
-                and task.worker is not None
-                and task.worker.returncode is None
                 # Interrupt-first is POSIX-only (0008 §2 fallback):
                 # CTRL_BREAK reaches a console-attached target group,
                 # but the embedded runtime spawns workers console-less —
@@ -1005,15 +1016,17 @@ class TaskRegistry:
                 # go straight to the kill path below.
                 and sys.platform != "win32"
             ):
-                # Running warm call — interrupt first (0008 §2): the
-                # worker's raise window turns the signal into a
-                # KeyboardInterrupt inside the user fn. The task
-                # coroutine is NOT cancelled — it must keep waiting on
-                # the response frame so a survived member can answer.
-                # The reporter watches the grace window and falls back
-                # to the kill path on silence.
+                # Running warm call — interrupt first (0008 §2). The
+                # task coroutine is NOT cancelled — it must keep waiting
+                # on the response frame so a survived member can answer.
+                # The reporter waits for the worker's "started" frame
+                # inside the grace (the signal is only useful once the
+                # raise window is open), interrupts, then classifies —
+                # falling back to the kill path on silence. It also owns
+                # the worker-None window: a cancel that lands mid-spawn
+                # or mid-import gets the same started-wait instead of an
+                # interrupt that would arrive before the window exists.
                 task.warm_cancel_pending = True
-                self._interrupt_warm(task)
                 asyncio.create_task(self._ensure_terminal(task))
                 if call_id is not None:
                     asyncio.create_task(self._report_warm_cancel(task, call_id))
@@ -1065,19 +1078,43 @@ class TaskRegistry:
         self._send(proto.response(call_id, result))
 
     async def _report_warm_cancel(self, task: Task, call_id: int | str) -> None:
-        """Interrupt-first verdict (0008 §2): within cancel_grace_ms a
-        response frame means the member survived — plain `cancelled`,
-        the work confirmed stopped. Silence means stuck — the existing
-        kill path runs and reports `terminated` exactly like process
-        mode. Interrupt wait + kill share one budget
-        (ISOLATED_GRACE_S + 1.0) so the ack stays inside the host's
-        5 s cancel_timeout either way."""
+        """Interrupt-first verdict (0008 §2). The signal is only useful
+        inside the worker's raise window, so first wait for its
+        "started" frame — inside the same cancel_grace_ms budget — then
+        interrupt and wait for the response. A response inside the
+        grace means survived: plain `cancelled`, the work confirmed
+        stopped and the member returns to the pool. Silence means
+        stuck: the existing kill path runs and reports `terminated`
+        exactly like process mode. Started-wait, interrupt wait and the
+        kill share one budget (ISOLATED_GRACE_S + 1.0) so the ack stays
+        inside the host's 5 s cancel_timeout either way."""
         deadline = time.monotonic() + ISOLATED_GRACE_S + 1.0
+
+        def budget() -> float:
+            return max(0.0, min(task.warm_grace_s, deadline - time.monotonic()))
+
         try:
-            await asyncio.wait_for(
-                asyncio.shield(task.asyncio_task),
-                timeout=min(task.warm_grace_s, deadline - time.monotonic()),
-            )
+            if not task.warm_started.is_set() and not task.asyncio_task.done():
+                # Wait for "started" OR the task itself ending (a fast
+                # call's response, or a dead member's EOF) — whichever
+                # first, bounded by the grace.
+                started_wait = asyncio.ensure_future(task.warm_started.wait())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {started_wait, task.asyncio_task},
+                        timeout=budget(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    started_wait.cancel()
+                if not done:
+                    raise TimeoutError  # never started inside the grace
+            if not task.asyncio_task.done():
+                # Started -> the raise window is open, or the call just
+                # finished and its frame is in flight — either way the
+                # interrupt is safe to send.
+                self._interrupt_warm(task)
+            await asyncio.wait_for(asyncio.shield(task.asyncio_task), timeout=budget())
             result = (
                 {"cancelled": True}
                 if task.warm_survived

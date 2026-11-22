@@ -127,6 +127,10 @@ def _exit_with_parent() -> None:
 _raise_active = False
 _interrupt_seen = 0
 _interrupt_installed = False
+# Tell the parent the raise window is about to open (0008 §2): the
+# cancel path interrupts only after this frame lands, so a signal can
+# never be wasted on a worker that has not reached the user function.
+_STARTED = b'{"started": true}'
 
 
 def _install_interrupt() -> None:
@@ -171,12 +175,18 @@ def _exception_payload(e: BaseException) -> dict:
 
 
 def _invoke(
-    entry: ExposedFn | None, fn_name: str, module_name: str, input: dict
+    entry: ExposedFn | None,
+    fn_name: str,
+    module_name: str,
+    input: dict,
+    on_start=None,
 ) -> dict:
     """Run one call against the resolved registry entry; build its payload.
 
     Shared by one-shot and serve mode — every boundary error is a payload,
     never a worker exit (a nonzero exit reads as WORKER_DIED upstream).
+    `on_start` fires once, right before the raise window opens — serve
+    mode uses it for the "started" frame.
     """
     global _raise_active
     try:
@@ -189,6 +199,8 @@ def _invoke(
                 }
             }
         fn = entry.fn
+        if on_start is not None:
+            on_start()
         _raise_active = True
         try:
             result = fn(**_json.coerce_kwargs(fn, input))
@@ -263,7 +275,13 @@ def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
         payload = (
             import_error
             if import_error is not None
-            else _invoke(entry, fn_name, module_name, msg.get("input") or {})
+            else _invoke(
+                entry,
+                fn_name,
+                module_name,
+                msg.get("input") or {},
+                on_start=lambda: chan.write_frame(_STARTED),
+            )
         )
         chan.write_frame(_json.dumps(payload).encode())
 

@@ -42,12 +42,17 @@ def cancel(rid: int, task: int) -> dict:
     return proto.request(rid, "cancel", {"task": task})
 
 
-def _wait_pidfile(path, timeout: float = 15.0) -> int:
-    """Poll for the worker's pidfile — never a fixed sleep."""
+def _wait_file(path, timeout: float = 15.0) -> None:
+    """Poll for a marker file — never a fixed sleep."""
     deadline = time.time() + timeout
     while not path.exists():
-        assert time.time() < deadline, f"pidfile {path} never appeared"
+        assert time.time() < deadline, f"marker {path} never appeared"
         time.sleep(0.05)
+
+
+def _wait_pidfile(path, timeout: float = 15.0) -> int:
+    """Poll for the worker's pidfile — never a fixed sleep."""
+    _wait_file(path, timeout)
     return int(path.read_text().strip())
 
 
@@ -242,38 +247,49 @@ def test_warm_wake_is_not_stolen_by_a_fresh_call(runtime):
 
 
 def test_warm_cancel_kills_and_respawns(runtime, tmp_path):
-    """Running-call cancel = today's kill path: terminated ack, dead pid,
-    lazy respawn on the next call. Pools are per-function, so every
-    witness is the same fn's member."""
+    """The stuck-call cancel takes the kill path: terminated ack, dead
+    pid, lazy respawn on the next call. The member must be genuinely
+    uninterruptible — a plain sleep now survives the interrupt-first
+    cancel on POSIX, so the target is the signal-immune fixture
+    (150 ms grace keeps the test fast). Pools are per-function, so
+    every witness is the same fn's member."""
     runtime.recv()
     p1 = tmp_path / "a.pid"
     runtime.send(
-        call(1, "warm_sleep", task=1, input={"seconds": 0, "pidfile": str(p1)})
+        call(
+            1,
+            "warm_immune_fastgrace",
+            task=1,
+            input={"seconds": 0, "pidfile": str(p1)},
+        )
     )
     runtime.recv()
     pid_a = _wait_pidfile(p1)
 
     p2 = tmp_path / "b.pid"
     runtime.send(
-        call(2, "warm_sleep", task=2, input={"seconds": 60, "pidfile": str(p2)})
+        call(
+            2,
+            "warm_immune_fastgrace",
+            task=2,
+            input={"seconds": 60, "pidfile": str(p2)},
+        )
     )
     assert _wait_pidfile(p2) == pid_a, "second call reached a new process"
     runtime.send(cancel(9, 2))
-    ack = terminal = None
-    deadline = time.time() + 15
-    while ack is None or terminal is None:
-        m = runtime.recv(timeout=max(0.1, deadline - time.time()))
-        if m.get("id") == 9:
-            ack = m
-        elif m.get("id") == 2:
-            terminal = m
-    assert ack["result"] == {"cancelled": True, "status": "terminated"}
-    assert terminal["error"]["code"] == proto.TASK_CANCELLED
+    msgs = _collect(runtime, {2, 9})
+    assert msgs[9]["result"] == {"cancelled": True, "status": "terminated"}
+    assert msgs[2]["error"]["code"] == proto.TASK_CANCELLED
     _pid_dead(pid_a)
 
     p3 = tmp_path / "c.pid"
     runtime.send(
-        call(3, "warm_sleep", task=3, input={"seconds": 0, "pidfile": str(p3)})
+        call(
+            3,
+            "warm_immune_fastgrace",
+            task=3,
+            input={"seconds": 0, "pidfile": str(p3)},
+        )
     )
     assert runtime.recv()["result"] == "slept"
     assert _wait_pidfile(p3) != pid_a, "cancel-killed worker was reused"
@@ -565,14 +581,23 @@ def test_warm_interrupt_reaches_worker_witness(runtime, tmp_path):
     kill path: terminated ack, no witness, a new pid next call."""
     runtime.recv()
     witness = tmp_path / "break.witness"
+    started = tmp_path / "started"
     runtime.send(
         call(
             1,
             "warm_break_witness",
             task=1,
-            input={"witness": str(witness), "seconds": 60},
+            input={
+                "witness": str(witness),
+                "started": str(started),
+                "seconds": 60,
+            },
         )
     )
+    # Running-gate: the marker can only exist once the fn is executing,
+    # so the cancel provably lands on a live, started call — never a
+    # pre-registration "pending" ack.
+    _wait_file(started)
     runtime.send(cancel(9, 1))
     msgs = _collect(runtime, {1, 9})
     ack = msgs[9]
@@ -656,6 +681,53 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
     assert runtime.recv()["result"]["pid"] == pid, (
         "interrupt at completion broke the member"
     )
+
+
+def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
+    """The started-handshake path (0008 §2): a cancel landing while the
+    call is anywhere short of real work — spawning, importing, or gated
+    at fn top — waits for the worker's "started" frame inside the same
+    grace, then interrupts. Without it, a signal arriving before the
+    raise window opens would be ignored and the grace would kill a
+    healthy member for nothing. Windows is kill-only as documented."""
+    runtime.recv()
+    gate = tmp_path / "gate"
+    p1, p2 = tmp_path / "a.pid", tmp_path / "b.pid"
+    runtime.send(
+        call(
+            1,
+            "warm_gated_start",
+            task=1,
+            input={"gate": str(gate), "pidfile": str(p1), "seconds": 60},
+        )
+    )
+    # Order gate: proves task 1 registered and dispatched before the
+    # cancel — never a pre-registration "pending".
+    runtime.send(call(99, "add", task=99, input={"a": 1, "b": 1}))
+    runtime.recv_until(lambda m: m.get("id") == 99)
+    runtime.send(cancel(9, 1))
+    msgs = _collect(runtime, {1, 9})
+    assert msgs[1]["error"]["code"] == proto.TASK_CANCELLED
+    gate.write_text("go")  # let a surviving member finish future calls
+    runtime.send(
+        call(
+            2,
+            "warm_gated_start",
+            task=2,
+            input={"gate": str(gate), "pidfile": str(p2)},
+        )
+    )
+    assert runtime.recv()["result"] == "slept"
+    if sys.platform == "win32":
+        assert msgs[9]["result"] == {"cancelled": True, "status": "terminated"}
+        pid2 = _wait_pidfile(p2)
+        if p1.exists():
+            assert pid2 != int(p1.read_text().strip()), "killed member was reused"
+    else:
+        assert msgs[9]["result"] == {"cancelled": True}
+        # The fn entered and wrote its pidfile before gate-polling —
+        # the same member must serve the next call.
+        assert _wait_pidfile(p2) == _wait_pidfile(p1), "survived member was not reused"
 
 
 def test_warm_worker_died_includes_stderr_tail(runtime):
