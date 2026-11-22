@@ -382,20 +382,43 @@ def test_file_lock_released_on_holder_death(server, tmp_path):
 
 def test_sidecar_fast_path_no_rehash(server, tmp_path, monkeypatch):
     """File + matching sidecar -> ready with one stat, no hashing —
-    the multi-GB launch path must not re-hash on every start."""
+    the multi-GB launch path must not re-hash on every start. A stale
+    mtime (copy, backup restore) is NOT path()'s job: it refuses with
+    zero file reads, and fetch/autostart do the one verify+repair."""
     body = os.urandom(150_000)
     url = server.add("/f", File(body))
     p = models.fetch("m1", url=url, sha256=_sha(body), size=len(body))
     calls = []
     orig = models._hash_file
-    monkeypatch.setattr(models, "_hash_file", lambda f: (calls.append(f), orig(f))[1])
+    spy = lambda f: (calls.append(f), orig(f))[1]
+    monkeypatch.setattr(models, "_hash_file", spy)
     assert models.path("m1") == p
     assert calls == []
-    # A changed mtime costs exactly one verification hash.
+    # Stale mtime: path() is strict-check only — ModelNotReady without
+    # a single byte read (multi-GB hashing would sit inside an
+    # arbitrary call, e.g. the first call into a warm worker).
     st = p.stat()
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    monkeypatch.setattr(
+        models,
+        "_hash_file",
+        lambda f: pytest.fail(f"path() must not read {f}"),
+    )
+    with pytest.raises(models.ModelNotReady):
+        models.path("m1")
+    # The next fetch (also what the launch autostart runs) does exactly
+    # one verify hash, repairs the sidecar, and does not re-download.
+    monkeypatch.setattr(models, "_hash_file", spy)
+    assert models.fetch("m1", url=url, sha256=_sha(body), size=len(body)) == p
+    assert calls == [p]
+    assert server.hits("/f") == 1
+    monkeypatch.setattr(
+        models,
+        "_hash_file",
+        lambda f: pytest.fail("verified file must not be re-read"),
+    )
     assert models.path("m1") == p
-    assert len(calls) == 1
+    assert p.read_bytes() == body
 
 
 def test_path_raises_for_unverified(server, tmp_path):

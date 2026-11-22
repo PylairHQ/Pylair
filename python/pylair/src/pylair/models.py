@@ -200,34 +200,54 @@ def _write_sidecar(model_dir: Path, spec: _Spec, final: Path, headers) -> None:
         "url": spec.url,
     }
     try:
-        (model_dir / f"{spec.name}.json").write_text(json.dumps(rec))
+        # tmp + os.replace — a concurrent path() must never read a
+        # half-written record (the model file gets the same treatment).
+        tmp = model_dir / f"{spec.name}.json.tmp"
+        tmp.write_text(json.dumps(rec))
+        os.replace(tmp, model_dir / f"{spec.name}.json")
     except OSError as e:
         # The file itself is verified this run — a missing sidecar only
         # costs one re-hash next launch. Log, never fatal.
         _log(f"models: could not write verified record for {spec.name!r}: {e}")
 
 
-def _verified(model_dir: Path, spec: _Spec | None, name: str) -> Path | None:
-    """The cheap ready check: file + sidecar, size and mtime matching —
-    one stat, no re-hash. A changed mtime costs one verify against the
-    expected sha (the spec's when registered, else the sidecar's own)."""
+def _sidecar_match(model_dir: Path, spec: _Spec | None, name: str) -> Path | None:
+    """The strict ready check: file plus a sidecar whose sha256 (the
+    spec's when registered, else the record's own), size and mtime_ns
+    all match the live stat — one stat, zero file reads. This is all
+    path() does: a multi-GB re-hash belongs in the download path, never
+    inside an arbitrary caller's (or warm worker's) call."""
     final = model_dir / name
     if not final.is_file():
         return None
     st = final.stat()
     rec = _sidecar(model_dir, name)
     want_sha = spec.sha256 if spec else (rec or {}).get("sha256")
-    if not want_sha:
-        return None
     if (
         rec
+        and want_sha
         and rec.get("sha256") == want_sha
         and rec.get("size") == st.st_size
         and rec.get("mtime_ns") == st.st_mtime_ns
     ):
         return final
-    # Unknown or changed state: re-hash once, then repair the sidecar.
-    if _hash_file(final) != want_sha:
+    return None
+
+
+def _verified(model_dir: Path, spec: _Spec | None, name: str) -> Path | None:
+    """The download-path ready check: strict sidecar match, else one
+    re-hash against the expected sha and a sidecar repair. Fetch and
+    the autostart run this on every launch, so a stale mtime (copy,
+    backup restore) self-heals there rather than inside path()."""
+    p = _sidecar_match(model_dir, spec, name)
+    if p is not None:
+        return p
+    final = model_dir / name
+    if not final.is_file():
+        return None
+    rec = _sidecar(model_dir, name)
+    want_sha = spec.sha256 if spec else (rec or {}).get("sha256")
+    if not want_sha or _hash_file(final) != want_sha:
         return None
     if spec is not None:
         _write_sidecar(model_dir, spec, final, rec)
@@ -656,7 +676,7 @@ def path(name: str) -> Path:
     name = _check_name(name)
     model_dir = _data_dir()
     spec = _registry.get(name)
-    p = _verified(model_dir, spec, name)
+    p = _sidecar_match(model_dir, spec, name)
     if p is None:
         raise ModelNotReady(f"model {name!r} is not downloaded and verified")
     _readiness.ready(name)
