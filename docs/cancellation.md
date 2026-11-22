@@ -41,10 +41,14 @@ at `@expose` time, not at cancel time.
 
 ### Isolated sync functions (`isolated=True`)
 
-- Each call runs in a dedicated worker subprocess (spawned per call).
+- Each call runs in a dedicated worker subprocess (spawned per call),
+  or — with `worker={"mode": "warm"}` — on a long-lived pool member
+  that serves one call at a time (see the warm-worker note below).
 - Cancel → `terminate()` (SIGTERM/SIGKILL-equivalent), 3s grace →
   `kill()`. Wire result: `TASK_CANCELLED` (or `WORKER_DIED` if the worker
-  already died on its own).
+  already died on its own). A queued warm call cancelled before it
+  reached a member is dropped instead — nothing was ever running to
+  terminate, so the ack is plain `cancelled: true`.
 - **Guarantee:** the worker *will* die — the supervisor owns its process
   handle and kills the whole process group (POSIX) / job object
   (Windows), so children the function spawned die too (no leaked
@@ -59,15 +63,19 @@ at `@expose` time, not at cancel time.
 > A per-call worker re-imports its modules and rebuilds its world *on
 > every call*. With torch-class imports that is seconds per call, and
 > for anything holding a loaded model it makes `isolated=True`
-> effectively unusable. The intended fix is a **warm worker**: a
-> persistent, lazily-spawned subprocess that keeps its imports/model
-> resident and is only *killed* (not per-call spawned) on cancel, then
-> lazily re-initialized on the next call. To keep that addition
-> non-breaking, `@expose` reserves a `worker` option now:
-> `@expose(worker={...})` — v1 accepts only `{mode: "process"}` (the
-> per-call default implied by `isolated=True`); `mode: "warm"` lands
-> when warm workers do. On the wire, `exposes[].kind` reports
-> `"isolated"` either way; worker config rides inside `signature.meta`.
+> effectively unusable. The fix is a **warm worker** (decision 0008):
+> `@expose(worker={"mode": "warm", "pool": N})` runs calls on a
+> persistent, lazily-spawned per-function pool that keeps its
+> imports/model resident — `pool` sizes the pool (default 1), `N >= 1`.
+> A warm call cancelled while running is *killed* exactly like a
+> process-mode worker (`terminated` ack, same SIGTERM→SIGKILL /
+> taskkill path) and the pool respawns lazily; a call cancelled while
+> queued is dropped and never runs. `pool` members count as live
+> workers against `max_isolated_workers` for their whole lifetime.
+> `prewarm`, `cancel_grace_ms` and `idle_ttl_s` are reserved and
+> rejected at decoration until they land. On the wire,
+> `exposes[].kind` reports `"isolated"` either way; worker config
+> rides inside `signature.meta`.
 
 ### Inline sync functions (non-isolated)
 

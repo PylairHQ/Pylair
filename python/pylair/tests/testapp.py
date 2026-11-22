@@ -196,6 +196,54 @@ def sigterm_immune(ready_file: str) -> str:
     return "never"
 
 
+# ---- warm workers (decision 0008) ------------------------------------------
+# Each fixture runs in the function's own pool; `warm_pid` is the identity
+# witness (same pid = same process = warm), the rest drive one behavior.
+
+
+@expose(worker={"mode": "warm"})
+def warm_pid() -> int:
+    return os.getpid()
+
+
+@expose(worker={"mode": "warm"})
+def warm_sleep(seconds: float, pidfile: str | None = None) -> str:
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    time.sleep(seconds)
+    return "slept"
+
+
+@expose(worker={"mode": "warm"})
+def warm_maybe_crash(crash: bool = True) -> int:
+    """Hard-die on demand — WORKER_DIED and crash-loop proofs. With
+    crash=False it doubles as the success that resets the death count."""
+    if crash:
+        os._exit(3)
+    return os.getpid()
+
+
+_WARM_MARKS: list[str] = []
+
+
+@expose(worker={"mode": "warm"})
+def warm_mark(tag: str, delay: float = 0.0) -> list:
+    """Append to a module global — a later call sees it, which proves both
+    state persistence (same process) and FIFO order inside the pool."""
+    if delay:
+        time.sleep(delay)
+    _WARM_MARKS.append(tag)
+    return list(_WARM_MARKS)
+
+
+@expose(worker={"mode": "warm", "pool": 2})
+def warm2_sleep(seconds: float, pidfile: str | None = None) -> str:
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    time.sleep(seconds)
+    return "slept"
+
+
 @expose
 def move(p: Point, dx: float = 0.0) -> Point:
     """Translate a point; dataclass in, dataclass out."""

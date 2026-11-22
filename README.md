@@ -124,7 +124,9 @@ crate at `0.1.0-rc.20`). Check each registry for its latest RC.
   has no parent-death signal; Linux `PR_SET_PDEATHSIG` and Windows Job
   Objects cover that case.
 - **`isolated=True` respawns a worker per call.** Fine for short calls;
-  a warm persistent worker is reserved in the API but not implemented.
+  `worker={"mode": "warm", "pool": N}` keeps a persistent per-function
+  pool instead — cancel is still kill-only (cooperative interrupt and
+  prewarm are not implemented yet; see docs/cancellation.md).
 - **Worker kill covers the worker's process group.** A descendant that
   deliberately detaches (`setsid`, a new process group) escapes it.
 - **Ints beyond ±2^53 can't cross the bridge.** Return large integers as

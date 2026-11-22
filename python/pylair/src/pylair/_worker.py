@@ -1,9 +1,15 @@
-"""Isolated-worker entry point: `python -m pylair._worker <module> <fn>`.
+"""Isolated-worker entry point: `python -m pylair._worker [--serve] <module> <fn>`.
 
-Internal protocol (not the wire protocol): reads the call input as one JSON
-document on stdin, runs the named @expose'd function from the given user
-module, writes {"result": ...} or {"error": ...} as one JSON document on a
-PRIVATE dup of stdout, exits 0. Non-zero exit = WORKER_DIED to the parent.
+Internal protocol (not the wire protocol). One-shot mode (default): reads
+the call input as one JSON document on stdin, runs the named @expose'd
+function from the given user module, writes {"result": ...} or {"error":
+...} as one JSON document on a PRIVATE dup of stdout, exits 0. Non-zero
+exit = WORKER_DIED to the parent.
+
+Serve mode (`--serve`, warm workers, decision 0008): imports the module
+once, then serves length-prefixed request frames one at a time over the
+same private channel — {"op": "call", "input": {...}} -> one framed
+{"result"|"error"} body each — until stdin EOF or {"op": "shutdown"}.
 
 The result channel gets the same stdout hygiene as the runtime's frame
 channel (protocol §1): fd 1 is redirected to stderr before user code runs,
@@ -22,7 +28,7 @@ import traceback
 
 from pylair import _json, _transport
 from pylair import _protocol as proto
-from pylair._expose import exposed_functions
+from pylair._expose import ExposedFn, exposed_functions
 
 
 def _exit_with_parent() -> None:
@@ -105,12 +111,114 @@ def _exit_with_parent() -> None:
     threading.Thread(target=watch, daemon=True, name="pylair-parent-watch").start()
 
 
+def _exception_payload(e: BaseException) -> dict:
+    """The generic error body for failures outside a mapped type."""
+    return {
+        "error": {
+            "message": f"{type(e).__name__}: {e}",
+            "data": {
+                "type": type(e).__name__,
+                "traceback": traceback.format_exc(limit=20),
+            },
+        }
+    }
+
+
+def _invoke(
+    entry: ExposedFn | None, fn_name: str, module_name: str, input: dict
+) -> dict:
+    """Run one call against the resolved registry entry; build its payload.
+
+    Shared by one-shot and serve mode — every boundary error is a payload,
+    never a worker exit (a nonzero exit reads as WORKER_DIED upstream).
+    """
+    try:
+        if entry is None:
+            return {
+                "error": {
+                    "code": proto.FUNCTION_NOT_FOUND,
+                    "message": f"{fn_name!r} is not @expose'd in {module_name}",
+                    "data": {"type": "NotExposed"},
+                }
+            }
+        fn = entry.fn
+        result = fn(**_json.coerce_kwargs(fn, input))
+        try:
+            _json.check_wire(result, _transport.MAX_DEPTH - 2)
+        except _json.DepthExceeded:
+            # A result deeper than the host's parser limit would arrive
+            # as a malformed frame and kill the runtime — the parent maps
+            # `code` through, so fail this call with the typed error.
+            return {
+                "error": {
+                    "code": proto.LIMIT_EXCEEDED,
+                    "message": "result exceeds the depth cap",
+                    "data": {
+                        "limit": "max_depth",
+                        "max": _transport.MAX_DEPTH,
+                    },
+                }
+            }
+        return {"result": result}
+    except _json.InvalidParams as e:
+        # Caller sent values the signature can't hold — a params error,
+        # not a worker failure; the parent maps `code` through.
+        return {
+            "error": {
+                "code": proto.INVALID_PARAMS,
+                "message": str(e),
+                "data": {"type": "InvalidParams"},
+            }
+        }
+    except BaseException as e:  # noqa: BLE001 - boundary: report everything
+        return _exception_payload(e)
+
+
+def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
+    """Warm-worker mode: import once, then serve framed calls until EOF.
+
+    Request frames are {"op": "call", "input": {...}}; {"op": "shutdown"}
+    or stdin EOF ends the loop with exit 0. One frame in, one frame out —
+    the parent serializes calls per worker, so no ids are needed.
+    """
+    import_error: dict | None = None
+    try:
+        # Resolve through the registry this import populates — the
+        # function may live in any module the app imports and need not be
+        # re-exported by name from the app module.
+        importlib.import_module(module_name)
+        entry = exposed_functions().get(fn_name)
+    except BaseException as e:  # noqa: BLE001 - serve the failure as a payload
+        entry = None
+        import_error = _exception_payload(e)
+
+    chan = _transport.FrameChannel(rfd=0, wfd=out_fd)
+    while True:
+        body = chan.read_frame()
+        if body is None:
+            return 0
+        msg = _json.loads(body)
+        if msg.get("op") == "shutdown":
+            return 0
+        payload = (
+            import_error
+            if import_error is not None
+            else _invoke(entry, fn_name, module_name, msg.get("input") or {})
+        )
+        chan.write_frame(_json.dumps(payload).encode())
+
+
 def main() -> int:
     _exit_with_parent()
-    if len(sys.argv) != 3:
-        print("usage: python -m pylair._worker <module> <fn>", file=sys.stderr)
+    argv = [a for a in sys.argv[1:] if a != "--serve"]
+    serve = len(argv) < len(sys.argv) - 1
+    if len(argv) != 2:
+        print(
+            "usage: python -m pylair._worker [--serve] <module> <fn>",
+            file=sys.stderr,
+        )
         return 2
-    module_name, fn_name = sys.argv[1], sys.argv[2]
+    module_name, fn_name = argv
 
     if sys.platform == "win32":
         import msvcrt
@@ -121,6 +229,13 @@ def main() -> int:
     out_fd = os.dup(1)
     os.dup2(2, 1)
     sys.stdout = sys.stderr
+    if sys.platform == "win32":
+        # Framed bodies carry a binary length prefix — text-mode CRLF
+        # translation on the dup'd fd would corrupt a 0x0A length byte.
+        msvcrt.setmode(out_fd, os.O_BINARY)
+
+    if serve:
+        return _serve_loop(module_name, fn_name, out_fd)
 
     try:
         # Resolve through the registry this import populates — the
@@ -130,55 +245,9 @@ def main() -> int:
         entry = exposed_functions().get(fn_name)
         raw = sys.stdin.buffer.read()
         input = _json.loads(raw) if raw else {}
-        if entry is None:
-            payload = {
-                "error": {
-                    "code": proto.FUNCTION_NOT_FOUND,
-                    "message": f"{fn_name!r} is not @expose'd in {module_name}",
-                    "data": {"type": "NotExposed"},
-                }
-            }
-        else:
-            fn = entry.fn
-            result = fn(**_json.coerce_kwargs(fn, input))
-            try:
-                _json.check_wire(result, _transport.MAX_DEPTH - 2)
-            except _json.DepthExceeded:
-                # A result deeper than the host's parser limit would arrive
-                # as a malformed frame and kill the runtime — the parent maps
-                # `code` through, so fail this call with the typed error.
-                payload = {
-                    "error": {
-                        "code": proto.LIMIT_EXCEEDED,
-                        "message": "result exceeds the depth cap",
-                        "data": {
-                            "limit": "max_depth",
-                            "max": _transport.MAX_DEPTH,
-                        },
-                    }
-                }
-            else:
-                payload = {"result": result}
-    except _json.InvalidParams as e:
-        # Caller sent values the signature can't hold — a params error,
-        # not a worker failure; the parent maps `code` through.
-        payload = {
-            "error": {
-                "code": proto.INVALID_PARAMS,
-                "message": str(e),
-                "data": {"type": "InvalidParams"},
-            }
-        }
+        payload = _invoke(entry, fn_name, module_name, input)
     except BaseException as e:  # noqa: BLE001 - boundary: report everything
-        payload = {
-            "error": {
-                "message": f"{type(e).__name__}: {e}",
-                "data": {
-                    "type": type(e).__name__,
-                    "traceback": traceback.format_exc(limit=20),
-                },
-            }
-        }
+        payload = _exception_payload(e)
 
     os.write(out_fd, _json.dumps(payload).encode())
     return 0
