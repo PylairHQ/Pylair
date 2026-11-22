@@ -163,6 +163,16 @@ recipes and known limitations: [docs/wrap.md](docs/wrap.md).
   `pylair:deny-python-health` deny is origin-wide like every command
   deny. `pylair://health` is a broadcast event — the `Any`-listener
   caveat above applies.
+- **App readiness is the app's own signal.** A Python app reports
+  named-component phases (`pylair.on_startup` hooks plus
+  `loading(name, progress)` / `ready(name)` / `failed(name)`), and
+  `@expose(requires=…)` makes a call wait for its components to reach
+  `ready` before the body runs. The host coalesces the reports into
+  `health().app.components` and emits `pylair://app` (`onApp`) on
+  phase *transitions* only — progress stays poll-only through
+  `health().app` (docs/decisions/0007). A host or package that
+  predates the feature reports `app: null`, the same fallback as a
+  web (wrap-mode) runtime, which has no components.
 - **`cargo audit` flags `glib 0.18.5` (RUSTSEC-2024-0429, unsound).**
   It reaches Linux builds only, transitively through Tauri's GTK chain
   (`tauri → wry → webkit2gtk → gtk`); the advisory is tracked upstream

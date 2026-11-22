@@ -143,6 +143,7 @@ a `type` string (the Python exception class) for diagnostics.
 | `pong` | runtime→host | `{seq}` | liveness reply to `ping` |
 | `log` | runtime→host | `{level, msg}` | structured log line (also goes to stderr) |
 | `ready` | runtime→host | `{url}` | **optional, web runtimes only**: the wrapped server answers HTTP at `url`; see §4.1. Bridge runtimes never send it, and a bridge-mode host ignores it like any unknown notification |
+| `app.component` | runtime→host | `{name, phase, progress?, detail?}` | **optional, bridge runtimes only**: a coalesced report of one app-declared component's readiness (decisions 0007). `phase` ∈ `"loading" \| "ready" \| "failed"`; `progress` is a float in `[0, 1]`, absent when indeterminate; `detail` is free text. Fire-and-forget — a host that predates it ignores it like any unknown notification |
 
 ### 3.1 Calls and streaming
 
@@ -256,6 +257,13 @@ logs. Clients must not match on its wording; the state machine is
      on it arriving.
 4. `protocol` mismatch → `failed` immediately (no restart — retrying
    can't fix a version skew). Error message names both versions.
+
+After hello, bridge runtimes may keep emitting `app.component`
+notifications while app-declared components warm up (decisions 0007):
+a function declared `@expose(requires=…)` waits for its components to
+report `ready` before the call body runs. None of that changes the
+host's `Ready` verdict — the runtime is `ready` at hello; app
+readiness is the app's own finer-grained signal, not a host state.
 
 ### 4.1 Web runtimes (wrap mode)
 
@@ -373,6 +381,10 @@ deadlock) never crashes, so it never restarts.
   the `pylair://health` event, emitted only when a transport or loop
   verdict *changes* — see `docs/decisions/0006-runtime-health.md`. The
   wire protocol is unchanged: `ping`/`pong` carry the same fields.
+  `pylair://health` stays liveness-only: app-declared component phases
+  (decisions 0007) arrive separately on `pylair://app`, emitted on
+  phase transitions only — progress reads stay poll-only through
+  `health().app`.
 
 ### 5.1 Event delivery (host → webviews)
 
@@ -586,6 +598,13 @@ running is unaffected, and `PYLAIR_PER_WINDOW_FAIRNESS=0` disables it.
 This is host-side behavior and does not change the wire protocol;
 `stream_buffer_bytes_total` stays a global backstop by design
 (decisions 0005 §5.1).
+
+`INTERNAL` also covers a `requires=` gate failure (decisions 0007): a
+call to a function declared `@expose(requires=…)` whose named
+component reached `failed` answers `INTERNAL` with
+`data: {"component": "<name>", "phase": "failed"}` — the call body
+never ran. Cancelling such a call while it waits on the gate is an
+ordinary `TASK_CANCELLED`, not an INTERNAL.
 
 `PERMISSION_DENIED` is raised by the host's `python_call` and
 `python_call_stream` commands when the calling window's capability scope
