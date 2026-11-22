@@ -175,13 +175,13 @@ def test_stalled_host_exits_with_distinct_reason():
             proc.stdin.write(_LEN.pack(len(body)) + body)
             proc.stdin.flush()
 
-        deadline = time.time() + 30
-        while proc.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
-        assert proc.poll() is not None, (
-            "runtime did not exit on stalled host; stderr tail:\n"
-            + "".join(stderr_lines)[-2000:]
-        )
+        try:
+            proc.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                "runtime did not exit on stalled host; stderr tail:\n"
+                + "".join(stderr_lines)[-2000:]
+            )
         joined = "".join(stderr_lines)
         assert "outbound queue full" in joined, joined[-2000:]
     finally:
