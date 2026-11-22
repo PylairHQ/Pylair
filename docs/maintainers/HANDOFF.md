@@ -375,6 +375,15 @@ Merged since rc.17 (d7daaaf):
   bound to the default executor, which `asyncio.run` teardown would
   otherwise join unbounded (3.12) or for 300 s (3.15). The next PyPI
   train carries it.
+- PR 150: model manager PR 1/3 (decision 0009 §2) — the host hands the
+  app data dir to the runtime as `PYLAIR_APP_DATA_DIR` at every spawn
+  that has an AppHandle (`app_spawn_spec` dev + release, wrap
+  `spawn_spec` dev + release); the dir is created if missing, a
+  resolve/mkdir failure logs once and leaves it unset, never fatal.
+  Debug builds only honor an inherited override (same precedent as
+  `PYLAIR_APP_MODULE`); packaged apps always get the resolved dir.
+  Isolated/warm workers inherit it through the runtime env. Crate
+  bumps in the next train; `pylair` PR 2 adds `pylair.models`.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
