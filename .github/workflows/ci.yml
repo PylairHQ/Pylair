@@ -511,6 +511,21 @@ jobs:
           def selftest_done() -> str:
               ready("selftest")
               return "done"
+
+
+          # Warm-worker self-test (decisions 0008): --local resolves a
+          # pylair with warm workers, so the fixture is unconditional —
+          # a "skipped" warm-workers verdict fails these legs. The
+          # report carries pid + platform so the check asserts per
+          # platform (POSIX interrupt survives, Windows kill-only).
+          import os as _os
+          import time as _time
+
+
+          @expose(worker={"mode": "warm"})
+          def warm_selftest(seconds: float = 0.0) -> dict:
+              _time.sleep(seconds)
+              return {"pid": _os.getpid(), "platform": sys.platform}
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a
@@ -621,6 +636,10 @@ jobs:
                 echo "app-readiness skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
+              if grep -q "\"warm-workers\":\"skipped" "$f"; then
+                echo "warm-workers skipped on a --local leg — probe must run here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -651,6 +670,10 @@ jobs:
           fi
           if grep -q '"app-readiness":"skipped' /tmp/wst.log; then
             echo "app-readiness skipped on a --local leg — probe must run here" >&2
+            exit 1
+          fi
+          if grep -q '"warm-workers":"skipped' /tmp/wst.log; then
+            echo "warm-workers skipped on a --local leg — probe must run here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -700,6 +723,10 @@ jobs:
           }
           if (Select-String -Path $out -Pattern '"app-readiness":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error 'app-readiness skipped on a --local leg — probe must run here'
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"warm-workers":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error 'warm-workers skipped on a --local leg — probe must run here'
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic
