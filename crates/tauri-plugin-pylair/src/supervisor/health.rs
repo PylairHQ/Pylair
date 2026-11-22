@@ -45,6 +45,7 @@ pub(super) struct LastExit {
 /// `app.component` arm before they reach this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AppPhase {
     Loading,
     Ready,
