@@ -43,6 +43,51 @@ the fairness live set, so a poller reserves no share. A
 refuses `health()` on every local webview, not just the window carrying
 it.
 
+## App readiness
+
+`health()` answers *host* questions ("is the runtime alive? busy?").
+`health().app` answers the app's own: which components are still
+warming up. The Python side reports it — a startup hook for slow
+setup, progress while it works, and `requires=` so calls wait for the
+components they need instead of racing them:
+
+```python
+import pylair
+
+@pylair.on_startup
+def load_model():
+    pylair.loading("model", 0.1, detail="fetching weights")
+    # … load …
+    pylair.ready("model")
+
+@pylair.expose(requires="model")
+def chat(prompt: str) -> str:      # waits until `model` is ready
+    ...
+```
+
+On the UI side, `health().app` carries the latest report per component
+(`phase`, `progress`, `detail`, `ms_ago`) and `onApp` fires
+`pylair://app` on each phase transition — render the snapshot once,
+then flip components as transitions arrive:
+
+```ts
+import { health, onApp } from "@pylair/client";
+
+const app = (await health()).app;
+if (app) {
+  for (const [name, c] of Object.entries(app.components)) {
+    setPhase(name, c.phase);      // "loading" | "ready" | "failed"
+  }
+}
+const unlisten = await onApp((c) => setPhase(c.name, c.phase));
+```
+
+`app` is `null` when the runtime has reported nothing (and always on
+wrapped `web` runtimes — they can't report), and absent on hosts older
+than app readiness; code should treat both as "no app state". The
+event fires on phase changes only — `progress` and `detail` are
+poll-only, so a progress bar reads `health().app` on its own cadence.
+
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
 `npm i @pylair/client@0.1.0-rc.25`.

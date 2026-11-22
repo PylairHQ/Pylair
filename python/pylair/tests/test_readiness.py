@@ -689,7 +689,13 @@ def test_first_flush_carries_prehello_reports_and_declared_loading():
         rt.send(call(2, "release", task=2))
         resp1 = resp2 = None
         order: list[int] = []
-        while resp1 is None or resp2 is None:
+        # The model:ready frame and the gated call's response race the
+        # flusher — keep reading until all three have been seen.
+        while (
+            resp1 is None
+            or resp2 is None
+            or not any(p["name"] == "model" and p["phase"] == "ready" for p in frames)
+        ):
             m = rt.recv(timeout=max(0.1, deadline - time.time()))
             if m.get("method") == "app.component":
                 frames.append(m["params"])
