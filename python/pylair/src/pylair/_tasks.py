@@ -101,13 +101,14 @@ class _WarmPool:
         "deaths",
         "fn_name",
         "members",
+        "prewarm",
         "queue",
         "size",
         "spawning",
         "stopped",
     )
 
-    def __init__(self, fn_name: str, size: int) -> None:
+    def __init__(self, fn_name: str, size: int, prewarm: bool = False) -> None:
         self.fn_name = fn_name
         self.size = size
         self.members: list[_WarmMember] = []
@@ -116,6 +117,10 @@ class _WarmPool:
         self.queue: deque[tuple[Task, asyncio.Future]] = deque()
         self.deaths = 0  # consecutive member deaths with no success
         self.stopped = False  # crash-loop limit hit — calls fail fast
+        # Prewarmed pools own the `worker:<fn>` readiness component —
+        # every fresh member handshakes so ready/failed always means a
+        # live member passed import+resolve (0008 §6).
+        self.prewarm = prewarm
 
 
 class _PoolStopped(Exception):
@@ -520,7 +525,9 @@ class TaskRegistry:
     ) -> None:
         pool = self._pools.get(fn_name)
         if pool is None:
-            pool = _WarmPool(fn_name, worker.get("pool", 1))
+            pool = _WarmPool(
+                fn_name, worker.get("pool", 1), prewarm=worker.get("prewarm", False)
+            )
             self._pools[fn_name] = pool
         member: _WarmMember | None = None
         try:
@@ -542,6 +549,13 @@ class TaskRegistry:
                     raise _WarmWorkerDead
                 if payload.get("started") is True:
                     task.warm_started.set()
+                    continue
+                if "ready" in payload:
+                    # A handshake abandoned mid-cancel leaves its answer
+                    # buffered — it is still the member's proof: report
+                    # it and consume; the call's frames follow.
+                    if pool.prewarm:
+                        self._report_warm_ready(pool, payload)
                     continue
                 break
             if not any(k in payload for k in ("result", "error", "interrupted")):
@@ -689,7 +703,7 @@ class TaskRegistry:
                         pool.spawning += 1
                         self._warm_live += 1
                         try:
-                            proc = await self._spawn_warm(task, pool)
+                            proc = await self._spawn_warm(pool)
                         except BaseException:
                             self._warm_live -= 1
                             raise
@@ -699,8 +713,25 @@ class TaskRegistry:
                         m.stderr_task = asyncio.create_task(
                             self._drain_member_stderr(m)
                         )
-                        m.busy = True
                         pool.members.append(m)
+                        if pool.prewarm:
+                            # A fresh member on a prewarmed pool proves
+                            # itself before serving — the same handshake
+                            # prewarm uses (0008 §6): a later successful
+                            # respawn reports the component ready again.
+                            try:
+                                payload = await self._warm_handshake(m.proc)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:  # noqa: BLE001 - any channel error is a dead member
+                                payload = None
+                            if payload is None:
+                                # Died before answering — count + drop,
+                                # then rescan for a fresh member.
+                                await self._drop_warm_member(pool, m)
+                                continue
+                            self._report_warm_ready(pool, payload)
+                        m.busy = True
                         return m
                 # No claim — wait for a wake.
                 if entry is None:
@@ -727,9 +758,7 @@ class TaskRegistry:
                     # Our queue slot is vacated — the next waiter scans now.
                     self._wake_next(pool)
 
-    async def _spawn_warm(
-        self, task: Task, pool: _WarmPool
-    ) -> asyncio.subprocess.Process:
+    async def _spawn_warm(self, pool: _WarmPool) -> asyncio.subprocess.Process:
         """One `--serve` worker for the pool — same containment flags and
         parent-death env as the one-shot path (0008 §1)."""
         try:
@@ -759,7 +788,7 @@ class TaskRegistry:
                 "pylair._worker",
                 "--serve",
                 module,
-                task.fn_name,
+                pool.fn_name,
                 **kwargs,
             )
         except asyncio.CancelledError:
@@ -769,8 +798,7 @@ class TaskRegistry:
             # an always-failing spawn must not retry forever.
             pool.deaths += 1
             if pool.deaths >= WARM_CRASH_LIMIT:
-                pool.stopped = True
-                self._flush_warm_queue(pool)
+                self._stop_pool(pool)
             raise
 
     async def _warm_response(self, proc) -> dict | None:
@@ -819,8 +847,7 @@ class TaskRegistry:
             if not m.killed:
                 pool.deaths += 1
                 if pool.deaths >= WARM_CRASH_LIMIT:
-                    pool.stopped = True
-                    self._flush_warm_queue(pool)
+                    self._stop_pool(pool)
         if m.proc.returncode is None:
             m.killed = True
             await self._kill_proc(m.proc)
@@ -863,6 +890,108 @@ class TaskRegistry:
             for m in list(pool.members):
                 m.killed = True
                 await self._drop_warm_member(pool, m)
+
+    def _stop_pool(self, pool: _WarmPool) -> None:
+        """Crash-loop limit: fail-fast the pool (0008 §1). A prewarmed
+        pool also fails its `worker:<fn>` component with the reason —
+        it stays failed for as long as the pool is stopped (§6)."""
+        pool.stopped = True
+        self._flush_warm_queue(pool)
+        if pool.prewarm:
+            _readiness.failed(f"worker:{pool.fn_name}", detail=str(_PoolStopped(pool)))
+
+    async def _warm_handshake(self, proc) -> dict | None:
+        """The prewarm handshake (0008 §6): {"op": "ready"} is answered
+        only after the member's import+resolve block ran, so the reply
+        proves module+fn. Returns the payload; None on a dead channel."""
+        body = _json.dumps({"op": "ready"}).encode()
+        proc.stdin.write(_LEN.pack(len(body)) + body)
+        await proc.stdin.drain()
+        return await self._warm_response(proc)
+
+    def _report_warm_ready(self, pool: _WarmPool, payload: dict) -> None:
+        """Map one handshake answer onto the pool's component:
+        {"ready": true} reports ready, anything else reports failed
+        with the worker's error detail."""
+        comp = f"worker:{pool.fn_name}"
+        if payload.get("ready") is True:
+            _readiness.ready(comp)
+        else:
+            err = payload.get("error") or {}
+            _readiness.failed(comp, detail=err.get("message") or "member is not ready")
+
+    async def _prewarm(self, fn_name: str, worker: dict) -> None:
+        """Spawn the pool's first member at startup and drive its ready
+        handshake (0008 §6): ready on a completed handshake, failed
+        with detail on a spawn/import/death outcome. Reports onto the
+        managed `worker:<fn>` component and never raises — a prewarm
+        surprise is app-visible state, not a runtime failure."""
+        comp = f"worker:{fn_name}"
+        pool = self._pools.get(fn_name)
+        if pool is None:
+            pool = _WarmPool(fn_name, worker.get("pool", 1), prewarm=True)
+            self._pools[fn_name] = pool
+        else:
+            pool.prewarm = True
+        if pool.stopped:
+            # Lazy calls already crashed the pool out — keep the
+            # crash-loop reason, never spawn into a stopped pool.
+            _readiness.failed(comp, detail=str(_PoolStopped(pool)))
+            return
+        if pool.members or pool.spawning:
+            # A racing call already spawned (or is spawning) a member —
+            # the lazy path's own post-spawn handshake reports the
+            # component; a second spawn would overshoot pool.size.
+            return
+        if self._isolated + self._warm_live >= MAX_ISOLATED_WORKERS:
+            _readiness.failed(
+                comp, detail=f"isolated worker cap {MAX_ISOLATED_WORKERS} reached"
+            )
+            return
+        # Reserve size and cap slots across the spawn await —
+        # a call arriving mid-prewarm must not overshoot either.
+        pool.spawning += 1
+        self._warm_live += 1
+        try:
+            try:
+                proc = await self._spawn_warm(pool)
+            finally:
+                pool.spawning -= 1
+        except asyncio.CancelledError:
+            self._warm_live -= 1
+            raise  # shutting down — the reap owns the member
+        except BaseException as e:  # noqa: BLE001 - spawn failure is app state
+            self._warm_live -= 1
+            _readiness.failed(comp, detail=f"{type(e).__name__}: {e}")
+            return
+        m = _WarmMember(proc)
+        m.stderr_task = asyncio.create_task(self._drain_member_stderr(m))
+        # In the pool before the handshake — a mid-handshake cancel or
+        # drain still reaps the member like any other live member.
+        # (_warm_live was already reserved across the spawn.)
+        pool.members.append(m)
+        try:
+            payload = await self._warm_handshake(proc)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001 - report, never raise
+            _readiness.failed(comp, detail=f"handshake failed: {type(e).__name__}: {e}")
+            return
+        if payload is None:
+            await self._drop_warm_member(pool, m)
+            _readiness.failed(
+                comp,
+                detail=(
+                    f"member died during handshake (rc={proc.returncode})"
+                    + (
+                        ": " + m.stderr_tail.decode(errors="replace")[-500:]
+                        if m.stderr_tail
+                        else ""
+                    )
+                ),
+            )
+        else:
+            self._report_warm_ready(pool, payload)
 
     def _interrupt_warm(self, task: Task) -> None:
         """Interrupt the serving member's call, worker-side (0008 §2):

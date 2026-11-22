@@ -299,18 +299,19 @@ def warm_break_witness(witness: str, seconds: float, started: str | None = None)
 
 
 @expose(worker={"mode": "warm"})
-def warm_gated_start(gate: str, pidfile: str | None = None, seconds: float = 0) -> str:
+def warm_gated_start(gate: str, pidfile: str | None = None, seconds: float = 0) -> int:
     """Poll `gate` before doing the real work — the call sits inside the
-    raise window doing nothing until the test releases it. The pidfile
-    lands in `finally`: an interrupt firing at the earliest legal point
-    (fn entry, before any write) still records which member ran."""
+    raise window doing nothing until the test releases it. Returns the
+    serving pid so a reuse compare needs no files at all; the pidfile
+    also lands in `finally` — an interrupt firing at the earliest legal
+    point (fn entry, before any write) still records which member ran."""
     try:
         deadline = time.time() + 120
         while not os.path.exists(gate):
             assert time.time() < deadline, "gate never released"
             time.sleep(0.05)
         time.sleep(seconds)
-        return "slept"
+        return os.getpid()
     finally:
         if pidfile:
             _write_pidfile(pidfile, os.getpid())

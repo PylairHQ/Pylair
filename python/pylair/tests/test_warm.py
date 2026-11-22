@@ -20,6 +20,7 @@ import pytest
 import pylair._expose as _ex
 from conftest import Runtime
 from pylair import _protocol as proto
+from pylair import _readiness
 from pylair._expose import expose, exposed_functions
 
 
@@ -124,12 +125,46 @@ def test_warm_option_implies_isolated_kind():
 
 def test_warm_option_rejects_unimplemented_keys():
     def go():
-        with pytest.raises(ValueError, match="prewarm"):
-            expose(worker={"mode": "warm", "prewarm": True})(lambda: 1)
+        with pytest.raises(TypeError, match="prewarm"):
+            expose(worker={"mode": "warm", "prewarm": "yes"})(lambda: 1)
         with pytest.raises(ValueError, match="idle_ttl_s"):
             expose(worker={"mode": "warm", "idle_ttl_s": 60})(lambda: 1)
 
     _with_clean_registry(go)
+
+
+def test_warm_option_prewarm_declares_component():
+    """0008 §6: prewarm=True normalizes into the config and declares the
+    managed worker:<fn> component in phase loading at decoration — the
+    first post-hello flush shows it and the sweep must not fail it."""
+
+    def go():
+        @expose(worker={"mode": "warm", "prewarm": True})
+        def probe() -> int:
+            return 1
+
+        entry = exposed_functions()["probe"]
+        assert entry.worker["prewarm"] is True
+        comp = _readiness._default._components["worker:probe"]
+        assert comp.phase == "loading"
+        assert comp.managed is True
+
+        # A lazy warm fn declares nothing.
+        @expose(worker={"mode": "warm"})
+        def lazy() -> int:
+            return 1
+
+        assert "worker:lazy" not in _readiness._default._components
+
+    saved = dict(_ex._registry)
+    _ex._registry.clear()
+    _readiness.reset()
+    try:
+        go()
+    finally:
+        _ex._registry.clear()
+        _ex._registry.update(saved)
+        _readiness.reset()
 
 
 def test_warm_option_cancel_grace_ms():
@@ -714,7 +749,7 @@ def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
     healthy member for nothing. Windows is kill-only as documented."""
     runtime.recv()
     gate = tmp_path / "gate"
-    p1, p2 = tmp_path / "a.pid", tmp_path / "b.pid"
+    p1 = tmp_path / "a.pid"
     runtime.send(
         call(
             1,
@@ -736,23 +771,24 @@ def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
             2,
             "warm_gated_start",
             task=2,
-            input={"gate": str(gate), "pidfile": str(p2)},
+            input={"gate": str(gate)},
         )
     )
-    assert runtime.recv()["result"] == "slept"
+    pid2 = runtime.recv()["result"]
+    runtime.send(call(3, "warm_gated_start", task=3, input={"gate": str(gate)}))
+    # Calls return the serving pid: 2==3 proves warm reuse with no
+    # marker files at all — survival never depends on which side of an
+    # interrupt the first call's writes landed.
+    assert runtime.recv()["result"] == pid2, "pool did not reuse its member"
     if sys.platform == "win32":
         assert msgs[9]["result"] == {"cancelled": True, "status": "terminated"}
-        pid2 = _wait_pidfile(p2)
         if p1.exists():
             assert pid2 != int(p1.read_text().strip()), "killed member was reused"
     else:
         assert msgs[9]["result"] == {"cancelled": True}, _diagnose(runtime)
-        # The survived verdict itself proves the member (a response
-        # frame came back); the pidfiles prove identity. a.pid lands in
-        # the fixture's finally — the only gap is an interrupt firing
-        # during kwarg coercion, before the fn is even entered, which
-        # is a legal landing point and leaves no marker.
-        pid2 = _wait_pidfile(p2)
+        # a.pid lands in the fixture's finally — the only gap is an
+        # interrupt firing during kwarg coercion, before the fn is even
+        # entered, which is a legal landing point and leaves no marker.
         if p1.exists():
             assert pid2 == int(p1.read_text().strip()), "survived member was not reused"
 
@@ -796,3 +832,110 @@ def test_warm_worker_reaped_on_hard_runtime_death(runtime, tmp_path):
         time.sleep(0.2)
     os.kill(wpid, signal.SIGKILL)  # don't leak it from the test itself
     pytest.fail(f"warm worker {wpid} outlived a hard kill of the runtime")
+
+
+# ---- prewarm + the worker:<fn> component (0008 §6) ----------------------------
+
+
+def _components_until(rt: Runtime, name: str, phases: list[str], timeout: float = 20.0):
+    """Collect app.component params for `name` until its phase sequence
+    ends with `phases` (or timeout)."""
+    frames: list[dict] = []
+    deadline = time.time() + timeout
+    while True:
+        got = [p["phase"] for p in frames if p["name"] == name]
+        if got[-len(phases) :] == phases:
+            return frames
+        assert time.time() < deadline, f"component {name} never reached {phases}: {got}"
+        m = rt.recv(timeout=max(0.1, deadline - time.time()))
+        if m.get("method") == "app.component":
+            frames.append(m["params"])
+
+
+def test_prewarm_reports_ready_before_any_call():
+    """The pool's first member spawns at startup beside the hooks and
+    completes its import+resolve handshake — worker:<fn> goes
+    loading -> ready without a single call being sent."""
+    with Runtime("testapp_prewarm") as rt:
+        rt.recv()  # hello
+        frames = _components_until(rt, "worker:prewarm_pid", ["loading", "ready"])
+        got = [p["phase"] for p in frames if p["name"] == "worker:prewarm_pid"]
+        assert got == ["loading", "ready"]
+
+
+def test_prewarm_first_call_uses_prewarmed_member(tmp_path):
+    """The member the component reported ready is the one that serves
+    the first call: the worker wrote its pid at import (before the
+    handshake) and the call must come back from that same pid."""
+    pf = tmp_path / "prewarmed.pid"
+    with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_PIDFILE": str(pf)}) as rt:
+        rt.recv()
+        _components_until(rt, "worker:prewarm_pid", ["ready"])
+        prewarmed = _wait_pidfile(pf)  # the member proved itself at import
+        rt.send(call(1, "prewarm_pid", task=1))
+        assert rt.recv()["result"] == prewarmed, (
+            "first call did not reach the prewarmed member"
+        )
+        rt.send(call(2, "prewarm_pid", task=2))
+        assert rt.recv()["result"] == prewarmed
+
+
+def test_prewarm_import_failure_reports_failed():
+    """A member whose app import explodes answers ready:false — the
+    component reports failed with the import error as detail."""
+    with Runtime("testapp_warmfail") as rt:
+        rt.recv()
+        frames = _components_until(rt, "worker:warmfail_pid", ["failed"])
+        got = [p for p in frames if p["name"] == "worker:warmfail_pid"]
+        assert got[-1]["phase"] == "failed"
+        assert "import exploded" in (got[-1].get("detail") or "")
+
+
+def test_prewarm_requires_gate_waits_then_succeeds(tmp_path):
+    """requires=("worker:<fn>",) works for free: the call waits on the
+    still-importing pool while dispatch stays live, then succeeds when
+    the handshake reports ready."""
+    gate = tmp_path / "prewarm.gate"
+    with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_GATE": str(gate)}) as rt:
+        rt.recv()
+        # The component is visible while the member's import is gated.
+        _components_until(rt, "worker:prewarm_pid", ["loading"])
+        rt.send(call(1, "after_worker", task=1))
+        # Dispatch is never blocked by prewarm — a plain call answers
+        # while the gated call still waits on the component.
+        rt.send(call(2, "add", task=2, input={"a": 1, "b": 1}))
+        assert rt.recv_until(lambda m: m.get("id") == 2)["result"] == 2
+        gate.write_text("go")
+        resp1 = None
+        saw_ready = False
+        deadline = time.time() + 20
+        while resp1 is None or not saw_ready:
+            assert time.time() < deadline, "gated call or ready never arrived"
+            m = rt.recv(timeout=max(0.1, deadline - time.time()))
+            if m.get("id") == 1:
+                resp1 = m
+            elif (
+                m.get("method") == "app.component"
+                and m["params"].get("name") == "worker:prewarm_pid"
+                and m["params"].get("phase") == "ready"
+            ):
+                saw_ready = True
+        assert resp1["result"] == "answered"
+
+
+def test_prewarm_false_stays_lazy(tmp_path):
+    """A plain warm pool keeps lazy spawning: no component and no
+    member process until the first call — even in an app where another
+    fn prewarms. A lazy_pid worker writes the lazy pidfile at import,
+    so its absence proves no member ever spawned."""
+    pf = tmp_path / "lazy.pid"
+    with Runtime("testapp_prewarm", env={"PYLAIR_LAZY_PIDFILE": str(pf)}) as rt:
+        rt.recv()
+        frames = _components_until(rt, "worker:prewarm_pid", ["ready"])
+        assert not any(p["name"] == "worker:lazy_pid" for p in frames), (
+            "lazy fn declared a component"
+        )
+        assert not pf.exists(), "a lazy_pid member spawned before the first call"
+        rt.send(call(1, "lazy_pid", task=1))
+        assert rt.recv()["result"] > 0
+        assert _wait_pidfile(pf) > 0

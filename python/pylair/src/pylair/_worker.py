@@ -252,6 +252,9 @@ def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
     Request frames are {"op": "call", "input": {...}}; {"op": "shutdown"}
     or stdin EOF ends the loop with exit 0. One frame in, one frame out —
     the parent serializes calls per worker, so no ids are needed.
+    {"op": "ready"} is the prewarm handshake (0008 §6): it can only be
+    answered after the import block ran, so its response proves the
+    module imported and the fn resolved.
     """
     import_error: dict | None = None
     try:
@@ -272,6 +275,20 @@ def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
         msg = _json.loads(body)
         if msg.get("op") == "shutdown":
             return 0
+        if msg.get("op") == "ready":
+            if import_error is not None:
+                payload = {"ready": False, "error": import_error["error"]}
+            elif entry is None:
+                payload = {
+                    "ready": False,
+                    "error": {
+                        "message": f"no function named {fn_name!r} in {module_name!r}"
+                    },
+                }
+            else:
+                payload = {"ready": True}
+            chan.write_frame(_json.dumps(payload).encode())
+            continue
         payload = (
             import_error
             if import_error is not None

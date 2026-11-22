@@ -64,9 +64,9 @@ class GateError(Exception):
 
 
 class _Component:
-    __slots__ = ("detail", "phase", "progress", "reported")
+    __slots__ = ("detail", "managed", "phase", "progress", "reported")
 
-    def __init__(self) -> None:
+    def __init__(self, managed: bool = False) -> None:
         self.phase = "loading"
         self.progress: float | None = None
         self.detail: str | None = None
@@ -74,6 +74,10 @@ class _Component:
         # requires=-declared component from a reported one (the sweep
         # details and the first-flush one-shot both depend on it).
         self.reported = False
+        # Runtime-owned (warm-worker prewarm, 0008 §6): its lifecycle
+        # outlives startup — the sweep must not fail it for being
+        # slow, only the runtime's own reports move it.
+        self.managed = managed
 
 
 def _resolve_waiter(f: asyncio.Future[None]) -> None:
@@ -107,19 +111,26 @@ class Readiness:
 
     # ---- declarations and reports ------------------------------------
 
-    def declare(self, name: str) -> None:
+    def declare(self, name: str, managed: bool = False) -> None:
         """Enter a `requires=` component in phase `loading`.
 
         Called at decoration time (0007 §2) so a gated call can never
         see "unknown component". Not a transition: the declaration is
         sent exactly once by the first post-hello flush; if the server
         never attaches, it stays in-memory only.
+
+        `managed` marks a component the runtime reports on itself
+        (0008 §6 worker:<fn> — its spawn+import+handshake lifecycle
+        outlives startup): the end-of-startup sweep skips it.
         """
         _check_name(name)
         with self._lock:
-            if name not in self._components:
-                self._components[name] = _Component()
+            c = self._components.get(name)
+            if c is None:
+                self._components[name] = _Component(managed=managed)
                 self._dirty.add(name)
+            elif managed:
+                c.managed = True
 
     def report(
         self,
@@ -229,11 +240,13 @@ class Readiness:
         `loading` becomes `failed`, so no gated wait can hang past the
         end of startup. A declaration that was never reported gets
         'never reported by a startup hook'; a reported-but-unfinished
-        component gets the incomplete-hook detail."""
+        component gets the incomplete-hook detail. Managed components
+        (0008 §6 worker:<fn>) are skipped — the runtime keeps reporting
+        on them past startup."""
         with self._lock:
             changed = False
             for name, c in self._components.items():
-                if c.phase != "loading":
+                if c.phase != "loading" or c.managed:
                     continue
                 c.phase = "failed"
                 c.progress = None
@@ -377,9 +390,9 @@ def failed(name: str, detail: str | None = None) -> None:
     _default.report(name, "failed", detail=detail)
 
 
-def declare(name: str) -> None:
+def declare(name: str, managed: bool = False) -> None:
     """Declare a `requires=` component at decoration (phase loading)."""
-    _default.declare(name)
+    _default.declare(name, managed=managed)
 
 
 def startup_hooks() -> list[Callable[..., Any]]:

@@ -231,7 +231,11 @@ point (the model lives there) and the semantic difference to spell out:
 
 - `prewarm: true` declares a component at decoration, same mechanism as
   `requires=` (`_expose.py:144-145` -> `_readiness.declare`): name it
-  `worker:<fn>`, phase `loading`. The runtime spawns the pool at
+  `worker:<fn>`, phase `loading`. One addition over `requires=`
+  declarations: the component is declared **managed** — the
+  end-of-startup sweep (0007 §1) skips it, because its lifecycle
+  outlives startup; a slow import is still `loading`, never swept to
+  `failed`. The runtime spawns the pool at
   startup; when a member completes its import+expose handshake on the
   private channel, report `ready`. Spawn failure -> `failed` with the
   spawn error as detail — `requires=("worker:<fn>",)` and

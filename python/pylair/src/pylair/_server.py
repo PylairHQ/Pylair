@@ -576,6 +576,16 @@ class Server:
         # Startup hooks run beside lag/beat, concurrent with dispatch —
         # calls are served while components still load (0007 §1).
         startup = asyncio.create_task(self._startup())
+        # Warm-pool prewarming (0008 §6): spawn each prewarm pool's
+        # first member and drive its ready handshake -> worker:<fn>
+        # component. Beside the hooks, never blocking dispatch.
+        prewarm = [
+            asyncio.create_task(self._tasks._prewarm(name, ex.worker))
+            for name, ex in exposed_functions().items()
+            if ex.worker is not None
+            and ex.worker.get("mode") == "warm"
+            and ex.worker.get("prewarm")
+        ]
 
         while not self._stopping:
             prio, _, msg = await self._in.get()
@@ -586,7 +596,7 @@ class Server:
                 break
             await self._handle(msg)
 
-        for t in (lag, beat, startup):
+        for t in (lag, beat, startup, *prewarm):
             t.cancel()
             try:
                 await t

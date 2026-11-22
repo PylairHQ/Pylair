@@ -89,8 +89,13 @@ at `@expose` time, not at cancel time.
 > A call cancelled while queued is dropped and never runs (plain
 > `cancelled: true` either way). `pool` members count as live
 > workers against `max_isolated_workers` for their whole lifetime.
-> `prewarm` and `idle_ttl_s` are reserved and rejected at decoration
-> until they land. On the wire,
+> `prewarm: True` spawns the first member at startup and reports the
+> `worker:<fn>` readiness component (`health().app`) — ready once the
+> member completed its import+resolve handshake, failed with detail on
+> spawn/import failure or a crash-loop stop. Any call can then gate on
+> it: `@expose(requires=("worker:embed",))` on a function that needs
+> `embed`'s warm pool loaded before it runs. `idle_ttl_s` is reserved
+> and rejected at decoration until it lands. On the wire,
 > `exposes[].kind` reports `"isolated"` either way; worker config
 > rides inside `signature.meta`.
 
