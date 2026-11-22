@@ -3,8 +3,8 @@
 Kinds reported in the handshake (protocol §4): sync | async | generator |
 isolated. `worker` selects how an isolated call runs (decision 0008):
 {"mode": "process"} is today's per-call worker; {"mode": "warm"} is a
-long-lived per-function pool. `prewarm`, `cancel_grace_ms` and
-`idle_ttl_s` are reserved and rejected at decoration until they land.
+long-lived per-function pool. `prewarm` and `idle_ttl_s` are reserved
+and rejected at decoration until they land.
 """
 
 from __future__ import annotations
@@ -33,14 +33,19 @@ class ExposedFn:
     worker: dict | None = None
 
 
+# The interrupt grace is bounded by the same budget as ISOLATED_GRACE_S
+# (0008 §2): interrupt wait + kill path must land the cancel ack inside
+# the host's 5 s cancel_timeout.
+WARM_CANCEL_GRACE_MAX_MS = 3000
+
+
 def _normalize_worker(worker: dict) -> dict:
     """Validate a `worker=` mapping at decoration and fill defaults.
 
     `mode` selects the execution mode; every other key must be known.
     Options the design reserves but v1 does not implement are rejected
     here rather than silently ignored (0008 §4): `prewarm` (lands with
-    readiness integration), `cancel_grace_ms` (lands with cooperative
-    interrupt) and `idle_ttl_s` (no TTL reaping in v1).
+    readiness integration) and `idle_ttl_s` (no TTL reaping in v1).
     """
     mode = worker.get("mode")
     if mode not in ("process", "warm"):
@@ -55,11 +60,6 @@ def _normalize_worker(worker: dict) -> dict:
         return {"mode": "process"}
     if worker.get("prewarm") not in (None, False):
         raise ValueError("worker['prewarm'] is not implemented yet (0008 PR 3)")
-    if worker.get("cancel_grace_ms") is not None:
-        raise ValueError(
-            "worker['cancel_grace_ms'] is not implemented yet (0008 PR 2); "
-            "warm cancel is kill-only for now"
-        )
     if worker.get("idle_ttl_s") is not None:
         raise ValueError(
             "worker['idle_ttl_s'] is not implemented in v1 (0008 §4); "
@@ -68,7 +68,17 @@ def _normalize_worker(worker: dict) -> dict:
     pool = worker.get("pool", 1)
     if not isinstance(pool, int) or isinstance(pool, bool) or pool < 1:
         raise ValueError(f"worker['pool'] must be an int >= 1, got {pool!r}")
-    return {"mode": "warm", "pool": pool}
+    grace_ms = worker.get("cancel_grace_ms", WARM_CANCEL_GRACE_MAX_MS)
+    if (
+        not isinstance(grace_ms, (int, float))
+        or isinstance(grace_ms, bool)
+        or not 0 <= grace_ms <= WARM_CANCEL_GRACE_MAX_MS
+    ):
+        raise ValueError(
+            f"worker['cancel_grace_ms'] must be within "
+            f"0..{WARM_CANCEL_GRACE_MAX_MS} ms, got {grace_ms!r}"
+        )
+    return {"mode": "warm", "pool": pool, "cancel_grace_ms": grace_ms}
 
 
 def _kind_of(fn: Callable[..., Any], isolated: bool) -> str:
@@ -147,8 +157,9 @@ def expose(
     `worker` selects how an isolated call runs (decision 0008) and
     implies isolated=True: {"mode": "process"} is the per-call worker
     (same as isolated=True alone); {"mode": "warm", "pool": N} serves
-    calls from a long-lived per-function pool. `prewarm`,
-    `cancel_grace_ms` and `idle_ttl_s` are rejected until implemented.
+    calls from a long-lived per-function pool — `cancel_grace_ms`
+    (0..3000, default 3000) is the interrupt grace before the kill
+    fallback. `prewarm` and `idle_ttl_s` are rejected until implemented.
 
     `requires` names readiness components the call waits on before
     running (decision 0007 §2): each name is declared in phase

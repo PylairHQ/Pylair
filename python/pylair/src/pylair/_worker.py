@@ -9,7 +9,8 @@ exit = WORKER_DIED to the parent.
 Serve mode (`--serve`, warm workers, decision 0008): imports the module
 once, then serves length-prefixed request frames one at a time over the
 same private channel — {"op": "call", "input": {...}} -> one framed
-{"result"|"error"} body each — until stdin EOF or {"op": "shutdown"}.
+{"result"|"error"|"interrupted"} body each — until stdin EOF or
+{"op": "shutdown"}.
 
 The result channel gets the same stdout hygiene as the runtime's frame
 channel (protocol §1): fd 1 is redirected to stderr before user code runs,
@@ -63,6 +64,10 @@ def _exit_with_parent() -> None:
         worker = os.getpid()
         if os.fork() == 0:
             try:
+                # The reaper shares the worker's process group, so a warm
+                # cancel's killpg(SIGINT) would land here too — ignore it:
+                # the reaper answers only to parent loss or worker exit.
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
                 # Inherited fds must not pin the pipes: this copy of fd 1 is
                 # the result channel — holding it would hide EOF forever.
                 os.closerange(0, 3)
@@ -111,6 +116,47 @@ def _exit_with_parent() -> None:
     threading.Thread(target=watch, daemon=True, name="pylair-parent-watch").start()
 
 
+# Interrupt machinery (0008 §2, serve mode only): the parent sends
+# SIGINT (POSIX, killpg) or CTRL_BREAK (Windows, SIGBREAK) to interrupt
+# a running warm call. The handler raises KeyboardInterrupt ONLY while
+# the user function executes — `_raise_active` bounds the window. An
+# interrupt landing while the worker reads a request, builds a payload
+# or writes a frame is recorded and ignored: a raise in `read_frame`
+# would kill the loop; a raise mid-`write_frame` would corrupt the
+# channel, so a response that started writing always completes.
+_raise_active = False
+_interrupt_seen = 0
+_interrupt_installed = False
+
+
+def _install_interrupt() -> None:
+    """Map the interrupt signal to a windowed KeyboardInterrupt.
+
+    POSIX: SIGINT. Windows: SIGBREAK (the worker is spawned with
+    CREATE_NEW_PROCESS_GROUP so CTRL_BREAK_EVENT targets exactly its
+    group) — SIGBREAK's default disposition is terminate, so this must
+    run before any user import.
+    """
+
+    def _on_interrupt(_signum, _frame) -> None:
+        global _interrupt_seen
+        _interrupt_seen += 1
+        if _raise_active:
+            raise KeyboardInterrupt
+        print(
+            "[pylair] worker: interrupt outside the raise window — ignored",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    global _interrupt_installed
+    _interrupt_installed = True
+    if sys.platform == "win32":
+        signal.signal(signal.SIGBREAK, _on_interrupt)
+    else:
+        signal.signal(signal.SIGINT, _on_interrupt)
+
+
 def _exception_payload(e: BaseException) -> dict:
     """The generic error body for failures outside a mapped type."""
     return {
@@ -132,6 +178,7 @@ def _invoke(
     Shared by one-shot and serve mode — every boundary error is a payload,
     never a worker exit (a nonzero exit reads as WORKER_DIED upstream).
     """
+    global _raise_active
     try:
         if entry is None:
             return {
@@ -142,7 +189,11 @@ def _invoke(
                 }
             }
         fn = entry.fn
-        result = fn(**_json.coerce_kwargs(fn, input))
+        _raise_active = True
+        try:
+            result = fn(**_json.coerce_kwargs(fn, input))
+        finally:
+            _raise_active = False
         try:
             _json.check_wire(result, _transport.MAX_DEPTH - 2)
         except _json.DepthExceeded:
@@ -160,6 +211,15 @@ def _invoke(
                 }
             }
         return {"result": result}
+    except KeyboardInterrupt:
+        # The interrupt landed inside the raise window — a distinct
+        # result on the private channel so the parent can tell
+        # interrupted from raced-to-completion (0008 §2). One-shot mode
+        # never installs the handler — a stray KI there stays a plain
+        # exception payload the parent already knows how to map.
+        if not _interrupt_installed:
+            raise
+        return {"interrupted": True}
     except _json.InvalidParams as e:
         # Caller sent values the signature can't hold — a params error,
         # not a worker failure; the parent maps `code` through.
@@ -235,6 +295,9 @@ def main() -> int:
         msvcrt.setmode(out_fd, os.O_BINARY)
 
     if serve:
+        # Before any user import: the interrupt handler must be live —
+        # on Windows SIGBREAK's default disposition is terminate.
+        _install_interrupt()
         return _serve_loop(module_name, fn_name, out_fd)
 
     try:
