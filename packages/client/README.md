@@ -90,7 +90,7 @@ poll-only, so a progress bar reads `health().app` on its own cadence.
 
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
-`npm i @pylair/client@0.1.0-rc.25`.
+`npm i @pylair/client@0.1.0-rc.26`.
 
 Pylair builds on [Tauri](https://tauri.app) but is not affiliated with
 or endorsed by the Tauri project.

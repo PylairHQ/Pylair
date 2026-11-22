@@ -91,29 +91,25 @@ next`, then registry acceptance with `source=registry` and
 `PYLAIR_HEALTH_EXPECTED` arms (`python_health` first ships in
 rc.19), so a `health` skip fails the leg on every OS.
 
-The next train is app readiness (PRs 128-132, `docs/decisions/0007`)
-— the first train since rc.21 that touches all three registries.
-This bump commit moves the crate to `0.1.0-rc.20` and `pylair` to
-`0.1.0rc12`; no npm version moves here — the npm trio publishes only
-after both registries carry the new versions, so the scaffold pins
-(`rs`, `py`) and the template `Cargo.lock` stay at rc.19/rc11 until
-the pins PR. What rc.20/rc12 ship: `@on_startup` hooks report named
+The app-readiness train (PRs 128-133, `docs/decisions/0007`) is the
+first since rc.21 to touch all three registries. The crate
+`0.1.0-rc.20` is published on crates.io and `pylair 0.1.0rc12` on PyPI
+(the first PyPI publish since rc.21); `pylair-ollama` stays
+`0.1.0-rc.3`. What they ship: `@on_startup` hooks report named
 components `loading`/`ready`/`failed`, coalesced into `app.component`
 notifications; `@expose(requires=…)` gates calls on them (a `failed`
 requirement answers `INTERNAL` with `data.component`); the host keeps
 a bounded per-generation component map in `health().app` and emits
 `pylair://app` (`onApp`) on phase transitions only — progress reads
-stay poll-only. Remaining order:
+stay poll-only. This pins commit moves the npm trio to `0.1.0-rc.26`
+and the scaffold pins to `rs =0.1.0-rc.20` / `py pylair==0.1.0rc12`
+(the first `py` pin change since rc11), with both template
+`Cargo.lock` files regenerated against the published crate. Remaining
+order:
 
-1. publish crate `0.1.0-rc.20`;
-2. publish `pylair 0.1.0rc12` to PyPI (`release.yml`,
-   `package=pylair`) — the first PyPI publish since rc.21;
-3. pins PR: npm `0.1.0-rc.26`, scaffold pins `rs =0.1.0-rc.20` and
-   `py pylair==0.1.0rc12`, template `Cargo.lock` regenerated against
-   the published crate;
-4. pack-mode acceptance green on that commit, then the npm trio
-   under `--tag next`;
-5. registry acceptance with `source=registry` and
+1. pack-mode acceptance green on this commit, then the npm trio under
+   `--tag next`;
+2. registry acceptance with `source=registry` and
    `expect_version 0.1.0-rc.26` — the first run where
    `PYLAIR_APP_READINESS_EXPECTED` arms (it requires BOTH the rc.20
    crate and the 0.1.0rc12 package resolved), so an `app-readiness`
@@ -283,7 +279,7 @@ Merged since rc.17 (d7daaaf):
 - PR 88: per-function permissions (crate `fn_scope`, client
   `PermissionDeniedError`, CLI capability checks, self-test
   `fn-permission` check, `docs/decisions/0004-per-function-permissions.md`).
-- PRs 128-131 plus the selftest/docs PR: app-defined readiness
+- PRs 128-132, plus 133 (rc.20/rc12 bump): app-defined readiness
   (`docs/decisions/0007`). Python reports named components through
   `@on_startup` hooks + `loading`/`ready`/`failed`, coalesced into
   `app.component` notifications (first post-hello flush carries one
