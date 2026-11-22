@@ -279,15 +279,24 @@ def _models_server_url() -> str:
 
 @expose
 def models_selftest_fetch() -> dict:
-    # Loopback http for the self-test only — scoped to this app, never
-    # a global allowance.
+    # Loopback http is allowed only around the two fetch calls: the
+    # previous value is saved, then restored in finally (deleted when
+    # it was unset), so plain-http stays refused for the rest of the
+    # process.
+    prev = os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE")
     os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = "1"
-    from pylair import models
+    try:
+        from pylair import models
 
-    url = _models_server_url()
-    kw = {"url": url, "sha256": _MODEL_SHA, "size": len(_MODEL_BLOB)}
-    models.fetch("selftest-model", **kw)
-    models.fetch("selftest-model", **kw)
+        url = _models_server_url()
+        kw = {"url": url, "sha256": _MODEL_SHA, "size": len(_MODEL_BLOB)}
+        models.fetch("selftest-model", **kw)
+        models.fetch("selftest-model", **kw)
+    finally:
+        if prev is None:
+            os.environ.pop("PYLAIR_MODELS_ALLOW_INSECURE", None)
+        else:
+            os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = prev
     if _model_state["hits"] != 1:
         raise RuntimeError(
             f"second fetch was not the sidecar fast path (hits={_model_state['hits']})"
@@ -299,7 +308,12 @@ def models_selftest_fetch() -> dict:
     p = models.path("selftest-model")
     if p.parent != root:
         raise RuntimeError(f"models.path {p} is not under {root}")
-    return {"path": str(p), "root": str(root), "hits": _model_state["hits"]}
+    return {
+        "path": str(p),
+        "root": str(root),
+        "hits": _model_state["hits"],
+        "insecure_after": os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE"),
+    }
 
 
 @expose(worker={"mode": "warm"})

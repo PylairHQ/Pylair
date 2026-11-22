@@ -556,10 +556,20 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   // armed PYLAIR_MODELS_EXPECTED (--local legs arm it implicitly).
   let modelsArmed = true;
   await run("models", async () => {
-    let info: { path: string; root: string; hits: number };
+    let info: {
+      path: string;
+      root: string;
+      hits: number;
+      insecure_after?: string | null;
+    };
     try {
       info = await within(
-        call<{ path: string; root: string; hits: number }>("models_selftest_fetch", {}),
+        call<{
+          path: string;
+          root: string;
+          hits: number;
+          insecure_after?: string | null;
+        }>("models_selftest_fetch", {}),
         60_000,
         "models_selftest_fetch",
       );
@@ -572,6 +582,13 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     }
     if (info.hits !== 1)
       throw new Error(`second fetch hit the server ${info.hits} times — no fast path`);
+    // The fixture sets PYLAIR_MODELS_ALLOW_INSECURE only around the two
+    // fetch calls and restores it in finally — a string here means it
+    // leaked and plain-http stays allowed for the rest of the process.
+    if (typeof info.insecure_after === "string")
+      throw new Error(
+        `PYLAIR_MODELS_ALLOW_INSECURE still set after the fixture: ${JSON.stringify(info.insecure_after)}`,
+      );
     const norm = (s: string) => s.replace(/\\/g, "/");
     if (!norm(info.path).startsWith(`${norm(info.root)}/`))
       throw new Error(`models.path gave ${info.path} — not under ${info.root}`);

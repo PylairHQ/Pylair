@@ -311,6 +311,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
                 path: MODEL_PATH,
                 root: "/data/models",
                 hits: models === "two-hits" ? 2 : 1,
+                insecure_after: models === "env-leak" ? "1" : null,
               },
             });
         } else if (fnName === "models_warm_path") {
@@ -464,6 +465,24 @@ test("flag set: a second server hit fails models — the fast path is mandatory"
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, false, JSON.stringify(checks));
   assert.match(checks["models"], /^FAIL: .*fast path/);
+});
+
+test("flag set: a leaked PYLAIR_MODELS_ALLOW_INSECURE fails models", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    models: "env-leak",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["models"], /^FAIL: .*ALLOW_INSECURE/);
 });
 
 test("flag set: POSIX interrupted with a kill-path ack fails warm-workers", { timeout: 20_000 }, async () => {
