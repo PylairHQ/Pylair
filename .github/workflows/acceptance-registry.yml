@@ -377,10 +377,11 @@ jobs:
 
           # App-readiness self-test (decisions 0007): the startup hook
           # reports the "selftest" component loading then ready, and
-          # selftest_ping is gated on it via requires=. The ping
-          # re-reports a loading→ready cycle so a webview that
-          # subscribed to pylair://app after startup still observes a
-          # phase transition.
+          # selftest_ping is gated on it via requires=. The ping/done
+          # pair re-reports the cycle as two REAL transitions — a
+          # single loading+ready inside one call would coalesce to a
+          # no-op on the wire — so a webview subscribed to pylair://app
+          # observes a phase event deterministically.
           from pylair import loading, on_startup, ready
 
 
@@ -393,8 +394,13 @@ jobs:
           @expose(requires=("selftest",))
           def selftest_ping() -> str:
               loading("selftest", 0.9)
-              ready("selftest")
               return "pong"
+
+
+          @expose
+          def selftest_done() -> str:
+              ready("selftest")
+              return "done"
           PYEOF
               echo "app-readiness fixture appended (resolved pylair carries the readiness API)"
             else

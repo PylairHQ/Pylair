@@ -363,10 +363,13 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   // (ci.yml --local legs arm it implicitly by grep).
   let appReadinessArmed = true;
   await run("app-readiness", async () => {
-    // Subscribe BEFORE the call: startup's transitions fired before
-    // this listener exists, so the fixture's selftest_ping re-reports
-    // a loading→ready cycle — a post-startup subscriber observes at
-    // least one pylair://app phase event deterministically.
+    // Subscribe BEFORE the calls: startup's transitions fired before
+    // this listener exists, so the fixture splits the re-report into
+    // two calls — selftest_ping reports `loading`, selftest_done
+    // reports `ready`. Each is a real phase transition (a single
+    // loading+ready inside one call would coalesce to a no-op on the
+    // wire), so a post-startup subscriber observes pylair://app events
+    // deterministically.
     const phases: string[] = [];
     const unlisten = await within(onApp((c) => phases.push(c.phase)), 15_000, "onApp subscribe");
     try {
@@ -386,6 +389,11 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
       // component went ready; the answer itself is the gate proof.
       if (pong !== "pong")
         throw new Error(`selftest_ping answered ${JSON.stringify(pong)}, expected "pong"`);
+      // Restore the component to ready — its transition is the second
+      // observed event, and health().app must read it below.
+      const done = await within(call<string>("selftest_done"), 30_000, "selftest_done");
+      if (done !== "done")
+        throw new Error(`selftest_done answered ${JSON.stringify(done)}, expected "done"`);
       // health().app must name the component ready — bounded poll, no
       // fixed sleep: a host that predates app readiness keeps app
       // null/undefined on every read, so the first read exits.
@@ -410,13 +418,13 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
         throw new Error(
           `health().app selftest phase ${JSON.stringify(phase)}, expected "ready"`,
         );
-      // selftest_ping's own loading→ready cycle must have emitted at
-      // least one transition through this subscription — bounded wait
-      // (the event bus can lag the call response that proved the gate).
+      // The ping/done transitions must have emitted at least one
+      // pylair://app phase event through this subscription — bounded
+      // wait (the event bus can lag the call responses).
       const evDeadline = Date.now() + 10_000;
       while (phases.length === 0 && Date.now() < evDeadline) await sleep(50);
       if (phases.length === 0)
-        throw new Error("onApp delivered no phase event for the selftest_ping cycle");
+        throw new Error("onApp delivered no phase event for the ping/done transitions");
     } finally {
       // Unlisten through the real bridge — part of the check.
       await unlisten();

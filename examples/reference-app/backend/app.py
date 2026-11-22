@@ -141,3 +141,31 @@ def b_ping() -> int:
 @expose
 def b_seen() -> int:
     return _b_seen
+
+
+# App-readiness self-test (decisions 0007): the startup hook reports the
+# "selftest" component loading then ready, and `selftest_ping` is gated
+# on it via requires=. The ping/done pair re-reports the cycle as two
+# REAL transitions — a single loading+ready pair inside one call would
+# coalesce to a no-op on the wire, so a webview that subscribed to
+# pylair://app after startup observes a phase event deterministically
+# (CI appends the same functions to the scaffolded app).
+from pylair import loading, on_startup, ready
+
+
+@on_startup
+def _selftest_component() -> None:
+    loading("selftest", 0.5)
+    ready("selftest")
+
+
+@expose(requires=("selftest",))
+def selftest_ping() -> str:
+    loading("selftest", 0.9)
+    return "pong"
+
+
+@expose
+def selftest_done() -> str:
+    ready("selftest")
+    return "done"

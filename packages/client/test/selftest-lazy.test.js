@@ -213,6 +213,8 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           if (appReadiness === "missing")
             onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
           else onEvent({ task, done: true, result: "pong" });
+        } else if (fnName === "selftest_done") {
+          onEvent({ task, done: true, result: "done" });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
