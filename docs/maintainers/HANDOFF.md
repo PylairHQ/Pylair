@@ -393,7 +393,7 @@ Merged since rc.17 (d7daaaf):
   `.part`, and readiness integration including the late-registration
   sweep hint. `path()` is strict-check only (one stat, never a
   re-hash); `fetch`/autostart own the verify-and-repair pass.
-- PR <PR>: model manager PR 3/3 (decision 0009 §8) — the
+- PR 152: model manager PR 3/3 (decision 0009 §8) — the
   installed-webview `models` self-test check plus `docs/models.md`.
   The fixture runs a loopback-only HTTP Range server inside the
   bundled runtime, fetches + verifies a known blob, proves the second

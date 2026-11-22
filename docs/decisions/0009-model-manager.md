@@ -1,6 +1,6 @@
 # 0009: Model download manager (`pylair.models`)
 
-Status: accepted, implemented (PRs #149-#151, #<PR>)
+Status: accepted, implemented (PRs #149-#152)
 (spike: PR #149 — reviewed and direction approved;
 throwaway proof in `spikes/m9-models/`; TLS evidence from the
 spike-tls workflow that ran on this branch — runs 45063788355,
