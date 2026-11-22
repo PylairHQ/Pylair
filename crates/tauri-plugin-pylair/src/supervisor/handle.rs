@@ -13,8 +13,8 @@ use tokio::time::timeout;
 use super::config::{Limits, RuntimeKind, State};
 use super::fairness::{release_queued, FairnessRef, FairnessSnapshot, Resource};
 use super::health::{
-    BreakerSnapshot, HealthRef, HealthSnapshot, LastExitSnapshot, LivenessSnapshot, LoadSnapshot,
-    RestartsSnapshot, SelfResource, SelfSnapshot,
+    AppComponentSnapshot, AppSnapshot, BreakerSnapshot, HealthRef, HealthSnapshot,
+    LastExitSnapshot, LivenessSnapshot, LoadSnapshot, RestartsSnapshot, SelfResource, SelfSnapshot,
 };
 use super::stream::{stream_pair, StreamRx, StreamSink};
 use crate::protocol::{self as proto, ErrorObj};
@@ -212,6 +212,7 @@ impl Handle {
             rtt_ms,
             missed_pongs,
             loop_stale_ms,
+            app_map,
         ) = {
             let h = self.health.lock().unwrap();
             (
@@ -245,6 +246,7 @@ impl Handle {
                         None
                     })
                 },
+                h.app.clone(),
             )
         };
         // Same rule the pylair://health event emits on
@@ -328,6 +330,29 @@ impl Handle {
                 stream_bytes_total: self.stream_bytes_total.load(Ordering::Relaxed),
             },
             self_usage,
+            // Runtime-wide app state, not caller-scoped (0007 §5):
+            // `null` on the web kind and whenever the generation has
+            // reported nothing — `health(None)` still includes it.
+            app: if self.kind == RuntimeKind::Web || app_map.is_empty() {
+                None
+            } else {
+                Some(AppSnapshot {
+                    components: app_map
+                        .iter()
+                        .map(|(name, c)| {
+                            (
+                                name.clone(),
+                                AppComponentSnapshot {
+                                    phase: c.phase,
+                                    progress: c.progress,
+                                    detail: c.detail.clone(),
+                                    ms_ago: c.at.elapsed().as_millis() as u64,
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+            },
         }
     }
 

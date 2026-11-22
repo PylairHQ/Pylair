@@ -17,6 +17,7 @@ use tokio::time::timeout;
 use super::super::config::{RuntimeEvent, State};
 use super::super::fairness::release_queued;
 use super::super::handle::{limit_err, Command, ShutdownOutcome};
+use super::super::health::AppPhase;
 use super::super::stream::ChunkFail;
 use super::super::wire::{cancel_outcome, mtime, send_ctrl};
 use super::{
@@ -410,6 +411,36 @@ impl Session<'_> {
                                 self.pending
                                     .insert(cid, PendingKind::Cancel { respond: ack });
                             }
+                        }
+                    }
+                    "app.component" => {
+                        // App readiness telemetry (decision 0007 §3/§4).
+                        // Bounded and best-effort: a malformed frame is
+                        // dropped, never a reason to kill the runtime —
+                        // the protocol-violation path stays reserved for
+                        // frames that corrupt call/stream accounting.
+                        let phase = match p["phase"].as_str() {
+                            Some("loading") => Some(AppPhase::Loading),
+                            Some("ready") => Some(AppPhase::Ready),
+                            Some("failed") => Some(AppPhase::Failed),
+                            _ => None,
+                        };
+                        let name = p["name"].as_str().unwrap_or("");
+                        let progress = p["progress"]
+                            .as_f64()
+                            .filter(|x| x.is_finite() && (0.0..=1.0).contains(x));
+                        let detail = p["detail"].as_str().map(str::to_string);
+                        let ev = match phase {
+                            Some(phase) if !name.is_empty() => self
+                                .sup
+                                .health
+                                .lock()
+                                .unwrap()
+                                .note_app_component(name, phase, progress, detail),
+                            _ => None,
+                        };
+                        if let Some(payload) = ev {
+                            let _ = self.sup.events.try_send(RuntimeEvent::AppChanged(payload));
                         }
                     }
                     _ => {} // unknown notifications are ignored (spec §8)

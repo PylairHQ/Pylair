@@ -81,8 +81,8 @@ pub use config::{Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, Supervisor
 pub use fairness::{FairnessSnapshot, OwnerUsage};
 pub use handle::{CallTask, CancelOutcome, Handle, ShutdownOutcome};
 pub use health::{
-    BreakerSnapshot, ExitKind, HealthSnapshot, LastExitSnapshot, LivenessSnapshot, LoadSnapshot,
-    RestartsSnapshot, SelfResource, SelfSnapshot,
+    AppComponentSnapshot, AppPhase, AppSnapshot, BreakerSnapshot, ExitKind, HealthSnapshot,
+    LastExitSnapshot, LivenessSnapshot, LoadSnapshot, RestartsSnapshot, SelfResource, SelfSnapshot,
 };
 #[cfg(target_os = "linux")]
 pub use platform_unix::pdeath_anchor_threads;
