@@ -161,11 +161,17 @@ class Server:
         return rem if cap is None else min(cap, rem)
 
     def _send(self, msg: dict) -> None:
-        # Depth check before serialization: a frame nested deeper than
-        # the host's parser limit is a malformed frame on arrival — fail
-        # just this call with the typed error instead of killing the
-        # runtime. A notification has no caller to report to: drop it.
-        if _json.exceeds_depth(msg, MAX_DEPTH):
+        # Serialize HERE, on the caller's thread (the event loop for task
+        # results): a TypeError/ValueError can then be turned into an
+        # INTERNAL response for that one call. The writer thread only ever
+        # sees valid bytes and must never die (protocol §2).
+        # The depth check rides inside dumps' single pre-walk: a frame
+        # nested deeper than the host's parser limit is a malformed frame
+        # on arrival — fail just this call with the typed error instead of
+        # killing the runtime. A notification has no caller: drop it.
+        try:
+            body = _json.dumps(msg, MAX_DEPTH).encode()
+        except _json.DepthExceeded:
             rid = msg.get("id")
             if isinstance(rid, (int, str)):
                 msg = proto.error_response(
@@ -174,17 +180,13 @@ class Server:
                     "response exceeds the depth cap",
                     {"limit": "max_depth", "max": MAX_DEPTH},
                 )
+                body = _json.dumps(msg).encode()
             else:
                 _log(
                     f"dropping outbound frame over the depth cap ({MAX_DEPTH} levels, "
                     f"{msg.get('method', 'response')}) — host could not parse it"
                 )
                 return
-        # Serialize HERE, on the caller's thread (the event loop for task
-        # results): a TypeError/ValueError can then be turned into an
-        # INTERNAL response for that one call. The writer thread only ever
-        # sees valid bytes and must never die (protocol §2).
-        body = _json.dumps(msg).encode()
         if len(body) > MAX_FRAME and isinstance(msg.get("id"), (int, str)):
             # An oversized RESPONSE would trip the host's read cap and kill
             # the runtime — fail just this call with the typed error (RC.8A).
