@@ -452,13 +452,16 @@ the runtime itself for `python -m` — and the packaged cwd is pinned to
 the bundled resources dir rather than the directory the app was
 launched from. That dir is not necessarily writable (a signed macOS
 `.app`, an installed package): app code should resolve the OS app-data
-directory for files it writes, never relative paths off cwd. Isolated
+directory for files it writes, never relative paths off cwd — the host
+hands that dir to the runtime as `PYLAIR_APP_DATA_DIR` (created if
+missing, simply absent if unresolvable — never fatal). Isolated
 workers inherit all of this. AppImage `APPDIR` entries are
 stripped from `LD_LIBRARY_PATH`/`PATH` (exact-prefix match — sibling dirs
 survive). Dev overrides (`PYLAIR_APP_MODULE`, `PYLAIR_PYTHON`,
-`PYLAIR_PYTHONPATH`) are honored **in debug builds only** — a packaged
-app ignores them, so the launching environment can't swap which
-interpreter or module runs. On Windows the interpreter spawns with
+`PYLAIR_PYTHONPATH`, `PYLAIR_APP_DATA_DIR`) are honored **in debug
+builds only** — a packaged app ignores them, so the launching
+environment can't swap which interpreter or module runs or relocate
+its data dir. On Windows the interpreter spawns with
 `CREATE_NO_WINDOW` so the GUI app shows no stray console; set
 `PYLAIR_CONSOLE` (any value) in the launching environment to keep the
 window for debugging — it grants no extra privilege, just visibility.

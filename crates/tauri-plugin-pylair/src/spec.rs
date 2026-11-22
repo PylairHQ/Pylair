@@ -129,6 +129,50 @@ impl std::fmt::Display for SpawnSpecError {
 
 impl std::error::Error for SpawnSpecError {}
 
+/// `PYLAIR_APP_DATA_DIR` handoff (decision 0009 §2): the runtime learns the
+/// app's per-user data dir from the spawn environment — large artifacts
+/// such as downloaded models live there, outside the install dir, and
+/// survive upgrades, reinstalls and dev restarts. Best-effort, never
+/// fatal: a resolve or mkdir failure is logged once and the variable is
+/// simply left unset (the runtime's model support then reports a clear
+/// error rather than guessing a location).
+///
+/// Override precedent matches the module/interpreter overrides above:
+/// only in debug builds does an inherited `PYLAIR_APP_DATA_DIR` win — the
+/// child inherits the host environment anyway, so nothing is pushed. A
+/// packaged app always gets the resolved dir: the launching environment
+/// must not relocate its data, the same reason it cannot redirect the
+/// interpreter.
+pub(super) fn set_app_data_dir_env(
+    spec: &mut SpawnSpec,
+    dir: Result<PathBuf, tauri::Error>,
+    env: impl Fn(&str) -> Option<String>,
+) {
+    if cfg!(debug_assertions) && env("PYLAIR_APP_DATA_DIR").is_some() {
+        return;
+    }
+    let dir = match dir {
+        // Same verbatim-path simplification as resource_dir above: a
+        // \\?\ prefix in os.environ surprises Python path code.
+        Ok(d) => dunce::simplified(&d).to_path_buf(),
+        Err(e) => {
+            eprintln!("pylair: app_data_dir() failed ({e}); PYLAIR_APP_DATA_DIR left unset");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "pylair: could not create app data dir {} ({e}); PYLAIR_APP_DATA_DIR left unset",
+            dir.display()
+        );
+        return;
+    }
+    spec.env.push((
+        "PYLAIR_APP_DATA_DIR".into(),
+        dir.to_string_lossy().into_owned(),
+    ));
+}
+
 /// Dev-or-release spec: `pylair dev` exports PYLAIR_APP_MODULE / PYLAIR_PYTHON
 /// / PYLAIR_PYTHONPATH / PYLAIR_RESTART_TRIGGER → the project venv; a packaged
 /// build resolves `resource_dir`. Apps use this as the plugin's spec fn.
@@ -149,11 +193,18 @@ pub fn app_spawn_spec<R: Runtime>(
             }
             // NB: PYLAIR_RESTART_TRIGGER is read by the supervisor from its own
             // env (inherited from `pylair dev`) — not forwarded to the child.
+            set_app_data_dir_env(&mut spec, app.path().app_data_dir(), |k| {
+                std::env::var(k).ok()
+            });
             return Ok(spec);
         }
     }
     let res = bundled_resource_dir(app.path().resource_dir())?;
-    Ok(release_spawn_spec(&res, app_module, source_dir))
+    let mut spec = release_spawn_spec(&res, app_module, source_dir);
+    set_app_data_dir_env(&mut spec, app.path().app_data_dir(), |k| {
+        std::env::var(k).ok()
+    });
+    Ok(spec)
 }
 
 /// `resource_dir()` first, exe-relative fallback second. Tauri rejects an

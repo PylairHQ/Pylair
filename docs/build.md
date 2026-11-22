@@ -245,6 +245,30 @@ nothing imports; those files are left uncompiled and will compile (or
 fail to import) as normal at runtime, while the interpreter failing to
 run at all still fails the build.
 
+## App data at runtime
+
+The spawn spec sets `PYLAIR_APP_DATA_DIR` to the app's per-user data dir
+(`app.path().app_data_dir()` — the bundle identifier's folder):
+`%APPDATA%/<id>` on Windows, `~/Library/Application Support/<id>` on
+macOS, `~/.local/share/<id>` on Linux. The plugin creates it if missing;
+if it cannot be resolved the failure is logged once and the variable is
+left unset — never a startup failure.
+
+The dir is deliberately outside the install folder: it survives upgrades
+and reinstalls, needs no admin rights, and is where large runtime-fetched
+artifacts belong — downloaded models under `<dir>/models/` (decision
+0009), caches, user files. Uninstall removes the app, not the data dir.
+
+`pylair dev` hands down the same dir the installed app will use — the dev
+app has the same bundle identifier — and in debug builds an inherited
+`PYLAIR_APP_DATA_DIR` overrides it, like every other dev override. A
+packaged app always uses the resolved dir: the launching environment
+cannot relocate its data, the same reason it cannot redirect the
+interpreter.
+
+Isolated and warm workers are spawned by the runtime and inherit its
+environment, so they see the same variable with no extra plumbing.
+
 ## No cross-compiling
 
 Pylair bundles *native* wheels. A Linux host cannot produce a Windows
