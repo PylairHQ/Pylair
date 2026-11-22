@@ -64,7 +64,7 @@ class GateError(Exception):
 
 
 class _Component:
-    __slots__ = ("detail", "managed", "phase", "progress", "reported")
+    __slots__ = ("detail", "managed", "phase", "progress", "reported", "swept")
 
     def __init__(self, managed: bool = False) -> None:
         self.phase = "loading"
@@ -78,6 +78,11 @@ class _Component:
         # outlives startup — the sweep must not fail it for being
         # slow, only the runtime's own reports move it.
         self.managed = managed
+        # The end-of-startup sweep failed this component while still
+        # loading: its detail is composed lazily at emit time so a
+        # registration that lands after the sweep (0009 §5 models) can
+        # still contribute a more actionable hint.
+        self.swept = False
 
 
 def _resolve_waiter(f: asyncio.Future[None]) -> None:
@@ -169,6 +174,7 @@ class Readiness:
             c.progress = progress
             c.detail = detail
             c.reported = True
+            c.swept = False
             self._dirty.add(name)
             transition = prev != phase
         if transition:
@@ -229,8 +235,9 @@ class Readiness:
         params: dict[str, Any] = {"name": name, "phase": c.phase}
         if c.progress is not None:
             params["progress"] = c.progress
-        if c.detail is not None:
-            params["detail"] = c.detail
+        detail = _emit_detail(name, c)
+        if detail is not None:
+            params["detail"] = detail
         return params
 
     # ---- hook machinery -------------------------------------------------
@@ -252,12 +259,17 @@ class Readiness:
                     continue
                 c.phase = "failed"
                 c.progress = None
+                c.swept = True
                 if name.startswith("worker:"):
                     c.detail = (
                         f"worker:{name[7:]} exists only for a function exposed "
                         "with prewarm=True (0008 §6)"
                     )
                 else:
+                    # Emit-time providers (_emit_detail) may override
+                    # this generic wording for a name registered after
+                    # the sweep — composing at composition time keeps
+                    # the actionable hint reachable (0009 §5).
                     c.detail = (
                         "startup hook finished without reporting ready"
                         if c.reported
@@ -313,9 +325,10 @@ class Readiness:
                             {"component": n},
                         )
                     if c.phase == "failed":
+                        detail = _emit_detail(n, c)
                         raise GateError(
                             f"required component {n!r} failed"
-                            + (f": {c.detail}" if c.detail else ""),
+                            + (f": {detail}" if detail else ""),
                             {"component": n, "phase": "failed"},
                         )
                     if c.phase == "ready":
@@ -359,6 +372,41 @@ class Readiness:
 
 
 _default = Readiness()
+
+# Detail-hint providers consulted when a swept component's failure
+# detail is composed — a name registered after the sweep (0009 §5
+# models) still contributes its actionable hint. Providers run under
+# the registry lock: keep them cheap, lock-free and non-raising.
+_detail_hints: list[Callable[[str], str | None]] = []
+
+# Set when run_startup() begins the post-hello hook pass. A declarative
+# registration that lands during or after startup (0009 §5 models.model
+# inside an @on_startup hook, or a lazily-imported module) must start
+# its work directly — the hook list it would have joined was already
+# snapshotted.
+_startup_begun = threading.Event()
+
+
+def register_detail_hint(fn: Callable[[str], str | None]) -> None:
+    """Let a module add context to sweep-composed failure details."""
+    _detail_hints.append(fn)
+
+
+def _emit_detail(name: str, c: _Component) -> str | None:
+    """The detail a component report carries: for a swept component a
+    provider hint may override the stored generic wording — a name
+    registered after the sweep still gets the actionable detail
+    (0009 §5); otherwise the stored detail."""
+    if c.swept:
+        for fn in _detail_hints:
+            try:
+                hint = fn(name)
+            except Exception:  # noqa: BLE001 - a hint must never break emission
+                hint = None
+            if hint is not None:
+                return hint
+    return c.detail
+
 
 # ---- module-level API ------------------------------------------------------
 
@@ -447,13 +495,22 @@ async def run_startup() -> None:
     """Run every registered hook (started in registration order), then
     the end-of-startup sweep. Zero hooks still sweeps — a `requires=`
     name nothing will report fails immediately."""
+    _startup_begun.set()
     hooks = startup_hooks()
     if hooks:
         await asyncio.gather(*(run_hook(fn) for fn in hooks), return_exceptions=True)
     _default.sweep()
 
 
+def startup_begun() -> bool:
+    """True once run_startup() has begun the post-hello hook pass —
+    a declarative registration landing during/after it starts its own
+    work directly (its autostart hook would never run)."""
+    return _startup_begun.is_set()
+
+
 def reset() -> None:
     """Clear hooks and registry state (test isolation)."""
     _hooks.clear()
     _default.reset()
+    _startup_begun.clear()

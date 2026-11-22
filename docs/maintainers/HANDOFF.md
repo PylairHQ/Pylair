@@ -384,6 +384,15 @@ Merged since rc.17 (d7daaaf):
   `PYLAIR_APP_MODULE`); packaged apps always get the resolved dir.
   Isolated/warm workers inherit it through the runtime env. Crate
   bumps in the next train; `pylair` PR 2 adds `pylair.models`.
+- PR 151 (open): model manager PR 2/3 (decision 0009 §3-§7) —
+  `pylair.models` itself: `models.model()` declarative autostart,
+  `fetch()`/`path()`/`dir()`, `.part` + sidecar storage under
+  `PYLAIR_APP_DATA_DIR`, Range/If-Range resume, ≤5 redirects with
+  cross-origin sensitive-header stripping, https-only, jittered
+  retries, kernel lock with shared progress, cancel-leaves-resumable-
+  `.part`, and readiness integration including the late-registration
+  sweep hint. pylair bump rides the next train; PR 3 is the client
+  selftest.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
