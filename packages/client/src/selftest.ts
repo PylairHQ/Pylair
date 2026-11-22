@@ -9,7 +9,7 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, health, LimitExceededError, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
+import { call, health, LimitExceededError, onApp, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
 import { CMD, ipc, liveTasks } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
@@ -352,6 +352,79 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   });
   if (!healthArmed && checks["health"] === "ok")
     checks["health"] = "skipped: resolved plugin predates python_health";
+  // App readiness (docs/decisions/0007): needs BOTH sides — the CI
+  // fixture (pylair >= 0.1.0rc12 carries on_startup/loading/ready and
+  // @expose(requires=)) and the host (crate >= 0.1.0-rc.20 carries
+  // health().app and the pylair://app event). A missing fixture is a
+  // -32601 from selftest_ping; a fixture that answers on a host that
+  // never reports an app block means the crate predates
+  // app.component — both are clean skips on pack/registry legs and
+  // failures wherever CI armed PYLAIR_APP_READINESS_EXPECTED
+  // (ci.yml --local legs arm it implicitly by grep).
+  let appReadinessArmed = true;
+  await run("app-readiness", async () => {
+    // Subscribe BEFORE the call: startup's transitions fired before
+    // this listener exists, so the fixture's selftest_ping re-reports
+    // a loading→ready cycle — a post-startup subscriber observes at
+    // least one pylair://app phase event deterministically.
+    const phases: string[] = [];
+    const unlisten = await within(onApp((c) => phases.push(c.phase)), 15_000, "onApp subscribe");
+    try {
+      const pong = await within(
+        call<string>("selftest_ping").catch((e: unknown) => {
+          if (e instanceof PythonError && e.code === -32601) {
+            appReadinessArmed = false;
+            return null;
+          }
+          throw e;
+        }),
+        30_000,
+        "selftest_ping",
+      );
+      if (pong === null) return;
+      // requires=("selftest",) let the call through only after the
+      // component went ready; the answer itself is the gate proof.
+      if (pong !== "pong")
+        throw new Error(`selftest_ping answered ${JSON.stringify(pong)}, expected "pong"`);
+      // health().app must name the component ready — bounded poll, no
+      // fixed sleep: a host that predates app readiness keeps app
+      // null/undefined on every read, so the first read exits.
+      let sawApp = false;
+      let phase: string | null = null;
+      const deadline = Date.now() + 15_000;
+      do {
+        const snap = await within(health().catch(() => null), 15_000, "health").catch(
+          () => null,
+        );
+        if (!snap?.app) break;
+        sawApp = true;
+        phase = snap.app.components["selftest"]?.phase ?? null;
+        if (phase === "ready") break;
+        await sleep(100);
+      } while (Date.now() < deadline);
+      if (!sawApp) {
+        appReadinessArmed = false;
+        return;
+      }
+      if (phase !== "ready")
+        throw new Error(
+          `health().app selftest phase ${JSON.stringify(phase)}, expected "ready"`,
+        );
+      // selftest_ping's own loading→ready cycle must have emitted at
+      // least one transition through this subscription — bounded wait
+      // (the event bus can lag the call response that proved the gate).
+      const evDeadline = Date.now() + 10_000;
+      while (phases.length === 0 && Date.now() < evDeadline) await sleep(50);
+      if (phases.length === 0)
+        throw new Error("onApp delivered no phase event for the selftest_ping cycle");
+    } finally {
+      // Unlisten through the real bridge — part of the check.
+      await unlisten();
+    }
+  });
+  if (!appReadinessArmed && checks["app-readiness"] === "ok")
+    checks["app-readiness"] =
+      "skipped: resolved host or package predates app readiness";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
