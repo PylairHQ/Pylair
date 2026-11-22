@@ -257,7 +257,8 @@ left unset — never a startup failure.
 The dir is deliberately outside the install folder: it survives upgrades
 and reinstalls, needs no admin rights, and is where large runtime-fetched
 artifacts belong — downloaded models under `<dir>/models/` (decision
-0009), caches, user files. Uninstall removes the app, not the data dir.
+0009, [docs/models.md](models.md)), caches, user files. Uninstall removes
+the app, not the data dir.
 
 `pylair dev` hands down the same dir the installed app will use — the dev
 app has the same bundle identifier — and in debug builds an inherited

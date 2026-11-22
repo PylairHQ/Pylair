@@ -453,6 +453,149 @@ jobs:
             else
               echo "resolved pylair ${PY_VER:-<none>} predates warm workers (< 0.1.0rc13) — a skip stays legitimate"
             fi
+            # The model manager (decisions 0009) needs BOTH resolved
+            # sides: the pylair package (first release with
+            # pylair.models: 0.1.0rc14) and the crate (first passing
+            # PYLAIR_APP_DATA_DIR into the runtime: 0.1.0-rc.22 —
+            # without it the fixture fails the component). Same probe
+            # style as the warm gate above; EXPECTED arms on the same
+            # gate, so a skip then hides a fixture regression.
+            MODELS_PY=
+            case "$PY_VER" in
+              0.1.0rc*)
+                RC_N=${PY_VER##0.1.0rc}
+                if [ "$RC_N" -ge 14 ]; then MODELS_PY=1; fi ;;
+              "") ;; # no pylair resolved — nothing to arm
+              *) MODELS_PY=1 ;; # any non-rc release is at/past rc14
+            esac
+            MODELS_CRATE=
+            case "$CRATE_VER" in
+              0.1.0-rc.*)
+                RC_N=${CRATE_VER##0.1.0-rc.}
+                if [ "$RC_N" -ge 22 ]; then MODELS_CRATE=1; fi ;;
+              *) MODELS_CRATE=1 ;; # any non-rc line is at/past rc.22
+            esac
+            if [ -n "$MODELS_PY" ] && [ -n "$MODELS_CRATE" ]; then
+              cat >> ../backend/app.py <<'PYEOF'
+
+          # Model-manager self-test (decisions 0009): a loopback-only
+          # HTTP server inside the runtime serves a known blob;
+          # models_selftest_fetch downloads + verifies it and asserts
+          # the second fetch took the sidecar fast path (the server
+          # counts hits — it must stay 1). The warm-worker fixture
+          # resolves the verified file read-only — it can never fetch —
+          # and cleanup removes the model from the app data dir
+          # afterwards. http:// is loopback-only here; the opt-in is
+          # scoped to this app.
+          import hashlib as _m_hashlib
+          import os as _m_os
+          import threading as _m_threading
+          from http.server import BaseHTTPRequestHandler as _m_BHRH
+          from http.server import ThreadingHTTPServer as _m_THS
+          from pathlib import Path as _m_Path
+
+          _MODEL_BLOB = _m_hashlib.sha256(b"pylair-selftest-model").digest() * 8192
+          _MODEL_SHA = _m_hashlib.sha256(_MODEL_BLOB).hexdigest()
+          _model_state: dict = {"server": None, "hits": 0, "url": None}
+
+
+          class _ModelHandler(_m_BHRH):
+              def log_message(self, *args):
+                  pass
+
+              def do_GET(self):
+                  blob = _MODEL_BLOB
+                  _model_state["hits"] += 1
+                  start = 0
+                  status = 200
+                  rng = self.headers.get("Range")
+                  if rng and rng.startswith("bytes="):
+                      try:
+                          start = int(rng[6:].split("-", 1)[0])
+                      except ValueError:
+                          start = 0
+                      if 0 < start < len(blob):
+                          status = 206
+                      else:
+                          start = 0
+                  body = blob[start:]
+                  self.send_response(status)
+                  self.send_header("Content-Length", str(len(body)))
+                  if status == 206:
+                      self.send_header(
+                          "Content-Range", f"bytes {start}-{len(blob) - 1}/{len(blob)}"
+                      )
+                  self.end_headers()
+                  # wfile.write is a single send() and can return short — sendall.
+                  self.connection.sendall(body)
+
+
+          def _models_server_url() -> str:
+              if _model_state["server"] is None:
+                  srv = _m_THS(("127.0.0.1", 0), _ModelHandler)
+                  _m_threading.Thread(target=srv.serve_forever, daemon=True).start()
+                  _model_state["server"] = srv
+                  _model_state["url"] = f"http://127.0.0.1:{srv.server_port}/m"
+              return _model_state["url"]
+
+
+          @expose
+          def models_selftest_fetch() -> dict:
+              # Loopback http for the self-test only — scoped to this
+              # app, never a global allowance.
+              _m_os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = "1"
+              from pylair import models
+
+              url = _models_server_url()
+              kw = {"url": url, "sha256": _MODEL_SHA, "size": len(_MODEL_BLOB)}
+              models.fetch("selftest-model", **kw)
+              models.fetch("selftest-model", **kw)
+              if _model_state["hits"] != 1:
+                  raise RuntimeError(
+                      f"second fetch was not the sidecar fast path "
+                      f"(hits={_model_state['hits']})"
+                  )
+              root = models.dir("selftest-model")
+              app_data = _m_os.environ.get("PYLAIR_APP_DATA_DIR", "")
+              if not app_data or root != _m_Path(app_data) / "models":
+                  raise RuntimeError(
+                      f"model root {root} is not <app-data>/models ({app_data!r})"
+                  )
+              p = models.path("selftest-model")
+              if p.parent != root:
+                  raise RuntimeError(f"models.path {p} is not under {root}")
+              return {"path": str(p), "root": str(root), "hits": _model_state["hits"]}
+
+
+          @expose(worker={"mode": "warm"})
+          def models_warm_path() -> dict:
+              # Resolve-only inside a warm worker — it can never
+              # download, so a returned path proves the verified file
+              # is shared across processes.
+              from pylair import models
+
+              return {"path": str(models.path("selftest-model")), "pid": _m_os.getpid()}
+
+
+          @expose
+          def models_selftest_cleanup() -> dict:
+              from pylair import models
+
+              root = models.dir("selftest-model")
+              if root.is_dir():
+                  for f in root.glob("selftest-model*"):
+                      f.unlink(missing_ok=True)
+              srv = _model_state.get("server")
+              if srv is not None:
+                  srv.shutdown()
+                  _model_state["server"] = None
+              return {"removed": True}
+          PYEOF
+              echo "PYLAIR_MODELS_EXPECTED=1" >> "$GITHUB_ENV"
+              echo "models fixtures appended (pylair $PY_VER + crate $CRATE_VER carry the model manager) — a skipped check fails the leg"
+            else
+              echo "model manager not fully resolved (pylair ${PY_VER:-<none>}, crate $CRATE_VER) — a skip stays legitimate"
+            fi
           else
             echo "resolved crate predates python_selftest_b_report — two-window self-test skipped"
           fi
@@ -503,7 +646,7 @@ jobs:
           for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
           # Bare ubuntu:22.04 has NO python — --self-test exits before the
           # Tauri loop/GTK init but still needs its linked system libs.
-          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -e PYLAIR_WARM_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
+          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -e PYLAIR_WARM_EXPECTED -e PYLAIR_MODELS_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
             for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
             apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
@@ -535,6 +678,14 @@ jobs:
               # regression (exact key, escaped quotes as above).
               if [ "$PYLAIR_WARM_EXPECTED" = "1" ] && grep -q "\"warm-workers\":\"skipped" /tmp/wst.log; then
                 echo "warm-workers skipped but resolved pylair carries warm workers" >&2
+                exit 1
+              fi
+              # The model manager: armed only when BOTH the resolved
+              # pylair (>= 0.1.0rc14) and crate (>= 0.1.0-rc.22, for
+              # PYLAIR_APP_DATA_DIR) carry it — a skip then hides a
+              # fixture/host regression (exact key, escaped quotes).
+              if [ "$PYLAIR_MODELS_EXPECTED" = "1" ] && grep -q "\"models\":\"skipped" /tmp/wst.log; then
+                echo "models skipped but resolved pylair + crate carry the model manager" >&2
                 exit 1
               fi
             fi
@@ -598,6 +749,11 @@ jobs:
             if ($env:PYLAIR_WARM_EXPECTED -eq '1' -and
                 (Select-String -Path $out -Pattern '"warm-workers":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
               Write-Error 'warm-workers skipped but resolved pylair carries warm workers'
+              exit 1
+            }
+            if ($env:PYLAIR_MODELS_EXPECTED -eq '1' -and
+                (Select-String -Path $out -Pattern '"models":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
+              Write-Error 'models skipped but resolved pylair + crate carry the model manager'
               exit 1
             }
             $env:PYLAIR_SELF_TEST_WEBVIEW = $null
@@ -674,6 +830,10 @@ jobs:
             fi
             if [ "$PYLAIR_WARM_EXPECTED" = "1" ] && grep -q '"warm-workers":"skipped' /tmp/wst.log; then
               echo "warm-workers skipped but resolved pylair carries warm workers" >&2
+              exit 1
+            fi
+            if [ "$PYLAIR_MODELS_EXPECTED" = "1" ] && grep -q '"models":"skipped' /tmp/wst.log; then
+              echo "models skipped but resolved pylair + crate carry the model manager" >&2
               exit 1
             fi
           fi

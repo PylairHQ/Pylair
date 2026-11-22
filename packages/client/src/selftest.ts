@@ -544,6 +544,69 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   if (!warmArmed && checks["warm-workers"] === "ok")
     checks["warm-workers"] =
       "skipped: backend has no warm_selftest fixture (resolved pylair predates warm workers)";
+  // Model manager (docs/decisions/0009): the fixture serves a known
+  // blob over a loopback-only HTTP server inside the runtime;
+  // models.fetch downloads + verifies it and a second fetch must take
+  // the sidecar fast path (the server counts hits — it must stay 1).
+  // health().app then carries the component the fetch declared, and a
+  // warm worker resolves the same verified path read-only (it can
+  // never download). Needs pylair >= 0.1.0rc14 AND a crate >=
+  // 0.1.0-rc.22 passing PYLAIR_APP_DATA_DIR — a missing fixture is
+  // -32601: a clean skip on pack/registry legs, a failure wherever CI
+  // armed PYLAIR_MODELS_EXPECTED (--local legs arm it implicitly).
+  let modelsArmed = true;
+  await run("models", async () => {
+    let info: { path: string; root: string; hits: number };
+    try {
+      info = await within(
+        call<{ path: string; root: string; hits: number }>("models_selftest_fetch", {}),
+        60_000,
+        "models_selftest_fetch",
+      );
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) {
+        modelsArmed = false;
+        return;
+      }
+      throw e;
+    }
+    if (info.hits !== 1)
+      throw new Error(`second fetch hit the server ${info.hits} times — no fast path`);
+    const norm = (s: string) => s.replace(/\\/g, "/");
+    if (!norm(info.path).startsWith(`${norm(info.root)}/`))
+      throw new Error(`models.path gave ${info.path} — not under ${info.root}`);
+    // The fetch declared + reported "selftest-model" before returning;
+    // a bounded poll proves it landed in health().app (no fixed sleep).
+    const deadline = Date.now() + 15_000;
+    let phase: string | null = null;
+    do {
+      const snap = await within(health().catch(() => null), 15_000, "health").catch(
+        () => null,
+      );
+      phase = snap?.app?.components["selftest-model"]?.phase ?? null;
+      if (phase === "ready") break;
+      await sleep(100);
+    } while (Date.now() < deadline);
+    if (phase !== "ready")
+      throw new Error(
+        `health().app selftest-model phase ${JSON.stringify(phase)}, expected "ready"`,
+      );
+    // Read-only resolve inside a warm worker: it can never download,
+    // so an identical path proves the verified file is shared across
+    // processes and requires-gating is unnecessary here.
+    const warm = await within(
+      call<{ path: string; pid: number }>("models_warm_path", {}),
+      30_000,
+      "models_warm_path",
+    );
+    if (warm.path !== info.path)
+      throw new Error(`warm worker resolved ${warm.path}, expected ${info.path}`);
+    // Leave nothing behind in the installed app's app-data dir.
+    await within(call("models_selftest_cleanup", {}), 30_000, "models_selftest_cleanup");
+  });
+  if (!modelsArmed && checks["models"] === "ok")
+    checks["models"] =
+      "skipped: backend has no models fixtures (resolved pylair predates the model manager)";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
