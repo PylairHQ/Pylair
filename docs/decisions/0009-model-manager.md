@@ -1,8 +1,10 @@
 # 0009: Model download manager (`pylair.models`)
 
-Status: proposed (spike: PR #149, throwaway proof in `spikes/m9-models/`,
-CI run evidence in `.github/workflows/spike-tls.yml` on the spike
-branch — the workflow file is not for merge)
+Status: accepted (spike: PR #149 — reviewed and direction approved;
+throwaway proof in `spikes/m9-models/`; TLS evidence from the
+spike-tls workflow that ran on this branch — runs 45063788355,
+45063859707, 45064141770 — the workflow file itself was dropped from
+the PR since it only ever ran on the spike branch)
 
 ## Question
 
@@ -96,8 +98,9 @@ This decided whether `pylair` stays dependency-free, so it was tested
 on the exact shipped artifact: PBS `20261110` `3.12.16`
 `install_only_stripped` per host triple, SHA-256 checked against the
 committed `PBS_SHA256` values, positive probe (`pypi.org`) and negative
-probe (`self-signed.badssl.com` must fail) — `spike-tls.yml` runs
-`45063788355` (initial, linux leg fixed in `45063859707`).
+probe (`self-signed.badssl.com` must fail) — the `spike-tls.yml`
+workflow ran on the spike branch: `45063788355`, `45063859707` (linux
+leg after a sha fix), `45064141770` — all green on all three OSes.
 
 | OS | Default verify paths | `urlopen https` | Verdict |
 |---|---|---|---|
@@ -142,7 +145,16 @@ The CLI's own PBS fetch already implements the semantics this needs;
 - `urllib.request` with a real `Request` (headers), `read(64 KiB)`
   chunks to `<name>.part`, hashing into `hashlib.sha256` as bytes land.
 - Redirects: followed up to 5, cross-scheme or non-https targets
-  refused (download.ts:171-182 pattern).
+  refused (download.ts:171-182 pattern). **Sensitive headers are
+  stripped on cross-origin hops** — urllib's redirect handler copies
+  `add_header` headers onto the redirected request *including across
+  hosts*, and a Hugging-Face-style gate 302s to a CDN host, so a naive
+  `headers={"Authorization": …}` would leak the token to the CDN.
+  `models` subclasses `HTTPRedirectHandler` (or runs the redirect loop
+  itself): the sensitive set — `authorization`, `cookie`, plus any
+  caller-marked names via `sensitive_headers=` — is forwarded only
+  while the origin (scheme, host, port; default ports normalized) is
+  unchanged, and dropped when it changes. Same-origin hops keep them.
 - Hash match on completion ⇒ `os.replace(.part, <name>)` (atomic on
   same filesystem — `.part` lives in the same dir) then sidecar write.
   Mismatch ⇒ delete `.part`, one clean restart; a second mismatch
@@ -217,14 +229,48 @@ read of the partial file.
   the sidecar only on success, so a cancelled/shutdown/dev-restart
   download just leaves `.part` for the next launch. On runtime exit
   the daemon thread dies with the process — same semantics.
-- **Readiness lifecycle**: `declare(name, managed=True)` at fetch
-  start so the end-of-startup sweep never fails a model still
-  downloading after startup completes (0007/0008's managed flag —
-  `worker:<fn>` precedent: a component whose lifecycle outlives
-  startup). `requires=(name,)` waits through the sweep by design.
-- **on_startup hooks**: an `@on_startup` hook can `fetch` directly —
-  it runs beside dispatch, and progress flows through the same
-  component. The example app does exactly this.
+- **Readiness lifecycle — and the first-call race**: `requires=(name,)`
+  declares the component *unmanaged* at decoration. If nothing marks it
+  managed before the end-of-startup sweep, the sweep fails it — a
+  `fetch()` intended to run lazily inside the gated fn **can never
+  run**, because the call is gated on a component that already failed.
+  The fix is the declarative form (§7): `models.model(name, ...)` at
+  module level registers the spec *and* `declare(name, managed=True)`
+  at import, so either declaration order resolves managed (the
+  `declare` upgrade path — `requires` first or `model` first). A
+  `fetch()` invoked directly also declares managed at start, so a
+  managed component survives the sweep whenever the call itself ran
+  before it.
+- **Auto-start**: after hello, the runtime starts each registered
+  model's download in the same phase as `@on_startup` hooks — each on
+  its own fetch thread, unordered relative to user hooks, and never
+  blocking dispatch. An already-verified file resolves by stat and the
+  auto-fetch returns immediately.
+- **Sweep hint**: `_registry` doubles as the known-model set. When the
+  sweep fails an unmanaged component, the failed detail consults
+  `_registry` *when the detail is composed* — so a `models.model()`
+  call that landed after the sweep (inside a hook, or in a
+  lazily-imported module) still matches: the component reports
+  `failed`, and the detail says a model by this name was registered
+  too late to be declared managed — `models.model` belongs at module
+  import. The late registration does still `declare` managed and
+  self-start its download, so the component heals to `loading`/`ready`
+  — the hint explains the transient instead of leaving a bare "never
+  reported". Same class of hint as the unmanaged `worker:`-prefixed
+  detail that suggests `prewarm=True`.
+- **`fetch()` placement**: the manual form belongs in an `@on_startup`
+  hook (or another path that runs during/after startup ungated). A
+  `fetch` behind the same name's `requires` gate is the documented
+  anti-pattern — use `models.model` instead.
+- **Warm workers**: worker processes spawn from the runtime
+  (`python -m pylair._worker`), inheriting its environment —
+  `PYLAIR_APP_DATA_DIR` propagates with no extra plumbing. In a
+  worker, `models.path(name)` is resolve-and-check only: verified
+  sidecar+file ⇒ `Path`, else `ModelNotReady` — it **never** takes the
+  lock, creates `.part`, or touches the network. Workers are leaf
+  executors; the readiness-reporting main runtime owns downloads, and
+  `requires=(name,)` is what keeps a call from reaching the worker
+  before the model is ready.
 
 ## 6. Security
 
@@ -232,11 +278,15 @@ read of the partial file.
   `PYLAIR_MODELS_ALLOW_INSECURE=1` is set explicitly (dev/LAN servers);
   `file:`/`ftp:`/`data:` refused outright — a model URL is remote by
   definition.
-- **Secrets**: `headers` are forwarded verbatim to the request and
-  **never** appear in logs, `failed` details, or readiness reports —
-  error strings carry status codes and hostnames, not headers.
-  (`url` is logged — it is the identity of the thing, and app code
-  supplied it; tokens belong in `headers`.)
+- **Secrets**: `headers` are forwarded to the request and **never**
+  appear in logs, `failed` details, or readiness reports — error
+  strings carry status codes and hostnames, not headers. On redirects
+  the sensitive set (`authorization`, `cookie`, `sensitive_headers=`
+  extras) survives only same-origin hops — it is dropped the moment
+  the origin changes, so a gated-model token can never reach a CDN
+  (§3). (`url` is logged — it is the identity of the thing, and app
+  code supplied it; tokens belong in `headers`, and a signed URL's
+  embedded token is the app's choice to log.)
 - **`name` traversal**: `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, no `..`,
   no separators — `models/"../x"` is a `ValueError` before any fs op.
   The regex also forbids names that would collide with the reserved
@@ -245,7 +295,9 @@ read of the partial file.
   thread; the only loop interaction is the thread-safe readiness
   report — a model download can never starve dispatch or pongs.
 - **Redirect chain**: scheme re-validated per hop (no `https → http`
-  downgrade); cap at 5 hops.
+  downgrade); cap at 5 hops; sensitive headers stripped on any origin
+  change (§3 — urllib would otherwise forward `Authorization` to the
+  redirect target host).
 
 ## 7. API surface, out of scope, example
 
@@ -253,9 +305,13 @@ read of the partial file.
 
 | API | Behavior |
 |---|---|
-| `fetch(name, *, url, sha256, size=None, headers=None, timeout=None)` | idempotent: verified-ready returns immediately (one stat); else acquire lock → download/resume → verify → `ready`. Returns `Path`. |
-| `path(name)` | `Path` if verified-ready, else `ModelNotReady` (a `RuntimeError` subclass). |
+| `model(name, *, url, sha256, size=None, headers=None, sensitive_headers=None)` | **declarative, module level**: registers the spec in `_registry` and `declare(name, managed=True)` at import; after hello the runtime auto-starts the download beside `@on_startup` hooks. The answer to the first-call race in §5 — `requires=(name,)` alone is unmanaged, so a model must be declared (here) or fetched during startup, never lazily behind its own gate. |
+| `fetch(name, *, url, sha256, size=None, headers=None, sensitive_headers=None, timeout=None)` | idempotent manual form: verified-ready returns immediately (one stat); else acquire lock → download/resume → verify → `ready`. Returns `Path`. Belongs in an `@on_startup` hook (declares managed on entry) or any ungated path. |
+| `path(name)` | `Path` if verified-ready, else `ModelNotReady` (a `RuntimeError` subclass). In a worker process: resolve-and-check only, never downloads (§5). |
 | `dir(name)` | the `models/` dir `Path` (mainly for logging/`du`). |
+
+`sensitive_headers` names caller-supplied `headers` entries that join
+`authorization`/`cookie` in the strip-on-origin-change set (§3).
 
 Everything else is **out of scope for v1**: model catalogues/registries,
 mirror lists/fallbacks, delta/range-based updates, parallel multi-range
@@ -267,21 +323,26 @@ Each is a plausible `docs/ideas.md` entry — none gates the v1 design.
 **Example story** — a chat app, first launch vs later launches:
 
 ```python
-@on_startup
-def load_llm():
-    # first launch: downloads with progress in health().app;
-    # later launches: one stat and straight to ready.
-    models.fetch("llm-7b-q4",
-                 url="https://…/model.gguf",
-                 sha256="…",
-                 size=4_100_000_000)
+# module level: registered + declared managed at import; the download
+# auto-starts after hello beside @on_startup hooks. First launch it
+# downloads with progress in health().app; later launches one stat.
+models.model("llm-7b-q4",
+             url="https://…/model.gguf",
+             sha256="…",
+             size=4_100_000_000)
 
 @expose(isolated=True,
         worker={"mode": "warm", "prewarm": True},
         requires=("llm-7b-q4", "worker:chat"))
 def chat(prompt: str) -> str:
+    # models.path("llm-7b-q4") resolves the verified file here —
+    # read-only in the worker, guaranteed ready by requires=.
     ...
 ```
+
+(The manual equivalent — `@on_startup` calling `models.fetch(...)` —
+is for URLs decided at startup or conditional downloads; it declares
+managed on entry, so it composes the same way.)
 
 First launch: the `llm-7b-q4` component shows `loading` with `x of y
 GB` progress (and `worker:chat` reports its own prewarm state); a
@@ -299,6 +360,20 @@ the model once, calls stay under the warm-path millisecond range from
   name validation, `.part` reuse across "restarts" (delete only the
   runtime, keep the dir), the second-caller-waits-and-shares-progress
   case, and lock contention (two `fetch` threads, one models dir).
+- **Redirect secrets**: loopback server A answers 302 to server B on a
+  different port (a different origin) — B records inbound headers and
+  asserts `Authorization`/`Cookie` (and a `sensitive_headers`-marked
+  custom header) **never arrive**; a same-origin hop keeps them.
+- **Declarative `models.model` + sweep**: a `requires`-gated fn with no
+  `on_startup` fetch — module-level `models.model` declares managed at
+  import, the sweep leaves the component alone, the post-hello
+  auto-start downloads it, and the gated call runs after `ready`; a
+  `models.model` invoked late (inside a hook) gets the hint detail.
+- **Worker**: spawn a `pylair._worker` process — it inherits
+  `PYLAIR_APP_DATA_DIR`; `models.path` inside resolves a verified model
+  and raises `ModelNotReady` on an unverified one **without** creating
+  `.part`/`.lock` or touching the network (fixture server counts zero
+  hits).
 - **Fault injection**: kill the fetch thread's process between chunks
   (POSIX flock release + Windows `msvcrt.locking` release — the
   mechanism proven in `lock_proof.py`), `If-Range` mismatch → 200
@@ -310,7 +385,7 @@ the model once, calls stay under the warm-path millisecond range from
   installed-webview self-test on `--local` legs — the fixture fetches a
   *small* file from a loopback server started by the harness (real
   multi-GB downloads are covered by the unit/e2e layers).
-- **CI**: the `spike-tls.yml` evidence above already proves bundled-
+- **CI**: the `spike-tls.yml` runs above already prove bundled-
   interpreter HTTPS on all three OSes; the implementation PR keeps a
   smaller permanent TLS probe inside the Python suite (against the
   loopback fixture with a generated cert — no network dependence in CI).
