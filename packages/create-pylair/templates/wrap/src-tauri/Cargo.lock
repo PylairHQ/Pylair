@@ -3462,9 +3462,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.20"
+version = "0.1.0-rc.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4987d56dd4895a6c50622c446b9b01c09e27bef04f5e9f02094320f656e0ef5"
+checksum = "8b949ad3986693f2e0ef75993752497da68d97d841863730809df6c3b809f585"
 dependencies = [
  "async-trait",
  "dunce",
@@ -3671,15 +3671,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "__APP_NAME__"
-version = "0.1.0"
-dependencies = [
- "tauri",
- "tauri-build",
- "tauri-plugin-pylair",
-]
 
 [[package]]
 name = "tokio"
@@ -4608,6 +4599,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "__APP_NAME__"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-pylair",
+]
 
 [[package]]
 name = "writeable"
