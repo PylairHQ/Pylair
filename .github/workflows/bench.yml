@@ -116,7 +116,7 @@ jobs:
       - name: Host to Python leg (Rust)
         shell: bash
         run: |
-          cargo test -p tauri-plugin-pylair --test bench_latency -- --ignored --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/bench-rust.log"
+          cargo test --release -p tauri-plugin-pylair --test bench_latency -- --ignored --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/bench-rust.log"
       - name: Python dispatch leg
         working-directory: python/pylair
         shell: bash
