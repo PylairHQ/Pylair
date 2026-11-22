@@ -536,6 +536,15 @@ platform:
   shutdown phase - stop accepting, task cancel, isolated-worker kill
   waits, writer flush, close - never a fresh timeout per phase. A host
   that sends no params gets the runtime's 5000 ms default.
+- **A cleanup step that can itself hang is skipped, and the runtime
+  exits the process instead of performing it.** If the writer is still
+  inside `write()` when its budget expires, the channel is dead —
+  closing it can block on the pending write (Windows, #142) — so the
+  runtime leaves the handle open and exits; the OS reaps it. The same
+  exit covers executor threads still running cancelled work, which the
+  loop teardown would otherwise join unbounded (3.12) or for 300 s
+  (3.15). Nothing is lost: the host is already gone, so no frame could
+  be delivered anyway.
 - Calls issued while the runtime is *restarting* (crash backoff) or
   *failed* fail fast with `RUNTIME_UNAVAILABLE`; calls issued while it is
   merely *starting* queue until the handshake completes.

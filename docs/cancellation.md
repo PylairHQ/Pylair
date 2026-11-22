@@ -167,7 +167,10 @@ at `@expose` time, not at cancel time.
   `grace_ms`; tasks past the deadline get `TASK_CANCELLED` (async) or
   process-group kill (isolated workers are children of the runtime —
   killing the runtime must not orphan them; supervisor tracks and
-  reaps).
+  reaps). A cancelled inline-sync call's executor thread can outlive
+  the drain — it cannot be interrupted — so the exit path joins the
+  executor only within the shared deadline and exits the process
+  rather than hang teardown on it (protocol §7, #142).
 
 ## Leak guarantees (what the M3 tests assert)
 

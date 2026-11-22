@@ -73,6 +73,13 @@ def _log(msg: str) -> None:
     print(f"[pylair] {msg}", file=sys.stderr, flush=True)
 
 
+def _hard_exit(code: int) -> None:
+    """Last-resort process exit that skips every cleanup layer — used
+    when a cleanup step itself can deadlock (#142). Tests monkeypatch
+    this to observe the call without exiting the test process."""
+    os._exit(code)
+
+
 class _BoundedOut:
     """Frame+byte bounded queue for outbound frames (RC.8A).
 
@@ -526,6 +533,50 @@ class Server:
             if t.asyncio_task is not None:
                 t.asyncio_task.cancel()
 
+    def _finish(self, writer: threading.Thread) -> None:
+        """Join the writer, then close the channel — or exit the process.
+
+        A writer still inside write() after its join budget is on a pipe
+        the host stopped draining: functionally gone. Closing the fd
+        from this thread can then block indefinitely — on Windows the
+        close waits on the pending synchronous write (#142). The host is
+        gone and nothing more can be delivered, so leave the handle open
+        and exit instead; the OS reaps it and the blocked writer with it.
+        """
+        writer.join(timeout=self._remaining(2.0) or 0)
+        if writer.is_alive():
+            _log("writer still blocked on a dead channel — leaving it open and exiting")
+            sys.stderr.flush()
+            _hard_exit(0)
+            return  # unreachable in production; tests patch _hard_exit
+        self._channel.close_write()
+
+    async def _finish_executor(self) -> None:
+        """Join the default executor within the shared budget.
+
+        A cancelled inline-sync call leaves its executor thread running
+        (docs/cancellation.md), and asyncio.run's teardown joins that
+        executor unbounded (CPython 3.12) or for up to 300 s (3.15) —
+        the same exit hang as a wedged channel, on a healthy pipe. Bound
+        the join here; on expiry exit the same way, since those threads
+        die with the process anyway.
+        """
+        loop = asyncio.get_running_loop()
+        if getattr(loop, "_default_executor", None) is None:
+            return
+        try:
+            await asyncio.wait_for(
+                loop.shutdown_default_executor(),
+                timeout=max(self._remaining(2.0) or 0, 0.05),
+            )
+        except TimeoutError:
+            _log(
+                "executor still running cancelled work past the "
+                "shutdown budget — exiting without joining it"
+            )
+            sys.stderr.flush()
+            _hard_exit(0)
+
     async def _startup(self) -> None:
         """Run the @on_startup hooks, then the end-of-startup sweep
         (decision 0007 §1). Shares the drain path: at shutdown this task
@@ -608,11 +659,19 @@ class Server:
         # only once the queue is empty. Join it BEFORE closing the fd —
         # closing first makes write_frame fail on the closed stream and
         # every final frame (shutdown ack, TASK_CANCELLEDs) is dropped.
-        writer.join(timeout=self._remaining(2.0) or 0)
-        self._channel.close_write()
+        self._finish(writer)
+        await self._finish_executor()
 
 
 def run(channel: FrameChannel) -> None:
+    # Diagnostic for #142-class shutdown hangs: dump every thread's
+    # stack to stderr on an interval. Off unless the env var carries
+    # an interval in seconds.
+    hang_probe = os.environ.get("PYLAIR_DEBUG_HANG")
+    if hang_probe:
+        import faulthandler
+
+        faulthandler.dump_traceback_later(float(hang_probe), repeat=True)
     try:
         asyncio.run(Server(channel).run())
     except BaseException as e:

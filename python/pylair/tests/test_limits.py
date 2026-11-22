@@ -20,8 +20,9 @@ import pytest
 
 from conftest import _LEN, HERE
 from pylair import _protocol as proto
+from pylair import _server
 from pylair._server import _EOF, _STOP, Server, _BoundedOut
-from pylair._transport import MAX_FRAME
+from pylair._transport import MAX_FRAME, FrameChannel
 
 
 class _FakeChannel:
@@ -142,6 +143,9 @@ def test_stalled_host_exits_with_distinct_reason():
     # chunks): if the pipe ever swallowed the whole flood, the queue would
     # never fill and the "stalled host" path could not be exercised.
     env["PYLAIR_MAX_STREAM_CREDIT"] = "32768"
+    # Diagnostic (#142): if the runtime still hangs, every thread's stack
+    # lands on stderr — the tail below shows where it actually is.
+    env["PYLAIR_DEBUG_HANG"] = "15"
     proc = subprocess.Popen(
         [sys.executable, "-m", "pylair", "testapp"],
         stdin=subprocess.PIPE,
@@ -187,6 +191,82 @@ def test_stalled_host_exits_with_distinct_reason():
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+# ---- dead-channel / executor exit (#142) --------------------------------------
+
+
+def test_dead_channel_writer_exits_without_closing(monkeypatch):
+    """A writer mid-write on a pipe nobody drains must not be closed from
+    the main thread — on Windows the close waits on the pending write and
+    deadlocks the exit (#142). _finish bounds the join and exits instead."""
+    rfd, wfd = os.pipe()
+    ch = FrameChannel(rfd, wfd)  # the read end is deliberately never drained
+    s = Server(ch)
+    # A frame far bigger than any pipe buffer leaves the writer blocked
+    # inside write() mid-frame on every OS.
+    s._out.put_nowait(b"x" * (1 << 20))
+    w = threading.Thread(target=s._writer, name="tp-writer", daemon=True)
+    w.start()
+    deadline = time.time() + 5
+    while s._out.stats()[0] and time.time() < deadline:
+        time.sleep(0.01)  # wait until the frame is dequeued into write()
+    assert w.is_alive()
+    s._out.close()  # _STOP lands behind the frame the writer still holds
+    s._deadline = time.monotonic() + 0.05  # shrink the join budget
+
+    exits = []
+    monkeypatch.setattr(_server, "_hard_exit", exits.append)
+    t0 = time.monotonic()
+    s._finish(w)
+    assert time.monotonic() - t0 < 5
+    assert exits == [0]
+    assert w.is_alive()  # still wedged — but skipped, not closed
+    assert not ch._w.closed
+
+    # Closing the read end breaks the pipe: write() fails and the daemon
+    # writer exits, so the test leaks no blocked thread. Close through
+    # the channel's own FileIO so its state stays consistent.
+    ch._r.close()
+    w.join(timeout=5)
+    assert not w.is_alive()
+
+
+def test_stuck_executor_exits_instead_of_hanging_teardown(monkeypatch):
+    """A cancelled inline-sync call leaves its executor thread running;
+    asyncio.run's teardown would join it unbounded (3.12) or for 300 s
+    (3.15). _finish_executor bounds the join and exits instead (#142)."""
+    started = threading.Event()
+    gate = threading.Event()
+
+    def work():
+        started.set()
+        gate.wait(30)
+
+    exits = []
+    monkeypatch.setattr(_server, "_hard_exit", exits.append)
+
+    async def go():
+        s = Server(_FakeChannel())
+        s._deadline = time.monotonic() + 0.05
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, work)
+        # Wait until the work item is actually running on a thread —
+        # _finish_executor skips only an executor that was never used.
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        await s._finish_executor()
+
+    loop = asyncio.new_event_loop()
+    try:
+        t0 = time.monotonic()
+        loop.run_until_complete(go())  # an asyncio.run teardown would hang here
+        assert time.monotonic() - t0 < 5
+        assert exits == [0]
+    finally:
+        gate.set()  # release the work, then close the loop normally
+        loop.run_until_complete(loop.shutdown_default_executor())
+        loop.close()
 
 
 # ---- inbound bound: control never waits behind data ---------------------------
