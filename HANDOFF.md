@@ -91,6 +91,30 @@ next`, then registry acceptance with `source=registry` and
 `PYLAIR_HEALTH_EXPECTED` arms (`python_health` first ships in
 rc.19), so a `health` skip fails the leg on every OS.
 
+The next train is app readiness (PRs 128-131 plus the selftest/docs
+PR, `docs/decisions/0007`) — the first train since rc.21 that touches
+all three registries. `@on_startup` hooks report named components
+`loading`/`ready`/`failed`, coalesced into `app.component`
+notifications; `@expose(requires=…)` gates calls on them (a `failed`
+requirement answers `INTERNAL` with `data.component`); the host keeps
+a bounded per-generation component map in `health().app` and emits
+`pylair://app` (`onApp`) on phase transitions only — progress reads
+stay poll-only. Order:
+
+1. publish crate `0.1.0-rc.20`;
+2. publish `pylair 0.1.0rc12` to PyPI (`release.yml`,
+   `package=pylair`) — the first PyPI publish since rc.21;
+3. pins PR: npm `0.1.0-rc.26`, scaffold pins `rs =0.1.0-rc.20` and
+   `py pylair==0.1.0rc12`, template `Cargo.lock` regenerated against
+   the published crate;
+4. pack-mode acceptance green on that commit, then the npm trio
+   under `--tag next`;
+5. registry acceptance with `source=registry` and
+   `expect_version 0.1.0-rc.26` — the first run where
+   `PYLAIR_APP_READINESS_EXPECTED` arms (it requires BOTH the rc.20
+   crate and the 0.1.0rc12 package resolved), so an `app-readiness`
+   skip fails the leg on every OS.
+
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
 Wrap mode ships in 0.1.0. W1 is the plumbing only; nothing user-facing
@@ -255,9 +279,27 @@ Merged since rc.17 (d7daaaf):
 - PR 88: per-function permissions (crate `fn_scope`, client
   `PermissionDeniedError`, CLI capability checks, self-test
   `fn-permission` check, `docs/decisions/0004-per-function-permissions.md`).
+- PRs 128-131 plus the selftest/docs PR: app-defined readiness
+  (`docs/decisions/0007`). Python reports named components through
+  `@on_startup` hooks + `loading`/`ready`/`failed`, coalesced into
+  `app.component` notifications (first post-hello flush carries one
+  `loading` frame per declared component); `@expose(requires=…)`
+  gates calls on them (a `failed` requirement answers `INTERNAL`
+  with `data.component`; cancelling the wait is `TASK_CANCELLED`).
+  The host keeps a bounded per-generation component map (32 names,
+  64/256-char truncation, progress outside `[0,1]` → `null`) in
+  `health().app` and emits `pylair://app` on phase transitions only;
+  the client gained `HealthApp`/`AppChange` types and `onApp`. The
+  installed-webview self-test gained an `app-readiness` check —
+  mandatory on `--local` legs and, on pack/registry legs, only when
+  BOTH the resolved crate (≥ `0.1.0-rc.20`) and the resolved `pylair`
+  (≥ `0.1.0rc12`) carry the feature (`PYLAIR_APP_READINESS_EXPECTED`,
+  mirroring `PYLAIR_HEALTH_EXPECTED`). All three registries move —
+  see the train paragraph above.
 
-`python/` and `integrations/` have not changed since rc.16, so step 2
-below is skipped for rc.20.
+`python/` and `integrations/` had not changed since rc.16 until app
+readiness (PR 129) — the next train's PyPI step is back on; step 2
+below was skipped for rc.20 only.
 
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 

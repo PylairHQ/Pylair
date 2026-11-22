@@ -355,6 +355,63 @@ jobs:
             else
               echo "resolved crate $CRATE_VER predates python_health (< 0.1.0-rc.19) — a skip stays legitimate"
             fi
+            # App readiness (decisions 0007) needs BOTH resolved sides:
+            # the pylair package (first release with the readiness API:
+            # 0.1.0rc12 — proven by _readiness.py in the synced .venv,
+            # same feature-file probe as the crate greps) and the crate
+            # (first with health().app + pylair://app: 0.1.0-rc.20). The
+            # fixture imports pylair's readiness API at module load, so
+            # it is appended only when the package carries it; the
+            # EXPECTED env arms only when the host can also report the
+            # app block — mirroring PYLAIR_HEALTH_EXPECTED above.
+            PYREADINESS=$(find ../.venv -path "*pylair/_readiness.py" -print -quit 2>/dev/null)
+            APPREADY_CRATE=
+            case "$CRATE_VER" in
+              0.1.0-rc.*)
+                RC_N=${CRATE_VER##0.1.0-rc.}
+                if [ "$RC_N" -ge 20 ]; then APPREADY_CRATE=1; fi ;;
+              *) APPREADY_CRATE=1 ;; # any non-rc line is at/past rc.20
+            esac
+            if [ -n "$PYREADINESS" ]; then
+              cat >> ../backend/app.py <<'PYEOF'
+
+          # App-readiness self-test (decisions 0007): the startup hook
+          # reports the "selftest" component loading then ready, and
+          # selftest_ping is gated on it via requires=. The ping/done
+          # pair re-reports the cycle as two REAL transitions — a
+          # single loading+ready inside one call would coalesce to a
+          # no-op on the wire — so a webview subscribed to pylair://app
+          # observes a phase event deterministically.
+          from pylair import loading, on_startup, ready
+
+
+          @on_startup
+          def _selftest_component() -> None:
+              loading("selftest", 0.5)
+              ready("selftest")
+
+
+          @expose(requires=("selftest",))
+          def selftest_ping() -> str:
+              loading("selftest", 0.9)
+              return "pong"
+
+
+          @expose
+          def selftest_done() -> str:
+              ready("selftest")
+              return "done"
+          PYEOF
+              echo "app-readiness fixture appended (resolved pylair carries the readiness API)"
+            else
+              echo "resolved pylair predates app readiness (< 0.1.0rc12) — fixture not appended"
+            fi
+            if [ -n "$PYREADINESS" ] && [ -n "$APPREADY_CRATE" ]; then
+              echo "PYLAIR_APP_READINESS_EXPECTED=1" >> "$GITHUB_ENV"
+              echo "pylair + crate $CRATE_VER carry app readiness — a skipped check fails the leg"
+            else
+              echo "app readiness not fully resolved (crate $CRATE_VER, pylair fixture: ${PYREADINESS:+yes}${PYREADINESS:-no}) — a skip stays legitimate"
+            fi
           else
             echo "resolved crate predates python_selftest_b_report — two-window self-test skipped"
           fi
@@ -405,7 +462,7 @@ jobs:
           for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
           # Bare ubuntu:22.04 has NO python — --self-test exits before the
           # Tauri loop/GTK init but still needs its linked system libs.
-          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
+          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
             for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
             apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
@@ -423,6 +480,13 @@ jobs:
               # Escaped double quotes — inside the quoted docker script.
               if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q "\"health\":\"skipped" /tmp/wst.log; then
                 echo "health skipped but resolved crate carries python_health" >&2
+                exit 1
+              fi
+              # Same contract for app readiness: armed only when BOTH the
+              # resolved crate (>= rc.20) and pylair (>= 0.1.0rc12) carry
+              # it — a skip then hides a fixture/host regression.
+              if [ "$PYLAIR_APP_READINESS_EXPECTED" = "1" ] && grep -q "\"app-readiness\":\"skipped" /tmp/wst.log; then
+                echo "app-readiness skipped but resolved crate + pylair carry app readiness" >&2
                 exit 1
               fi
             fi
@@ -476,6 +540,11 @@ jobs:
             if ($env:PYLAIR_HEALTH_EXPECTED -eq '1' -and
                 (Select-String -Path $out -Pattern '"health":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
               Write-Error 'health skipped but resolved crate carries python_health'
+              exit 1
+            }
+            if ($env:PYLAIR_APP_READINESS_EXPECTED -eq '1' -and
+                (Select-String -Path $out -Pattern '"app-readiness":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
+              Write-Error 'app-readiness skipped but resolved crate + pylair carry app readiness'
               exit 1
             }
             $env:PYLAIR_SELF_TEST_WEBVIEW = $null
@@ -544,6 +613,10 @@ jobs:
             # ACL regression, so it fails the leg (ci.yml --local guard).
             if [ "$PYLAIR_HEALTH_EXPECTED" = "1" ] && grep -q '"health":"skipped' /tmp/wst.log; then
               echo "health skipped but resolved crate carries python_health" >&2
+              exit 1
+            fi
+            if [ "$PYLAIR_APP_READINESS_EXPECTED" = "1" ] && grep -q '"app-readiness":"skipped' /tmp/wst.log; then
+              echo "app-readiness skipped but resolved crate + pylair carry app readiness" >&2
               exit 1
             fi
           fi

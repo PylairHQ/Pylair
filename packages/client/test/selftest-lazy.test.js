@@ -95,6 +95,12 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // string, no numeric code). "error": the plugin answers a coded
   // ErrorObj — always a real failure, never a skip.
   const { health = "ok" } = opts;
+  // App readiness (decisions 0007) needs BOTH sides. "ok" (default):
+  // the fixture answers and health carries the app block. "missing":
+  // an older pylair package — selftest_ping is FUNCTION_NOT_FOUND.
+  // "hostless": the package fixture answers but a pre-rc.20 crate
+  // reports no app block at all.
+  const { appReadiness = "ok" } = opts;
   const calls = [];
   const listens = [];
   const cancelHooks = new Map();
@@ -147,6 +153,9 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
             queued: CELL,
             isolated: CELL,
           },
+          ...(appReadiness === "ok"
+            ? { app: { components: { selftest: { phase: "ready", progress: null, detail: null, ms_ago: 5 } } } }
+            : {}),
         };
       }
       return null;
@@ -198,6 +207,14 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
               onEvent({ task, done: true, error: { code: -32010, message: "cancelled" } });
             }),
           );
+        } else if (fnName === "selftest_ping") {
+          // The app-readiness fixture; absent means FUNCTION_NOT_FOUND
+          // (a resolved pylair that predates the readiness API).
+          if (appReadiness === "missing")
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          else onEvent({ task, done: true, result: "pong" });
+        } else if (fnName === "selftest_done") {
+          onEvent({ task, done: true, result: "done" });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -216,6 +233,10 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
     },
     async listen(event, cb) {
       listens.push(event);
+      if (event === "pylair://app" && appReadiness === "ok")
+        // selftest_ping re-reports a loading→ready cycle; a capable
+        // host turns it into a pylair://app phase event.
+        later(() => cb({ version: 1, generation: 1, name: "selftest", phase: "ready" }));
       if (event === "pylair://selftest-b")
         later(() =>
           cb({
@@ -255,6 +276,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "cancel",
     "window-fairness",
     "health",
+    "app-readiness",
     "event-scoping",
     "fn-permission",
   ]);
@@ -262,7 +284,9 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
   assert.match(checks["stderr-delivery"], /^skipped: /);
   assert.match(checks["window-fairness"], /^skipped: /);
   assert.equal(checks["health"], "ok");
+  assert.equal(checks["app-readiness"], "ok");
   assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
+  assert.ok(b.listens.includes("pylair://app"), "onApp subscribed on the app event");
   assert.equal(checks["fn-permission"], "ok");
 });
 
@@ -383,4 +407,46 @@ test("flag set: a coded python_health rejection fails, never skips", { timeout: 
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, false);
   assert.match(checks["health"], /^FAIL: /);
+});
+
+test("flag set: a package without the readiness fixture skips app-readiness", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { appReadiness: "missing" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(
+    checks["app-readiness"],
+    "skipped: resolved host or package predates app readiness",
+    JSON.stringify(checks),
+  );
+  assert.equal(ok, true, JSON.stringify(checks));
+});
+
+test("flag set: a host without the app block skips app-readiness", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  // The fixture answers (new pylair) but a pre-rc.20 crate reports no
+  // app block — the selftest skips on the missing snapshot field.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { appReadiness: "hostless" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(
+    checks["app-readiness"],
+    "skipped: resolved host or package predates app readiness",
+    JSON.stringify(checks),
+  );
+  assert.equal(ok, true, JSON.stringify(checks));
 });

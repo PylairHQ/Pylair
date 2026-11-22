@@ -1,6 +1,6 @@
 # 0007: App-defined readiness
 
-Status: accepted
+Status: accepted, implemented (PRs #128-#131, #132)
 
 ## Question
 
