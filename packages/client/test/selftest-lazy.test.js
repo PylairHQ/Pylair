@@ -219,6 +219,12 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
               onEvent({ task, done: true, error: { code: -32010, message: "cancelled" } });
             }),
           );
+        } else if (fnName === "bench_noop") {
+          onEvent({ task, done: true, result: 1 });
+        } else if (fnName === "bench_echo") {
+          onEvent({ task, done: true, result: input.s });
+        } else if (fnName === "bench_nested") {
+          onEvent({ task, done: true, result: 6 });
         } else if (fnName === "selftest_ping") {
           // The app-readiness fixture; absent means FUNCTION_NOT_FOUND
           // (a resolved pylair that predates the readiness API).
@@ -418,6 +424,36 @@ test("flag set: the flood waits for a quiet runtime before refusing on share", {
     healthBefore >= 3,
     `quiet gate polled health ${healthBefore}x before flooding, expected >=3`,
   );
+});
+
+test("flag set, bench mode: times the four payloads and reports percentiles", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge();
+  m.setBridge(b);
+  globalThis.__PYLAIR_SELF_TEST__ = true;
+  globalThis.__PYLAIR_SELF_TEST_BENCH__ = true;
+  globalThis.__PYLAIR_SELF_TEST_BENCH_N__ = 8;
+  globalThis.__PYLAIR_SELF_TEST_BENCH_WARMUP__ = 2;
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    delete globalThis.__PYLAIR_SELF_TEST__;
+    delete globalThis.__PYLAIR_SELF_TEST_BENCH__;
+    delete globalThis.__PYLAIR_SELF_TEST_BENCH_N__;
+    delete globalThis.__PYLAIR_SELF_TEST_BENCH_WARMUP__;
+    m.setBridge(null);
+  }
+  const report = b.calls.find((c) => c.cmd === "plugin:pylair|python_bench_report");
+  assert.ok(report, "python_bench_report invoked");
+  const { result } = report.args;
+  assert.equal(result.n, 8);
+  assert.equal(result.warmup, 2);
+  for (const k of ["call_noop", "call_64k", "call_nested", "stream_first_chunk"]) {
+    assert.deepEqual(Object.keys(result[k]), ["p50", "p95", "p99"], `${k} percentiles`);
+    assert.ok(result[k].p50 >= 0 && result[k].p99 >= result[k].p50, `${k} sane percentiles`);
+  }
+  // The bench replaces the checks — no selftest verdict is emitted.
+  assert.equal(b.calls.filter((c) => c.cmd === REPORT).length, 0);
 });
 
 test("flag set: a crate without python_health skips health, never fails", { timeout: 20_000 }, async () => {

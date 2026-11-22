@@ -803,6 +803,8 @@ export async function onApp(cb: (c: AppChange) => void): Promise<() => void> {
  * REAL bridge (ACL permissions, event routing, wire transform): a typed
  * call, an ordered stream, cancellation, shutdown. It then reports the
  * verdict so the host process exits 0/5. A no-op in normal runs.
+ * PYLAIR_SELF_TEST_BENCH instead runs the latency bench (docs/performance.md)
+ * and reports percentiles — a measurement, never a verdict.
  *
  * The self-test code (selftest.js) is loaded only when the flag is set.
  */

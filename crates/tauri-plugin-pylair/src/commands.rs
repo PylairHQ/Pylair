@@ -183,6 +183,28 @@ fn python_selftest_report<R: Runtime>(
     Ok(())
 }
 
+/// Latency bench report (docs/performance.md): the webview bench under
+/// PYLAIR_SELF_TEST_BENCH hands its percentile JSON here; the host prints
+/// it as one `webview-bench:` line (the same pattern as the self-test
+/// verdict, so CI extracts it the same way) and exits 0 — a measurement,
+/// never a pass/fail. Inert unless the flag is set.
+#[tauri::command]
+fn python_bench_report<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    result: Value,
+) -> Result<(), ErrorObj> {
+    if std::env::var_os("PYLAIR_SELF_TEST_BENCH").is_none() {
+        return Err(ErrorObj {
+            code: protocol::INVALID_REQUEST,
+            message: "webview bench not enabled".into(),
+            data: None,
+        });
+    }
+    println!("webview-bench: {result}");
+    app.exit(0);
+    Ok(())
+}
+
 /// Intruder's verdict for the two-window self-test. win-b cannot send it
 /// via JS emit/emit_to: a `core:event:deny-emit(-to)` entry (as the default
 /// template ships for the main webview) denies those commands origin-wide —
@@ -315,5 +337,6 @@ pub(super) fn invoke_handler<R: Runtime>(
         python_shutdown,
         python_selftest_report,
         python_selftest_b_report,
+        python_bench_report,
     ]
 }

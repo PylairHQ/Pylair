@@ -142,6 +142,17 @@ impl<R: Runtime> Builder<R> {
             attach_parent_console();
             plugin = plugin.js_init_script("window.__PYLAIR_SELF_TEST__ = true;".to_string());
         }
+        // Latency bench (docs/performance.md): same mechanism, opt-in
+        // only. The client runs the timing harness instead of the checks
+        // and reports through python_bench_report. No second window —
+        // the bench measures a single-window steady state.
+        if std::env::var_os("PYLAIR_SELF_TEST_BENCH").is_some() {
+            attach_parent_console();
+            plugin = plugin.js_init_script(
+                "window.__PYLAIR_SELF_TEST__ = true; window.__PYLAIR_SELF_TEST_BENCH__ = true;"
+                    .to_string(),
+            );
+        }
         // Wrap mode only: the IPC probe the installed self-test injects into
         // every page, and the navigation lock for the app's window.
         if self.wrap {
