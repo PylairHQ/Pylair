@@ -243,6 +243,29 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
       if (i === 119) throw new Error("win-b never pinged (b_seen stayed 0)");
       await sleep(500);
     }
+    // Quiet-runtime gate: `b_seen` proves win-b joined the live set, but
+    // its `b_ping` response — or a straggler from an earlier check — can
+    // still hold a global slot while it drains. The host evaluates
+    // `max_concurrent_tasks` BEFORE the share check, so one stray
+    // in-flight call turns the expected window_share refusal into the
+    // global cap's. health() is a host command — polling it adds no
+    // task; a host predating python_health falls back to the hold
+    // counter.
+    for (let i = 0; ; i++) {
+      let quiet: boolean;
+      try {
+        quiet = (await within(health(), 15_000, "health")).load.tasks === 0;
+      } catch {
+        quiet =
+          (await within(call<number>("holds_active", {}), 15_000, "holds_active")) === 0;
+      }
+      if (quiet) break;
+      if (i === 199)
+        throw new Error(
+          `runtime still busy before the flood (liveTasks=${JSON.stringify([...liveTasks])})`,
+        );
+      await sleep(150);
+    }
     const ac = new AbortController();
     const held: Promise<unknown>[] = [];
     try {
@@ -276,8 +299,21 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
           throw new Error(`hold call threw ${String(outcome)}`);
       }
       if (!refused) throw new Error("80 held calls and still no refusal");
-      if (refused.limit !== "window_share")
-        throw new Error(`flood refused on limit "${refused.limit}", expected window_share`);
+      if (refused.limit !== "window_share") {
+        // The global cap shadows the share check, so report which calls
+        // were in flight — that's what made this refusal the wrong one.
+        let inflight = `liveTasks=${JSON.stringify([...liveTasks])}`;
+        try {
+          const h = await health();
+          inflight += ` load=${JSON.stringify(h.load)} self=${JSON.stringify(h.self)}`;
+        } catch {
+          // host predates python_health — the client-side set is all we have
+        }
+        throw new Error(
+          `flood refused on limit "${refused.limit}", expected window_share ` +
+            `(data=${JSON.stringify(refused.data ?? null)}; in flight: ${inflight})`,
+        );
+      }
       const d = refused.data as { window?: unknown; max?: unknown } | undefined;
       if (d?.window !== "main")
         throw new Error(`window_share named window ${String(d?.window)}, expected "main"`);
@@ -592,12 +628,14 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   }).then(() => ({ denied: false }) as DenyOutcome, outcome);
   const denyProbe: DenyProbe = { viaCall, viaRaw };
 
-  // Per-window fairness probe (docs/decisions/0005): while main floods
-  // `hold` calls to its share ceiling, this window's plain call must
-  // still be admitted — that is what the share is for. `holds_active`
-  // is the rendezvous: it reads >0 only while main's held calls are in
-  // flight, so the probe provably lands inside the hold window. A
-  // backend without the fixture is a skip, never a failure.
+  // Per-window fairness probe (docs/decisions/0005): while main holds
+  // `hold` calls at its share ceiling, this window's plain call must
+  // still be admitted — that is what the share is for. The rendezvous
+  // is host-side: health() costs no task, so waiting here cannot
+  // occupy a global slot and race main's refused call the way the old
+  // Python-side poll could. A host predating python_health falls back
+  // to the hold counter. A backend without the fixture is a skip,
+  // never a failure.
   let fairnessProbe: { ok?: boolean; skipped?: string; error?: string; value?: unknown };
   {
     const first = await call<number>("holds_active", {}).then(
@@ -608,14 +646,35 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
       fairnessProbe = { ok: true, skipped: "backend has no holds_active fixture" };
     } else {
       let heldN = first;
-      for (let i = 0; i < 60 && heldN <= 0; i++) {
-        await sleep(500);
-        heldN = await call<number>("holds_active", {}).catch(() => -2);
+      let healthMissing = false;
+      for (let i = 0; i < 240 && heldN <= 0; i++) {
+        const load = await health().then(
+          (h) => h.load.tasks,
+          () => {
+            healthMissing = true;
+            return -1;
+          },
+        );
+        if (healthMissing) break;
+        if (load > 0) {
+          heldN = load;
+          break;
+        }
+        await sleep(250);
+      }
+      if (healthMissing) {
+        // Old host: no task-free observation exists — poll the counter
+        // exactly as before. The window-fairness check on such legs is
+        // not the strict one anyway (python_health itself skips).
+        for (let i = 0; i < 120 && heldN <= 0; i++) {
+          await sleep(500);
+          heldN = await call<number>("holds_active", {}).catch(() => -2);
+        }
       }
       if (heldN <= 0) {
         fairnessProbe = {
           ok: false,
-          error: `main never held (holds_active = ${String(heldN)} after 30s)`,
+          error: `main never held (in-flight count = ${String(heldN)} after 60s)`,
         };
       } else {
         fairnessProbe = await call<string>("hello", { name: "win-b" }).then(
