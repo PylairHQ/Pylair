@@ -1,6 +1,6 @@
 # 0009: Model download manager (`pylair.models`)
 
-Status: proposed (spike: PR #TBD, throwaway proof in `spikes/m9-models/`,
+Status: proposed (spike: PR #149, throwaway proof in `spikes/m9-models/`,
 CI run evidence in `.github/workflows/spike-tls.yml` on the spike
 branch — the workflow file is not for merge)
 
