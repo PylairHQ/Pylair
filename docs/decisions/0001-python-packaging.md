@@ -2,7 +2,7 @@
 
 ## Context
 
-M0 (PROJECT_BRIEF.md section 7) validates the riskiest assumption: bundle a
+M0 (docs/maintainers/PROJECT_BRIEF.md section 7) validates the riskiest assumption: bundle a
 relocatable interpreter + a locked environment into a Tauri installer that
 runs with no system Python, including with a torch-class dependency.
 

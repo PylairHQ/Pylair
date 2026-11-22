@@ -1,6 +1,6 @@
 # Wrap mode: brief for Devin
 
-Read this whole document, plus `PROJECT_BRIEF.md`, `docs/protocol-v1.md` and `docs/build.md`, before writing code. Wrap mode is a second way to use Pylair. Everything in `PROJECT_BRIEF.md` section 11 (working agreements) applies here too.
+Read this whole document, plus `docs/maintainers/PROJECT_BRIEF.md`, `docs/protocol-v1.md` and `docs/build.md`, before writing code. Wrap mode is a second way to use Pylair. Everything in `docs/maintainers/PROJECT_BRIEF.md` section 11 (working agreements) applies here too.
 
 Sequencing: this is independent of M6 (the reference app) and can run on its own branch. Do not let it delay the M6 release candidate, which is the proof of Pylair's core claim.
 

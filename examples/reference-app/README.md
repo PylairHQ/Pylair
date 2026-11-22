@@ -1,6 +1,6 @@
 # reference-app
 
-The Pylair validation app (PROJECT_BRIEF.md §8) and the end-to-end
+The Pylair validation app (docs/maintainers/PROJECT_BRIEF.md §8) and the end-to-end
 suite's target. It demonstrates, through the real bridge:
 
 - **token-by-token streaming** — `chat()` streams deltas from a local

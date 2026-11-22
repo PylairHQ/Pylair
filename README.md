@@ -1,16 +1,80 @@
-# Pylair (working title)
+# Pylair
 
-Desktop framework for Python and local AI applications: run one command,
-get a Tauri desktop app with a modern web front end and a managed,
-bundled Python runtime: no Python install required for end users.
+Desktop apps powered by Python, without asking users to install Python.
 
-See [PROJECT_BRIEF.md](PROJECT_BRIEF.md) for goals, architecture and
-milestones. The name is a placeholder; naming lives in `product.json`.
+Pylair is a framework for Python developers who want to ship a real
+desktop application. It combines a Tauri shell, a managed and bundled
+CPython runtime, and a typed bridge so your web front end can call Python
+functions directly. If you have a Python app, an agent, a LangChain
+workflow or an Ollama integration, one command gives you a dev loop with
+a live window, and one more gives you native installers for Windows,
+macOS and Linux that work on machines with no Python installed.
+
+## Quickstart
+
+```sh
+npx create-pylair@latest my-app
+cd my-app
+npm install
+uv sync
+npx pylair dev
+```
+
+The first `pylair dev` compiles the Rust/Tauri side from source, so
+expect a few minutes before the window appears; later runs reuse the
+build cache and start in seconds. `npx pylair build` produces the
+installer for your platform.
+
+## Two modes
+
+**Bridge mode** treats your Python functions as the app. Decorate them
+with `@expose`, call them from TypeScript with generated types, stream
+results and cancel them. The front end is an ordinary web app you own.
+
+**Wrap mode** turns an existing Python web app into the app. A Gradio,
+Streamlit, FastAPI, Flask, NiceGUI, Dash or Panel app serves on
+`127.0.0.1` under the same supervisor and shows in the Pylair window:
+
+```sh
+npx pylair wrap app.py     # turns an existing project into a wrap app
+npx pylair dev
+```
+
+or `npx create-pylair my-app --mode wrap` for a new one. The Gradio and
+Streamlit adapters pin the loopback bind, `share=False` and telemetry
+off; `[tool.pylair.wrap]` is the config. Full guide, recipes and known
+limitations: [docs/wrap.md](docs/wrap.md).
+
+## Features
+
+- **Typed bridge and codegen.** `@expose`d Python functions callable
+  from TypeScript; `pylair codegen` emits the client surface from your
+  signatures ([docs/codegen.md](docs/codegen.md)).
+- **Streaming with backpressure.** Per-stream credit on the data lane,
+  so a fast producer cannot outrun the front end.
+- **Cancellation with defined semantics.** Every execution mode's
+  guarantee is specified and tested
+  ([docs/cancellation.md](docs/cancellation.md)).
+- **Per-function permissions.** Capabilities can restrict which
+  functions a window may call.
+- **Per-window fairness.** One window cannot starve the others of queue,
+  task, stream or worker capacity.
+- **Runtime health.** `health()` returns the host-observed snapshot and
+  `onHealth` fires when a liveness verdict changes.
+- **App readiness.** `@on_startup` hooks report `loading`/`ready`/
+  `failed` per component, `@expose(requires=…)` gates calls on them,
+  and `onApp` fires on phase changes.
+- **Bundled CPython, native installers.** End users install nothing
+  Python-related; `pylair build` produces Windows, macOS and Linux
+  installers on clean machines.
+- **Ollama integration.** The optional `pylair-ollama` package rides the
+  normal bridge.
 
 ## Status
 
 Release candidate. `pylair` and `pylair-ollama` are on PyPI,
-`tauri-plugin-pylair` is on crates.io; npm packages follow.
+`tauri-plugin-pylair` is on crates.io, and `@pylair/client`,
+`@pylair/cli` and `create-pylair` are on npm.
 
 Install RCs with **exact pins**, not `--pre`:
 
@@ -26,167 +90,60 @@ Each package versions independently across registries: the numbers
 won't match (`pylair` at `0.1.0rc12`, npm packages at `0.1.0-rc.26`, the
 crate at `0.1.0-rc.20`). Check each registry for its latest RC.
 
-Try it:
+## Documentation
 
-```sh
-npx create-pylair my-app && cd my-app
-npm install && uv sync
-npx pylair dev
-```
-
-The first `pylair dev` compiles the Rust/Tauri side from source, so
-expect a few minutes before the window appears; later runs reuse the
-build cache and start in seconds.
-
-(`pylair` 0.1.0rc2 may print a cosmetic `writer dropped a frame` line
-to stderr at shutdown, harmless; the fix lands in the next RC.)
-
-Milestones: `M0` packaging spike → `M1` supervisor/protocol → `M2` typed
-bridge → `M3` streaming/cancellation → `M4` CLI/scaffolder → `M5` Ollama
-integration → `M6` reference app + RC.
-
-## Wrap an existing Python web app
-
-Bridge mode wraps Python functions; wrap mode wraps a whole Python web
-UI. A Gradio, Streamlit, FastAPI, Flask, NiceGUI, Dash or Panel app
-serves on `127.0.0.1` under the same supervisor and shows in the Pylair
-window:
-
-```sh
-npx pylair wrap app.py     # turns an existing project into a wrap app
-npx pylair dev
-```
-
-or `npx create-pylair my-app --mode wrap` for a new one (`--local
-/path/to/pylair-repo` scaffolds against a checkout instead of the
-published packages).
-The Gradio and Streamlit adapters pin the loopback bind, `share=False`
-and telemetry off; `[tool.pylair.wrap]` is the config. Full guide,
-recipes and known limitations: [docs/wrap.md](docs/wrap.md).
+- [docs/](docs/): the index of guides and specs, including the
+  [protocol spec](docs/protocol-v1.md),
+  [cancellation semantics](docs/cancellation.md),
+  [codegen](docs/codegen.md), [packaging and installers](docs/build.md)
+  and the [wrap guide](docs/wrap.md).
+- Security model: [docs/security.md](docs/security.md); reporting a
+  vulnerability: [SECURITY.md](SECURITY.md).
+- Design history: [docs/decisions/](docs/decisions/).
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Known limitations
 
-- **Invocation is capability-level by default; per-function scopes are
-  opt-in; task control is owner-scoped.** A webview can only call
-  `python_call` if a capability grants it `pylair:*` permissions: the
-  template grants them to `windows: ["main"]` only, and remote origins
-  get no IPC access unless a capability adds `remote.urls`. Within a
-  granted capability, every covered webview can invoke every `@expose`d
-  function **unless** you scope the permission with `allow`/`deny`
-  entries (`docs/security.md`, "Restricting functions per window"); the
-  template stays open. Scopes stop calls, not discovery: function names
-  remain visible to every window via `pylair://exposes`. Once a task
-  exists, only its owning webview (the Tauri window label, never a
-  JS-supplied id) can cancel it or grant it stream credit, a task id
-  from a dead runtime generation controls nothing, and closing the
-  owner window cancels its tasks. Call/stream delivery is bound to the
-  invoking webview via a per-call IPC channel; broadcast lifecycle
-  events (state/exposes) remain readable by any webview, and stderr
-  delivery is opt-in per window (see Known limitations). The exposure
-  exists only if you widen a capability (more windows, `remote.urls`),
-  leave a shared window unscoped, or load untrusted content in a
-  privileged window.
+- **Invocation is capability-level; per-function scopes are opt-in.** A
+  webview needs a capability granting `pylair:*` to call Python at all
+  (the template grants `main` only), and every covered webview can call
+  every `@expose`d function unless you add `allow`/`deny` entries
+  ([docs/security.md](docs/security.md)). Function names stay visible
+  via `pylair://exposes`. Task control is owner-scoped: only the owning
+  window can cancel its task or grant it stream credit.
 - **Inline sync functions can't be interrupted.** A non-isolated sync
-  `def` keeps running after cancel: `cancel()` reports
-  `requested_may_continue`, the caller gets `TASK_CANCELLED` immediately
-  and the result is discarded, but the Python work may run to
-  completion. Mark anything long-running `@expose(isolated=True)`; see
-  [docs/cancellation.md](docs/cancellation.md).
+  `def` keeps running after cancel; mark long-running work
+  `@expose(isolated=True)` ([docs/cancellation.md](docs/cancellation.md)).
 - **Async cancel is cooperative.** A coroutine blocked in native code
-  can't be preempted until control returns to the event loop; a wedged
-  runtime is killed via missed pongs instead. `loop_stall_kill` can make
-  loop stalls fatal sooner, but it's off by default because legitimate
-  blocking work (multi-GB model loads) can stall the loop for minutes.
+  can't be preempted; `loop_stall_kill` can make stalls fatal but is off
+  by default (legitimate loads can stall the loop for minutes).
 - **macOS is CI-tested only.** Windows and Linux are the hand-verified
-  platforms: maintainers dogfood installers and run the lifecycle suite
-  there directly. macOS, Apple Silicon included, is exercised only by
-  the CI legs. It builds, ad-hoc signs and passes the same suite, but
+  platforms. macOS builds, ad-hoc signs and passes the same suite, but
   no maintainer runs it day to day.
-- **A wedged runtime can survive an abrupt host kill on macOS.** If the
-  app dies while Python can't read stdin (blocked in native code), the
-  stdin-EOF fallback never reaches it and macOS has no parent-death
-  signal, so the runtime may be left running. On Linux
-  `PR_SET_PDEATHSIG` and on Windows the Job Object kill the runtime
-  even then. Those paths are exercised by the abrupt-kill tests on the
-  Windows and Linux CI legs; macOS coverage is stdin-EOF (healthy
-  runtimes) plus the isolated worker's own parent watcher.
-- **`isolated=True` respawns a worker per call.** Each call re-imports
-  its modules: fine for short calls, seconds each with torch-class
-  imports. A warm persistent worker (`worker={'mode': 'warm'}`) is
-  reserved in the API but not implemented yet.
-- **Worker kill covers only the worker's process group.** Descendants
-  that stay in the group die with it (SIGTERM-ignoring grandchildren
-  included), but a child that deliberately detaches (`setsid`, a new
-  process group, a double-fork daemon) escapes the group kill.
-- **Resource limits are bounded per runtime, and admission is
-  per-window fair.** Concurrent tasks, streams, queued commands and
-  isolated workers are additionally split per live window
-  (`docs/decisions/0005`): each window keeps a guaranteed minimum share,
-  and a window flooding past its share gets `LIMIT_EXCEEDED` with
-  `data.limit = "window_share"` instead of starving the others. The
-  buffered-stream-bytes total stays a global backstop by design
-  (decisions 0005 §5.1). All caps live on `Limits`/`SupervisorConfig`
-  with `PYLAIR_MAX_*` env overrides, logged at startup;
-  `PYLAIR_PER_WINDOW_FAIRNESS=0` restores pure global caps. On a hit the
-  call/stream fails with `LIMIT_EXCEEDED` (`-32040`), surfaced in JS as
-  `LimitExceededError` with `.limit` naming the cap. If the host itself
-  stops draining, the Python outbound queue fills, the runtime logs
-  `outbound queue full` and exits rather than growing without bound:
-  callers see `RUNTIME_CRASHED`, not a silent hang.
-- **Ints beyond ±2^53 can't cross the bridge.** The call fails with
-  `INTERNAL: integer … exceeds the JSON safe-integer range`: an
-  explicit error rather than a silently rounded value. Return large
-  integers as strings until `{"$bigint"}` tagging lands
-  (`docs/ideas.md`).
-- **Broadcast events remain readable by every webview.** Call/stream
-  data is delivered on a per-call `tauri::ipc::Channel` bound to the
-  invoking webview, so it cannot be passively observed or forged by
-  another window (the old `pylair://stream` bus is gone). But
-  `pylair://state` and `pylair://exposes` are still broadcast events:
-  `emit_to`-addressed yet receivable by any `Any`-target listener.
-  `pylair://stderr` is opt-in per window (`Builder::stderr_delivery`,
-  default `["main"]`, `All` restores broadcast): a window outside the
-  list gets no stderr through a label-scoped listener, though a
-  deliberate `Any`-target `listen` still sees emitted lines; the
-  event bus offers no stronger boundary. The template's
-  `deny-emit`/`deny-emit-to` entries block forging those broadcasts.
-  Task *control* (cancel, stream credit) stays owner-scoped and is
-  unaffected.
-- **Runtime health is observable only.** `health()` returns the
-  host-observed snapshot — state, generation, restart accounting,
-  liveness verdicts (transport `"ok"|"missing"|"unknown"`, loop
-  `"ok"|"busy"|"unknown"`), load totals and the calling window's own
-  fairness row — and `onHealth` delivers `pylair://health` only on a
-  transport or loop verdict *change*, never on the ping cadence
-  (docs/decisions/0006). Both are read-only: a poller subscribes to
-  events but never joins the fairness live set, and a
-  `pylair:deny-python-health` deny is origin-wide like every command
-  deny. `pylair://health` is a broadcast event — the `Any`-listener
-  caveat above applies.
-- **App readiness is the app's own signal.** A Python app reports
-  named-component phases (`pylair.on_startup` hooks plus
-  `loading(name, progress)` / `ready(name)` / `failed(name)`), and
-  `@expose(requires=…)` makes a call wait for its components to reach
-  `ready` before the body runs. The host coalesces the reports into
-  `health().app.components` and emits `pylair://app` (`onApp`) on
-  phase *transitions* only — progress stays poll-only through
-  `health().app` (docs/decisions/0007). A host or package that
-  predates the feature reports `app: null`, the same fallback as a
-  web (wrap-mode) runtime, which has no components.
-- **`cargo audit` flags `glib 0.18.5` (RUSTSEC-2024-0429, unsound).**
-  It reaches Linux builds only, transitively through Tauri's GTK chain
-  (`tauri → wry → webkit2gtk → gtk`); the advisory is tracked upstream
-  and disclosed in `docs/security.md` §10; no fix exists until Tauri
-  moves off gtk-rs 0.18.
-- **macOS, rc.8: launching through a symlinked path panics at startup.**
-  Tauri rejects an executable path containing a symlinked ancestor
-  (`/tmp` → `/private/tmp` is the common case) as process-relaunch
-  hardening, so `app.path().resource_dir()` errors and
-  `tauri-plugin-pylair ≤ 0.1.0-rc.5` crashed with
-  `resource_dir: UnknownPath`. Launch the app's real path instead.
-  Fixed in the next train: the plugin falls back to resolving resources
-  from the canonicalized executable and reports an actionable startup
-  error when neither lookup succeeds.
+- **A wedged runtime can survive an abrupt host kill on macOS.** macOS
+  has no parent-death signal; Linux `PR_SET_PDEATHSIG` and Windows Job
+  Objects cover that case.
+- **`isolated=True` respawns a worker per call.** Fine for short calls;
+  a warm persistent worker is reserved in the API but not implemented.
+- **Worker kill covers the worker's process group.** A descendant that
+  deliberately detaches (`setsid`, a new process group) escapes it.
+- **Ints beyond ±2^53 can't cross the bridge.** Return large integers as
+  strings until `{"$bigint"}` tagging lands ([docs/ideas.md](docs/ideas.md)).
+- **Broadcast events are readable by every webview.** Call and stream
+  data travels on a per-call channel bound to the invoking webview, but
+  `pylair://state` and `pylair://exposes` are broadcast; `pylair://stderr`
+  is opt-in per window (`Builder::stderr_delivery`, default `["main"]`).
+- **Health and readiness are observable only.** `health()` is a snapshot
+  and `health().app` reports what the app declared; neither can steer the
+  runtime, and a pre-readiness host or package reports `app: null`.
+- **`cargo audit` flags `glib 0.18.5` (RUSTSEC-2024-0429).** It reaches
+  Linux builds transitively through Tauri's GTK chain and is disclosed in
+  [docs/security.md](docs/security.md); no fix exists until Tauri moves
+  off gtk-rs 0.18.
+- **Resource limits bound the runtime, with per-window fairness.**
+  Concurrent tasks, streams, queued commands and workers are capped and
+  split per live window; over-share calls get `LIMIT_EXCEEDED`
+  (`data.limit = "window_share"`). `PYLAIR_MAX_*` env vars tune the caps.
 
 ## Layout
 
@@ -195,31 +152,19 @@ recipes and known limitations: [docs/wrap.md](docs/wrap.md).
 | `crates/tauri-plugin-pylair` | Rust plugin: supervisor, IPC, permissions |
 | `packages/client` | `@pylair/client`: typed calls, streams, cancellation |
 | `packages/cli` | `pylair` CLI: dev, build, doctor, codegen |
-| `packages/create-pylair` | project scaffolder |
+| `packages/create-pylair` | project scaffolder + `templates/` shipped in its tarball |
 | `python/pylair` | Python runtime: `@expose`, protocol server, tasks |
-| `integrations/` | optional: ollama (M5), fastapi (later) |
-| `templates/` | scaffold templates (not in pnpm workspace, by design) |
-| `examples/` | `reference-app`: the real acceptance test (M6) |
-| `docs/decisions/` | numbered decision records |
+| `integrations/` | optional: ollama, fastapi |
+| `examples/reference-app` | the real acceptance app |
+| `docs/` | specs, guides and `decisions/`; `docs/maintainers/` for maintainer docs |
 | `product.json` | single source of truth for naming |
 
-## Dev setup
+## Milestones
 
-Toolchain (pinned in repo): Node 22, pnpm 10.18.3 (corepack), Rust 1.92.0,
-uv (any recent), Python 3.12 via uv. On Windows you also need the Visual
-Studio Build Tools "Desktop development with C++" workload.
-
-```sh
-pnpm install            # JS workspace
-pnpm build              # build all TS packages
-cargo build             # Rust workspace
-cd python/pylair && uv sync   # Python env (fetches managed CPython)
-```
-
-Docs: [security](docs/security.md), [protocol](docs/protocol-v1.md),
-[cancellation](docs/cancellation.md), [codegen](docs/codegen.md),
-[wrap mode](docs/wrap.md), [decisions](docs/decisions/),
-[ideas](docs/ideas.md).
+`M0` packaging spike → `M1` supervisor/protocol → `M2` typed bridge →
+`M3` streaming/cancellation → `M4` CLI/scaffolder → `M5` Ollama
+integration → `M6` reference app + RC. The full brief lives at
+[docs/maintainers/PROJECT_BRIEF.md](docs/maintainers/PROJECT_BRIEF.md).
 
 ## License
 

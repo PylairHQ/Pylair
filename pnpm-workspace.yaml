@@ -4,8 +4,9 @@ packages:
   - "!examples/reference-app"
   - "spikes/*"
 
-# templates/* is deliberately NOT a workspace member: scaffolded apps must
-# install standalone from the registry, not via the monorepo lockfile.
+# packages/create-pylair/templates/* is scaffold data, not a workspace member:
+# scaffolded apps must install standalone from the registry, not via the
+# monorepo lockfile.
 # examples/reference-app is excluded for the same reason: it simulates a
 # real standalone app (own lockfile, own install) so the acceptance job
 # exercises what users get, not monorepo internals.

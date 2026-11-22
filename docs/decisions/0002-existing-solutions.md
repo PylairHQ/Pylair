@@ -1,6 +1,6 @@
 # 0002: Existing solutions — should we build on one instead?
 
-Required by PROJECT_BRIEF.md section 10 before M1. Surveyed 2026-11-11.
+Required by docs/maintainers/PROJECT_BRIEF.md section 10 before M1. Surveyed 2026-11-11.
 
 ## Candidates
 

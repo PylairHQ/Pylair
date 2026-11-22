@@ -10,8 +10,10 @@
 ## Project
 
 - [README](https://github.com/PylairHQ/Pylair/blob/main/README.md): status, install pins, layout, and the Known limitations list — kept honest, read it before assuming guarantees
-- [PROJECT_BRIEF](https://github.com/PylairHQ/Pylair/blob/main/PROJECT_BRIEF.md): the contract — goals, architecture, milestones, working agreements for agents
+- [PROJECT_BRIEF](https://github.com/PylairHQ/Pylair/blob/main/docs/maintainers/PROJECT_BRIEF.md): the contract — goals, architecture, milestones, working agreements for agents
 - [AGENTS.md](https://github.com/PylairHQ/Pylair/blob/main/AGENTS.md): repo operational rules — verified commands, invariants, release rules, CI gotchas
+- [CONTRIBUTING](https://github.com/PylairHQ/Pylair/blob/main/CONTRIBUTING.md): dev setup, test commands, PR expectations
+- [CHANGELOG](https://github.com/PylairHQ/Pylair/blob/main/CHANGELOG.md): per-release notes keyed by npm tag
 - [product.json](https://github.com/PylairHQ/Pylair/blob/main/product.json): single source of truth for product naming
 
 ## Core docs
@@ -45,7 +47,7 @@
 
 - [Examples](https://github.com/PylairHQ/Pylair/blob/main/examples/README.md): index of example apps
 - [reference-app](https://github.com/PylairHQ/Pylair/blob/main/examples/reference-app/README.md): the M6 acceptance app — real AI workflow, streaming, cancel, crash recovery, clean-machine installs
-- [Templates](https://github.com/PylairHQ/Pylair/blob/main/templates/README.md): scaffold templates (deliberately outside the pnpm workspace)
+- [Templates](https://github.com/PylairHQ/Pylair/blob/main/packages/create-pylair/templates): scaffold templates shipped inside create-pylair
 
 ## Spikes and ops
 
