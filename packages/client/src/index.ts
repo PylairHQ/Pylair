@@ -157,6 +157,7 @@ const EVT = {
   stderr: "pylair://stderr",
   exposes: "pylair://exposes",
   health: "pylair://health",
+  app: "pylair://app",
 } as const;
 
 // ---- wire JSON (protocol §2, docs/codegen.md) -------------------------------
@@ -687,6 +688,30 @@ export interface HealthSelf {
 }
 
 /**
+ * One app-reported component's latest state (docs/decisions/0007 §5).
+ * `progress` is the app's own best-effort number in [0,1] or `null`;
+ * `detail` is free text — informational only, never parse it.
+ */
+export interface HealthAppComponent {
+  phase: "loading" | "ready" | "failed";
+  progress: number | null;
+  detail: string | null;
+  /** ms since the component's latest report. */
+  ms_ago: number;
+}
+
+/**
+ * App-reported readiness, latest report per component (0007 §5).
+ * Runtime-wide, not caller-scoped — `health()` returns it on every
+ * call. `null` when the generation has reported nothing and always on
+ * `web` runtimes (a wrapped app cannot report); absent entirely
+ * against a host that predates app readiness.
+ */
+export interface HealthApp {
+  components: Record<string, HealthAppComponent>;
+}
+
+/**
  * The host-observed runtime-health snapshot (docs/decisions/0006 §4).
  *
  * `version` is the only schema contract: **version 1 may gain fields**;
@@ -708,6 +733,8 @@ export interface HealthSnapshot {
   liveness: HealthLiveness;
   load: HealthLoad;
   self: HealthSelf | null;
+  /** App-reported readiness — null/absent unless the runtime reports. */
+  app?: HealthApp | null;
 }
 
 /**
@@ -719,6 +746,19 @@ export interface HealthChange {
   version: 1;
   generation: number;
   liveness: HealthLiveness;
+}
+
+/**
+ * The `pylair://app` event payload (docs/decisions/0007 §5): one emit
+ * per component phase transition — a first sighting counts as a
+ * transition into its phase — never per progress tick. Progress and
+ * detail are poll-only; read `health().app` for the latest values.
+ */
+export interface AppChange {
+  version: 1;
+  generation: number;
+  name: string;
+  phase: "loading" | "ready" | "failed";
 }
 
 /**
@@ -742,6 +782,17 @@ export async function health(): Promise<HealthSnapshot> {
  */
 export async function onHealth(cb: (c: HealthChange) => void): Promise<() => void> {
   return (await ipc()).listen<HealthChange>(EVT.health, cb);
+}
+
+/**
+ * Subscribe to app component phase transitions; resolves to an
+ * unlisten function. For loading screens: render `health().app` once,
+ * then flip components on `pylair://app` transitions instead of
+ * polling — progress bars still read `health().app` on their own
+ * cadence, since progress never emits an event (0007 §5).
+ */
+export async function onApp(cb: (c: AppChange) => void): Promise<() => void> {
+  return (await ipc()).listen<AppChange>(EVT.app, cb);
 }
 
 // ---- installed-webview self-test, loaded on demand ---------------------------
@@ -793,4 +844,5 @@ export const python = {
   onStderr,
   onExposes,
   onHealth,
+  onApp,
 };
