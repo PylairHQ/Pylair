@@ -174,6 +174,10 @@ class Readiness:
             self._flusher.start()
 
     def _flush_loop(self) -> None:
+        # Consume wakes raised by pre-attach reports: the first drain
+        # already carries their state, so a stale flag must not trigger
+        # a redundant second drain right after it.
+        self._wake.clear()
         self._flush_once()  # the post-hello flush
         while not self._stopping:
             self._wake.wait(self._flush_s)
