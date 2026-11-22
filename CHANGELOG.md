@@ -1,0 +1,116 @@
+# Changelog
+
+Pylair versions each registry independently: the crate
+(`tauri-plugin-pylair`), the PyPI packages (`pylair`, `pylair-ollama`) and
+the npm trio (`@pylair/client`, `@pylair/cli`, `create-pylair`) each carry
+their own number. Entries below are keyed by the npm release tag, which is
+what the GitHub releases page publishes.
+
+## npm-v0.1.0-rc.26 (2026-11-22)
+
+Crate `0.1.0-rc.20`, `pylair 0.1.0rc12` on PyPI, npm `0.1.0-rc.26`. The
+first release since wrap mode to update all three registries.
+
+- **App-defined readiness.** `@pylair.on_startup` hooks run after the
+  handshake, so slow setup such as a model load no longer races the
+  30-second hello timeout. `loading(name, progress)`, `ready(name)` and
+  `failed(name)` report per component, are safe to call from any thread,
+  and are coalesced so a progress loop cannot flood the bridge.
+- **`@expose(requires=...)`** makes a function wait until its components
+  are ready. A failed component answers `INTERNAL` with `data.component`;
+  cancelling a waiting call works as usual, and a component no hook ever
+  reports is marked failed once startup finishes.
+- **`health().app`** shows each component's phase, progress and detail;
+  **`onApp()`** fires on phase changes (`pylair://app`). Progress is
+  poll-only. An older host ignores the new message; a newer host with an
+  older Python reports `app: null`.
+- Wrap mode is unchanged: a wrapped app's readiness is still its HTTP
+  probe.
+
+## npm-v0.1.0-rc.25 (2026-11-21)
+
+Crate `0.1.0-rc.19`, npm `0.1.0-rc.25`; `pylair` stays `0.1.0rc11`.
+
+- **Runtime health API.** `health()` in `@pylair/client` (and
+  `Handle::health()` in Rust) returns a versioned snapshot: state and
+  time in state, restarts and the last exit, liveness (pong age,
+  round-trip time, missed pongs, event-loop staleness), load totals and
+  the calling window's own usage and share. Two verdicts split what
+  `unresponsive` used to blur together: `transport: ok | missing` and
+  `loop: ok | busy`.
+- **`onHealth()`** fires only when a verdict changes, so a "loading..."
+  banner needs no polling.
+- The `python_health` command is in `pylair:default`.
+- Fairness refinement: a window counts toward per-window shares only
+  once it calls Python.
+- CI hardening: macOS self-test steps fail on a failing app exit
+  (`pipefail`), and registry runs fail if the health check is skipped
+  against a crate that has it.
+
+## npm-v0.1.0-rc.24 (2026-11-20)
+
+Crate `0.1.0-rc.18`, npm `0.1.0-rc.24`; `pylair` stays `0.1.0rc11`.
+
+- **Per-window fairness.** Every live window keeps a small guaranteed
+  share of the command queue, task slots, stream slots and isolated
+  workers; a window over its share gets `LIMIT_EXCEEDED` with
+  `data.limit = "window_share"`. Nothing already running is cut off.
+  `PYLAIR_PER_WINDOW_FAIRNESS=0` restores pure global caps.
+  Design: `docs/decisions/0005-per-window-fairness.md`.
+- **CLI polish.** Unified status lines and prompt ticks across `pylair`
+  and `create-pylair`, with plain/ASCII fallbacks.
+
+## npm-v0.1.0-rc.23 (2026-11-20)
+
+npm-only; crate stays `0.1.0-rc.17`, `pylair` `0.1.0rc11`.
+
+- **New CLI look** shared by `pylair` and `create-pylair`, falling back
+  to plain output in CI, with `NO_COLOR`, when piped, or with `--plain`.
+- **`pylair doctor` checks the native toolchain**: vswhere/MSVC on
+  Windows, `xcode-select` on macOS, `cc` + `webkit2gtk-4.1` on Linux.
+- **`create-pylair` prompts redone**; wrap projects can start from a
+  Gradio or Streamlit sample app.
+- macOS builds retry `hdiutil` on "Resource busy".
+
+## npm-v0.1.0-rc.22 (2026-11-19)
+
+- **Wrap mode.** Turn an existing Python web app (FastAPI, Gradio,
+  Streamlit, NiceGUI, Dash, Flask, Panel) into a desktop app with a
+  bundled interpreter, a supervised server and native installers.
+  `pylair wrap` converts an existing project; `create-pylair --mode wrap`
+  starts a new one. Configure with `[tool.pylair] mode = "wrap"` and
+  `[tool.pylair.wrap]`; see `docs/wrap.md`.
+- Built-in `gradio` and `streamlit` adapters force loopback binding, the
+  assigned port, no browser launch and no public share links; anything
+  else runs as a `command` with `{port}`.
+- The app runs on a random `127.0.0.1` port under the supervisor, with a
+  starting page, a restarting page on crash, and recovery on a new port.
+
+## Earlier release candidates
+
+- **rc.20** (2026-11-17): per-function permissions. Capabilities can
+  restrict which `@expose`d functions a window may call.
+- **rc.19** (2026-11-17): bundled interpreter bumped to
+  python-build-standalone 20261110 (CPython 3.12.16 and 3.13.18).
+- **rc.18** (2026-11-17): reliability fixes in runtime supervision and
+  the build step's download path. No API changes.
+- **rc.17** (2026-11-15): bundled-Python download retries, resumes and
+  reports progress; `pylair build --dir` relative-path fix.
+- **rc.16** (2026-11-15): robustness and hardening under stress;
+  shutdown, overload, liveness and Windows process cleanup.
+- **rc.15** (2026-11-14): calls and streams fixes; plain calls no longer
+  consume stream slots, and the initial stream credit travels on the
+  control lane.
+- **rc.14** (2026-11-14): secrets excluded from installers; stderr
+  delivery opt-in per window; scaffolded `.gitignore` covers `.env`.
+- **rc.13** (2026-11-14): per-call IPC channel replaces the shared
+  `pylair://stream` event bus; a call's data reaches only its webview.
+- **rc.12** (2026-11-13): Windows apps no longer open a console window
+  (GUI subsystem in the template, enforced in CI).
+- **rc.10** (2026-11-13): covers rc.9 and rc.10.
+- **rc.8** (2026-11-12): bounded outcomes and enforceable limits.
+- **rc.7** (2026-11-12): first published release candidate.
+
+Some rc numbers have no GitHub release: rc.9 is covered by the rc.10
+notes above, and rc.11 and rc.21 were consumed on other registries
+between npm publishes.

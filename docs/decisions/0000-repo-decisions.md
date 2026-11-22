@@ -2,12 +2,12 @@
 
 ## Context
 
-Kickoff decisions for the monorepo scaffold. Sources: PROJECT_BRIEF.md plus
+Kickoff decisions for the monorepo scaffold. Sources: docs/maintainers/PROJECT_BRIEF.md plus
 the first owner Q&A (2026-11-11).
 
 ## Decisions
 
-- **Monorepo layout** per PROJECT_BRIEF.md section 6: `crates/` (Cargo
+- **Monorepo layout** per docs/maintainers/PROJECT_BRIEF.md section 6: `crates/` (Cargo
   workspace), `packages/` (pnpm workspace), `python/` (uv-managed),
   `integrations/`, `templates/`, `examples/`, `docs/decisions/`.
 - **Toolchain pins**: Node 22 (`.nvmrc`), pnpm 10.18.3 (`packageManager`
@@ -18,7 +18,7 @@ the first owner Q&A (2026-11-11).
 - **Naming**: `product.json` at repo root is the single source of truth for
   product name, CLI binary, package scope. Directory/package names still
   embed `pylair`; renaming later is a mechanical pass. `Pylair` is a
-  working title — see PROJECT_BRIEF.md section 1.
+  working title — see docs/maintainers/PROJECT_BRIEF.md section 1.
 - **License**: deferred by owner. No LICENSE file; packages marked
   `private`/unpublished (`publish = false` on crates, `private` root
   package). Revisit before any public release.

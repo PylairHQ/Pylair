@@ -1,6 +1,6 @@
 # Cancellation semantics
 
-Cancellation is the hardest correctness problem in Pylair (PROJECT_BRIEF
+Cancellation is the hardest correctness problem in Pylair (docs/maintainers/PROJECT_BRIEF.md
 section 4), so it is specified before it is built. This document is the
 contract: `docs/protocol-v1.md` says *how* cancel travels on the wire;
 this says *what it guarantees*. Implemented in M3; tests in M3 must prove

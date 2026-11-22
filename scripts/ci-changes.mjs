@@ -9,7 +9,7 @@
 // the diff out, is `code=true`: when in doubt the full suite runs.
 // Markdown elsewhere is NOT docs-only: package READMEs ship in the npm
 // tarballs, python/pylair/README.md is the PyPI long description, and
-// files under templates/ are copied verbatim into scaffolds.
+// files under packages/create-pylair/templates/ are copied verbatim into scaffolds.
 //
 // Environment (set by the workflow): EVENT, BASE_SHA, HEAD_SHA (pull
 // requests), BEFORE_SHA, AFTER_SHA (pushes).

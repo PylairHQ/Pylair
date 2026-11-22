@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a capability or improvement for Pylair
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. The clearer the use case, the easier it is to
+        place against the roadmap.
+
+        **Do not paste tokens, API keys, or secrets.**
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem or workflow, not the API you imagine solving it. What does your app need that Pylair does not give it today?
+      placeholder: "My app needs to …"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: How you would want it to look: an API sketch, a config key, a CLI flag, or a pointer to how another tool does it.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have tried or considered
+      description: Workarounds you use today, or why they fall short.
+    validations:
+      required: false

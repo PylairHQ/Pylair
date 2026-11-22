@@ -1,8 +1,9 @@
 # AGENTS.md — working agreements for coding agents
 
-Read `PROJECT_BRIEF.md` first — it defines goals, milestones, and the
-working agreements (section 11) that apply to every change. This file is
-the operational layer: layout, commands, invariants, and release rules.
+Read `docs/maintainers/PROJECT_BRIEF.md` first — it defines goals,
+milestones, and the working agreements (section 11) that apply to every
+change. This file is the operational layer: layout, commands, invariants,
+and release rules.
 Everything below is derived from the repo itself — if a fact here
 disagrees with the code or a workflow file, the code wins; fix this file.
 
@@ -24,10 +25,9 @@ Naming lives in `product.json` — read it in tooling, never hard-code.
 | `python/pylair` | `pylair` PyPI package: `@expose`, protocol server, task runner, workers, and the wrap-mode launcher (`pylair.wrap`) |
 | `packages/client` | `@pylair/client` — typed TS calls, `AsyncIterable` streams, cancel |
 | `packages/cli` | `pylair` CLI — dev, build, doctor, codegen |
-| `packages/create-pylair` | scaffolder (`create-pylair`) + `templates/` |
-| `templates/` | scaffold templates — **not** a pnpm workspace member (see below) |
+| `packages/create-pylair` | scaffolder (`create-pylair`) + `templates/` shipped in its tarball |
 | `examples/reference-app` | the M6 acceptance app — **not** a workspace member (own lockfile, simulates a real standalone install) |
-| `docs/` | protocol-v1, cancellation, codegen, build, security, wrap-mode brief, `decisions/` records, `ideas.md` |
+| `docs/` | protocol-v1, cancellation, codegen, build, security, wrap-mode brief, `decisions/` records, `ideas.md`, `maintainers/` (PROJECT_BRIEF, HANDOFF) |
 | `integrations/ollama` | optional `pylair-ollama` package (never a core dependency) |
 | `scripts/` | `dogfood-windows.ps1` — lifecycle containment dogfood |
 | `spikes/` | `m0-packaging`, `w0-wrap` — throwaway spikes kept for evidence |
@@ -133,12 +133,13 @@ from packed tarballs (`source=pack`, default) or the live registry
   `src-tauri/Cargo.lock` back over
   `packages/create-pylair/templates/default/src-tauri/Cargo.lock`,
   commit it. Never hand-edit the lock.
-- **Workspace exclusions are deliberate.** `templates/*` and
-  `examples/reference-app` are NOT pnpm workspace members — scaffolded
-  apps must resolve standalone, and reference-app simulates what a user
-  actually installs. Do not add them to `pnpm-workspace.yaml`.
+- **Workspace exclusions are deliberate.** `examples/reference-app` is
+  NOT a pnpm workspace member — it simulates what a user actually
+  installs (own lockfile, own install), and `packages/create-pylair`
+  templates are scaffold data, never their own packages. Do not add
+  either to `pnpm-workspace.yaml`.
 - **Supervisor/protocol changes need fault-injection tests**, not just
-  happy-path (PROJECT_BRIEF §11). Existing harnesses:
+  happy-path (`docs/maintainers/PROJECT_BRIEF.md` §11). Existing harnesses:
   `crates/tauri-plugin-pylair/tests/{supervisor_faults,lifecycle_stress,protocol_fuzz,limits,event_scoping,exact_outcomes,window_destroyed,hardening_step0,release_spec,plugin_setup}.rs`.
 - **Keep README "Known limitations" honest.** If your change removes a
   limitation, adds one, or changes a guarantee (cancellation mode,
@@ -153,7 +154,7 @@ from packed tarballs (`source=pack`, default) or the live registry
   (OIDC trusted-publisher config, repo environments/secrets — crates.io
   publishes use OIDC trusted publishing, no registry token secret)
   unless the owner explicitly asks for that change.
-- **The release train order** (from HANDOFF.md): crates.io
+- **The release train order** (from `docs/maintainers/HANDOFF.md`): crates.io
   `tauri-plugin-pylair` → PyPI `pylair` / `pylair-ollama` (release.yml's
   `package` input) → regenerate + commit the template `Cargo.lock` →
   pack-mode acceptance CI green on that commit → npm trio under
@@ -202,7 +203,7 @@ from packed tarballs (`source=pack`, default) or the live registry
   `PR_SET_PDEATHSIG`/process-group kills (Linux), Job Objects (Windows),
   ppid watchers (POSIX) — a green macOS run says nothing about Linux
   code. Report Linux results as Linux results; the ubuntu legs are the
-  proof (HANDOFF.md's standing rule).
+  proof (`docs/maintainers/HANDOFF.md`'s standing rule).
 
 ## Commits and PRs
 
