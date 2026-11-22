@@ -115,25 +115,47 @@ order:
    crate and the 0.1.0rc12 package resolved), so an `app-readiness`
    skip fails the leg on every OS.
 
-The warm-workers train (PRs 139-143 + the selftest/bench PR,
-`docs/decisions/0008`) lands `worker={"mode": "warm"}`: a persistent
-per-function pool pays the import once and serves calls in
-microseconds (the bench headline: ~300 ms-import fixture,
-`spawn_cold_process` hundreds of ms/call vs `spawn_warm_reuse` under a
-millisecond on all three OS legs — docs/performance.md). POSIX cancels
-interrupt-first (SIGINT inside a `started`-handshake window, plain
-`cancelled` ack and the same member survives); Windows is kill-only
-(CTRL_BREAK cannot reach a console-less worker). `prewarm: True`
-spawns the first member at startup and reports the managed
-`worker:<fn>` readiness component. The installed-webview self-test
-gained a `warm-workers` check — mandatory on `--local` legs and, on
-pack/registry legs, armed by `PYLAIR_WARM_EXPECTED` only when the
-resolved pylair is `0.1.0rc13` or later. The next release is `pylair`
-`0.1.0rc13` on PyPI plus the npm trio at `0.1.0-rc.27` (the selftest
-client changed); the crate is unchanged (`crates/` untouched this
-train), so no crates.io step and no template `Cargo.lock`
-regeneration — the scaffold `py` pin moves to `pylair==0.1.0rc13`
-with the PyPI publish.
+The perf + warm-workers train (PRs 137-138, 139-144) ships TWO
+registry bumps — `pylair 0.1.0rc13` AND the crate `0.1.0-rc.21` —
+because the crate changed since rc.20: #137 added the
+`python_bench_report` command and its permission; #138 reworked the
+host↔Python framing in `supervisor/wire.rs`, `spawn.rs` and
+`session.rs` (the 64 KiB round trip halved and the serialization
+speedups — docs/performance.md). The PyPI side carries the transport
+write-loop fix (a single raw `write()` truncated frames under signal
+load on POSIX) plus warm isolated workers (`docs/decisions/0008`):
+`worker={"mode": "warm"}` keeps a persistent per-function pool — the
+bench headline is `spawn_cold_process` hundreds of ms/call vs
+`spawn_warm_reuse` under a millisecond on all three OS legs. POSIX
+cancels interrupt-first (SIGINT inside a `started`-handshake window,
+plain `cancelled` ack and the same member survives); Windows is
+kill-only (CTRL_BREAK cannot reach a console-less worker).
+`prewarm: True` spawns the first member at startup and reports the
+managed `worker:<fn>` readiness component; `requires=("worker:<fn>",)`
+gates on it. The installed-webview self-test gained a `warm-workers`
+check — mandatory on `--local` legs and, on pack/registry legs, armed
+by `PYLAIR_WARM_EXPECTED` only when the resolved pylair is
+`0.1.0rc13` or later. npm needs `0.1.0-rc.27` (the selftest client
+changed).
+
+This pins commit moves the crate manifest to `0.1.0-rc.21` (workspace
+`Cargo.lock` and the reference app's `src-tauri/Cargo.lock` version
+lines with it) and `pylair` to `0.1.0-rc.13` (`pyproject.toml` +
+both `uv.lock` entries); `pylair-ollama` stays `0.1.0-rc.3`. Scaffold
+pins and npm versions are deliberately unchanged here — they move in
+the pins PR after both registries publish. Remaining order:
+
+1. crate `0.1.0-rc.21` publish on crates.io, then `pylair 0.1.0rc13`
+   on PyPI (release.yml `package=pylair`);
+2. pins PR: npm trio `0.1.0-rc.27`, scaffold pins `rs =0.1.0-rc.21` /
+   `py pylair==0.1.0rc13`, template `Cargo.lock` regenerated against
+   the published crate;
+3. pack-mode acceptance green on the pins commit, then the npm trio
+   under `--tag next`;
+4. registry acceptance with `source=registry` and
+   `expect_version 0.1.0-rc.27` — the first run where
+   `PYLAIR_WARM_EXPECTED` arms (resolved pylair 0.1.0rc13), so a
+   `warm-workers` skip fails the leg on every OS.
 
 ## Wrap mode W1 (launcher + supervisor), on branch `wrap-w1`
 
@@ -326,7 +348,7 @@ Merged since rc.17 (d7daaaf):
 - PR 138: host↔Python latency wins (perf-2) — the 64 KiB round trip
   cut roughly in half; see the before/after tables in
   `docs/performance.md`.
-- PRs 139-143: warm isolated workers (`docs/decisions/0008`).
+- PRs 139-144: warm isolated workers (`docs/decisions/0008`).
   `@expose(worker={"mode": "warm", "pool": N})` serves calls from a
   long-lived per-function pool — lazy spawn, per-member FIFO, live
   members counted against `max_isolated_workers`, crash-loop stop at
@@ -340,7 +362,11 @@ Merged since rc.17 (d7daaaf):
   component (import+resolve handshake on the private channel);
   `requires=("worker:<fn>",)` gates on it. A partial-frame transport
   bug (single raw `write()` truncating under signals) was found and
-  fixed on the way.
+  fixed on the way. PR 144 added the real-webview `warm-workers`
+  self-test check (same-pid reuse, POSIX interrupt survival vs
+  Windows terminated+new-pid), the unmanaged `worker:<fn>` sweep
+  diagnostic, the cold-vs-warm bench case with three-OS numbers in
+  `docs/performance.md`, and the docs pass.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
