@@ -587,14 +587,30 @@ async def _wait_sent(sent: list[dict], pred, timeout: float = 5.0) -> dict:
 def test_gated_call_cancelled_during_wait_is_task_cancelled():
     async def go() -> None:
         sent: list[dict] = []
+        runs = 0
+
+        async def body() -> str:
+            nonlocal runs
+            runs += 1
+            return "ran"
+
         reg = TaskRegistry(sent.append)
         _readiness.declare("m")
-        await reg.start(1, 1, "f", "async", _gated_result, {}, requires=("m",))
+        await reg.start(1, 1, "f", "async", body, {}, requires=("m",))
+        task = reg.get(1)
+        # Enter wait_ready before cancelling; pre-first-step cancellation
+        # would never exercise _run_gated's CancelledError handler.
+        await asyncio.sleep(0)
+        assert any(not f.done() for f in _readiness._default._waiters)
         reg.cancel(1, call_id=2)
         terminal = await _wait_sent(sent, lambda m: m.get("id") == 1)
         assert terminal["error"]["code"] == proto.TASK_CANCELLED
         ack = next(m for m in sent if m.get("id") == 2)
         assert ack["result"]["cancelled"] is True
+        _readiness.ready("m")
+        await asyncio.wait_for(task.asyncio_task, 5)
+        assert runs == 0, "the cancelled call still ran its body"
+        assert [m for m in sent if m.get("id") == 1] == [terminal]
 
     asyncio.run(go())
 
@@ -752,25 +768,35 @@ def test_cancelled_gated_call_never_runs_the_body():
     side-effect witness proves the function itself never ran."""
     with Runtime("testapp_readiness") as rt:
         rt.recv()
-        rt.send(call(1, "chat", task=7, input={"prompt": "x"}))
-        rt.send(proto.request(2, "cancel", {"task": 7}))
-        ack = rt.recv_until(lambda m: m.get("id") == 2)
-        assert ack["result"]["cancelled"] is True
-        terminal = rt.recv_until(lambda m: m.get("id") == 1)
-        assert terminal["error"]["code"] == proto.TASK_CANCELLED
-        # The gates open; exactly one response for call 1 exists — the
-        # TASK_CANCELLED already seen — and `chat` never runs.
-        rt.send(call(3, "release_hooks", task=3))
         msgs: list[dict] = []
-        deadline = time.time() + 20
-        while not any(m.get("id") == 3 for m in msgs):
-            msgs.append(rt.recv(timeout=max(0.1, deadline - time.time())))
-        assert not any(m.get("id") == 1 for m in msgs), (
-            "a second terminal arrived for the cancelled call"
-        )
-        rt.send(call(4, "chat_runs", task=4))
-        runs = rt.recv_until(lambda m: m.get("id") == 4)
-        assert runs["result"] == 0, "the cancelled call still ran chat"
+
+        def response(call_id: int) -> dict:
+            deadline = time.monotonic() + 20
+            while not any(m.get("id") == call_id for m in msgs):
+                msgs.append(rt.recv(timeout=max(0.1, deadline - time.monotonic())))
+            return next(m for m in msgs if m.get("id") == call_id)
+
+        rt.send(call(1, "chat", task=7, input={"prompt": "x"}))
+        # An ungated call answers while chat is parked, before cancellation.
+        rt.send(call(10, "add", task=8, input={"a": 1, "b": 1}))
+        assert response(10)["result"] == 2
+        assert not any(m.get("id") == 1 for m in msgs)
+        rt.send(proto.request(2, "cancel", {"task": 7}))
+        ack = response(2)
+        assert ack["result"]["cancelled"] is True
+        terminal = response(1)
+        assert terminal["error"]["code"] == proto.TASK_CANCELLED
+        rt.send(call(3, "release_hooks", task=9))
+        assert response(3)["result"] == "released"
+        # A successful gated control call proves BOTH components went ready
+        # and the function counter works. Only this call may increment it.
+        rt.send(call(4, "chat", task=10, input={"prompt": "control"}))
+        assert response(4)["result"] == "answered:control"
+        rt.send(call(5, "chat_runs", task=11))
+        assert response(5)["result"] == 1, "the cancelled call still ran chat"
+        rt.send(proto.request(6, "shutdown", {"grace_ms": 5000}))
+        assert response(6)["result"] == {}
+        assert [m for m in msgs if m.get("id") == 1] == [terminal]
 
 
 def test_isolated_requires_wait_holds_share_without_spawning(tmp_path):
