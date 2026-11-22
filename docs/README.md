@@ -20,6 +20,8 @@ Specs and guides for building on Pylair, plus the design history.
 - [wrap.md](wrap.md): wrap mode: Gradio, Streamlit, FastAPI and other
   Python web apps in a desktop window.
 - [wrap-mode-brief.md](wrap-mode-brief.md): the wrap-mode design brief.
+- [performance.md](performance.md): bridge latency baseline: method,
+  first numbers per OS, and how to run the three bench layers.
 
 ## History and ideas
 

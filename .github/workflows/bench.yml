@@ -7,12 +7,6 @@ name: latency-bench
 
 on:
   workflow_dispatch:
-  # TEMPORARY for this PR: a workflow_dispatch-only file cannot be
-  # dispatched until it exists on main, so a one-branch push trigger
-  # produces the first baseline numbers for docs/performance.md. This
-  # trigger is removed before merge.
-  push:
-    branches: [perf-bench]
 
 permissions:
   contents: read
