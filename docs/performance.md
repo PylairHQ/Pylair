@@ -222,7 +222,7 @@ re-parse.
 ## What perf-2 changed
 
 - **`_json.dumps` gained a single pre-walk** (`check_wire`): one
-  iterative traversal checks nesting depth, the ±2^53 int range, and
+  iterative traversal checks nesting depth, the +-2^53 int range, and
   NaN/Infinity on the pre-serialization object, expanding the same nodes
   `_default` would (dict/list/tuple/set items, dataclass fields, enum
   values). Then `json.dumps` runs once - the `json.loads` re-parse is
@@ -241,7 +241,7 @@ re-parse.
   ping slot and flush ordering are unchanged - the prefix bytes are
   identical, just written together.
 
-Semantics preserved: NaN is still an error, the ±2^53 guard still fires
+Semantics preserved: NaN is still an error, the +-2^53 guard still fires
 (including inside dataclasses - the pre-walk descends into fields),
 `$b64` handling is unchanged, and no wire bytes changed.
 
