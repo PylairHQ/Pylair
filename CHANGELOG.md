@@ -16,9 +16,12 @@ what the GitHub releases page publishes.
   the task's terminal response becomes the error, naming the
   `PYLAIR_MAX_BLOB_*` knob and telling the developer to `release()`. In a
   stream the offending chunk ends it with the same error and the
-  producer is cancelled the way a client cancel would. The share bound
-  now uses the real decision-0005 formula (pool minus peers' unclaimed
-  reserves) — the old one could never fire — and
+  producer is cancelled the way a client cancel would. Ids that
+  registered inside a frame that never reaches the page (an earlier tag
+  in the same multi-blob frame, or a dropped terminal) are released
+  immediately instead of leaking handle slots until the window closes.
+  The share bound now uses the real decision-0005 formula (pool minus
+  peers' unclaimed reserves) — the old one could never fire — and
   `SupervisorConfig.blob_limits` can override the env knobs.
 - **Stream cap check no longer double-writes blobs.** `_pump_stream`
   probes frame size with a placeholder `$blob` tag of the real length,

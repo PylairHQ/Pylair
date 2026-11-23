@@ -138,6 +138,29 @@ fn blob_id(v: &serde_json::Value) -> &str {
         .expect("result is not a $blob tag")
 }
 
+/// Registered-handle count in the shared registry.
+fn live_blobs(h: &Handle) -> usize {
+    tauri_plugin_pylair::blobs::lock_blobs(&h.blobs()).len()
+}
+
+/// Whether `id` is still registered.
+fn blob_registered(h: &Handle, id: &str) -> bool {
+    tauri_plugin_pylair::blobs::lock_blobs(&h.blobs()).has(id)
+}
+
+/// Files inside the (single) generation dir under the blob root.
+fn gen_dir_files(root: &std::path::Path) -> usize {
+    let gen = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.is_dir())
+        .expect("no generation dir under blob root");
+    std::fs::read_dir(gen)
+        .unwrap()
+        .filter(|e| e.as_ref().map(|x| x.path().is_file()).unwrap_or(false))
+        .count()
+}
+
 /// The doc's literal cap: 256 live handles per window — the 257th
 /// `blob.register` is refused and the call must see it, not a 404.
 #[tokio::test]
@@ -355,6 +378,107 @@ async fn release_frees_a_slot() {
     h.call("make_blob", json!({}), Some(WIN.into()), Some(false))
         .await
         .unwrap();
+
+    h.shutdown().await;
+}
+
+/// Orphan release: a frame can carry several `$blob` tags — when the
+/// third register breaks the cap, the two that already registered must
+/// be released (they never reach the page), leaving the window's handle
+/// count where it was before the call.
+#[tokio::test]
+async fn orphan_ids_released_on_replaced_response() {
+    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let root = blob_dir("orphan-call");
+    let mut l = BlobLimits::from_env();
+    l.max_blobs_per_window = 3;
+    let h = spawn_h(real_runtime_spec(), fast_config(&root, l), ev);
+    wait_state(&h, State::Ready).await;
+
+    // One held handle — this one stays live through the whole test.
+    let v = h
+        .call("make_blob", json!({}), Some(WIN.into()), Some(false))
+        .await
+        .unwrap();
+    let keep = blob_id(&v).to_string();
+    assert_eq!(live_blobs(&h), 1);
+
+    // three_blobs: registers 1 and 2 land (2, 3 live), the third
+    // breaks the cap — the error replaces the frame and the two
+    // registered-but-undelivered ids must be released.
+    let err = h
+        .call("three_blobs", json!({}), Some(WIN.into()), Some(false))
+        .await
+        .unwrap_err();
+    assert_limit(&err, "blob_handles");
+    assert_eq!(
+        live_blobs(&h),
+        1,
+        "orphaned handles must be released with the frame"
+    );
+    assert!(
+        blob_registered(&h, &keep),
+        "the pre-existing handle must still be live"
+    );
+    // Orphan files are unlinked. The one extra file is the REJECTED
+    // register's payload — Python materializes before the register
+    // lands, and its untrusted path never got a registry entry, so
+    // nothing may unlink it; the generation-end sweep owns it.
+    assert_eq!(gen_dir_files(&root), 2, "orphan files must be unlinked");
+
+    h.shutdown().await;
+}
+
+/// Same rule on the stream path: the refused chunk's earlier registers
+/// are released, while ids from chunks that already delivered stay
+/// live — the page genuinely holds them.
+#[tokio::test]
+async fn orphan_ids_released_on_replaced_chunk() {
+    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let root = blob_dir("orphan-stream");
+    let mut l = BlobLimits::from_env();
+    l.max_blobs_per_window = 3;
+    let h = spawn_h(real_runtime_spec(), fast_config(&root, l), ev);
+    wait_state(&h, State::Ready).await;
+
+    // stream_mixed_blobs: chunk 1 carries one blob (delivered, stays
+    // live), chunk 2 carries three — its first two register (2, 3
+    // live), the third breaks the cap.
+    let (_task, mut rx) = h
+        .call_stream(
+            "stream_mixed_blobs",
+            json!({}),
+            Some(WIN.into()),
+            Some(true),
+        )
+        .await
+        .unwrap();
+    let first = match timeout(T, rx.recv()).await.unwrap().unwrap() {
+        StreamItem::Chunk { value, .. } => value,
+        StreamItem::End(res) => panic!("stream ended early: {res:?}"),
+    };
+    let keep = first[0]["$blob"]["id"]
+        .as_str()
+        .expect("chunk 1 must carry a $blob tag")
+        .to_string();
+    assert_eq!(live_blobs(&h), 1);
+
+    let end = loop {
+        match timeout(T, rx.recv()).await.unwrap().unwrap() {
+            StreamItem::End(res) => break res,
+            StreamItem::Chunk { .. } => {}
+        }
+    };
+    let err = end.unwrap_err();
+    assert_limit(&err, "blob_handles");
+
+    // The refused chunk's two registered ids are released; chunk 1's
+    // handle — already delivered — stays live. (Two files: the live
+    // one plus the rejected register's untracked payload — generation
+    // sweep territory, not something a path-untrusted unlink may touch.)
+    assert_eq!(live_blobs(&h), 1);
+    assert!(blob_registered(&h, &keep));
+    assert_eq!(gen_dir_files(&root), 2);
 
     h.shutdown().await;
 }

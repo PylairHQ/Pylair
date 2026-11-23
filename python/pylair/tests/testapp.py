@@ -538,6 +538,31 @@ def sized_blob(n: int) -> "pylair.Blob":
 
 
 @expose
+def three_blobs() -> list:
+    """One result carrying three $blob tags — three registers ahead of
+    one terminal. The orphan-release test breaks the last register and
+    asserts the first two never linger."""
+    return [
+        pylair.Blob(b"multi-1", mime="text/plain"),
+        pylair.Blob(b"multi-2", mime="text/plain"),
+        pylair.Blob(b"multi-3", mime="text/plain"),
+    ]
+
+
+@expose
+async def stream_mixed_blobs() -> AsyncGenerator:
+    """Chunk 1 carries one blob; chunk 2 carries three — the host's
+    orphan-release must free the two that registered inside the
+    refused chunk while the delivered chunk's handle stays live."""
+    yield [pylair.Blob(b"s-first", mime="text/plain")]
+    yield [
+        pylair.Blob(b"s-a", mime="text/plain"),
+        pylair.Blob(b"s-b", mime="text/plain"),
+        pylair.Blob(b"s-c", mime="text/plain"),
+    ]
+
+
+@expose
 async def stream_blob() -> AsyncGenerator:
     """One scalar chunk, then a Blob chunk — ordering must hold for
     stream.chunk frames exactly as for responses (§3)."""
