@@ -42,7 +42,7 @@ jobs:
               echo "$out" | tail -3
               pass=$((pass + 1))
             else
-              echo "$out" | tail -60
+              echo "$out" | tail -1000
               fail=$((fail + 1))
             fi
           done

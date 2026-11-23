@@ -28,7 +28,10 @@ class Runtime:
         # on it. No effect on normal operation.
         env["PYTHONFAULTHANDLER"] = "1"
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "pylair", module],
+            # _diag_run.py wraps `python -m pylair` (runpy, alter_sys —
+            # identical argv/env semantics) to add a SIGUSR1 coroutine-task
+            # dump for the warm-suite flake hunt.
+            [sys.executable, str(HERE / "_diag_run.py"), module],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

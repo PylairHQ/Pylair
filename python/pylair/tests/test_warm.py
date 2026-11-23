@@ -62,20 +62,19 @@ _ACTIVE_RT = None
 
 def _hang_dump(runtime) -> str:
     """State capture for a tripped hang guard (POSIX loop legs only):
-    SIGABRT the runtime so faulthandler dumps every parked thread to its
-    stderr (conftest sets PYTHONFAULTHANDLER; the harness already drains
-    it), then report every member process's ps state — Z = exited and
-    nobody reaped (child watcher / proc.wait suspect), R/S = never
-    crashed, absent = reaped and WORKER_DIED was lost."""
+    member ps states first — Z = exited and nobody reaped (child
+    watcher / proc.wait suspect), R/S = never crashed, absent = reaped
+    and WORKER_DIED was lost — plus the runtime's open pipe fds (the
+    EOF check: a dead member's pipe still open means EOF never
+    arrived). Then SIGUSR1 makes _diag_run print every asyncio task's
+    coroutine stack — the await that never resolved — and SIGABRT adds
+    faulthandler's thread dump (conftest sets PYTHONFAULTHANDLER; the
+    harness already drains the child's stderr)."""
     parts: list[str] = []
     if runtime is None or sys.platform == "win32":
         return "<no runtime diagnostics on this path>"
-    try:
-        os.kill(runtime.proc.pid, signal.SIGABRT)
-        # Let the child's faulthandler dump drain into stderr_lines.
-        time.sleep(2.0)
-    except OSError as e:
-        parts.append(f"SIGABRT to runtime {runtime.proc.pid} failed: {e}")
+    # Process states FIRST — the runtime's death below makes member
+    # reapers sweep the group, changing what ps would show.
     pids = {runtime.proc.pid}
     try:
         kids = subprocess.run(
@@ -115,9 +114,22 @@ def _hang_dump(runtime) -> str:
         "runtime pipe fds:\n"
         + "\n".join(x for x in lsof.stdout.splitlines() if "PIPE" in x)
     )
+    # SIGUSR1: _diag_run's handler prints every asyncio task's coroutine
+    # stack — the await that never resolved. SIGABRT after it:
+    # faulthandler's thread dump as backup.
+    try:
+        os.kill(runtime.proc.pid, signal.SIGUSR1)
+        time.sleep(1.5)
+    except OSError as e:
+        parts.append(f"SIGUSR1 to runtime {runtime.proc.pid} failed: {e}")
+    try:
+        os.kill(runtime.proc.pid, signal.SIGABRT)
+        time.sleep(2.0)
+    except OSError as e:
+        parts.append(f"SIGABRT to runtime {runtime.proc.pid} failed: {e}")
     parts.append(
-        "runtime stderr tail (faulthandler dump, newest last):\n"
-        + ("\n".join(list(runtime.stderr_lines)[-200:]) or "<empty>")
+        "runtime stderr tail (task dump then thread dump, newest last):\n"
+        + ("\n".join(list(runtime.stderr_lines)[-300:]) or "<empty>")
     )
     return "\n".join(parts)
 
