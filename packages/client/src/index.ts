@@ -226,6 +226,7 @@ export class BlobHandle {
 
   private _released = false;
   private _objectUrl: string | null = null;
+  private _mediaPromise: Promise<string> | null = null;
 
   /** @internal Built by the `$blob` wire decoder — not for app code. */
   constructor(id: string, mime: string, size: number) {
@@ -263,7 +264,9 @@ export class BlobHandle {
           controller.close();
           return;
         }
-        const res = await fetch(url, { headers: { Range: `bytes=${pos}-` } });
+        const res = await fetch(url, {
+          headers: { Range: `bytes=${pos}-${size - 1}` },
+        });
         if (!res.ok) {
           controller.error(
             new Error(`blob read failed at byte ${pos}: HTTP ${res.status}`),
@@ -301,11 +304,29 @@ export class BlobHandle {
       throw new Error(
         `blob ${this.id} is too large for mediaUrl() (${this.size} bytes > 256 MiB) — use .url or stream()`,
       );
-    if (this._objectUrl === null) {
-      const blob = new Blob([await this.arrayBuffer()], { type: this.mime });
-      this._objectUrl = URL.createObjectURL(blob);
+    // Cache the PROMISE, not the URL: concurrent callers share one object
+    // URL, and a release() landing mid-fetch revokes the URL it would
+    // otherwise leak.
+    if (this._mediaPromise === null) {
+      this._mediaPromise = this.arrayBuffer()
+        .then((buf) => {
+          const u = URL.createObjectURL(new Blob([buf], { type: this.mime }));
+          if (this._released) {
+            URL.revokeObjectURL(u);
+            throw new Error(
+              `blob ${this.id} was released — mediaUrl() can no longer be used`,
+            );
+          }
+          this._objectUrl = u;
+          return u;
+        })
+        .catch((e) => {
+          // A failed read doesn't poison the cache — the next call retries.
+          this._mediaPromise = null;
+          throw e;
+        });
     }
-    return this._objectUrl;
+    return this._mediaPromise;
   }
 
   /** The whole blob as an ArrayBuffer (via stream()). */
@@ -425,13 +446,24 @@ function fromWire(v: unknown): unknown {
     if (ks.length === 1 && ks[0] === B64_TAG)
       return b64decode((v as Record<string, string>)[B64_TAG]);
     if (ks.length === 1 && ks[0] === BLOB_TAG) {
-      const t = (v as Record<string, Record<string, unknown>>)[BLOB_TAG];
-      // Anywhere a value is valid — results, stream chunks, nested.
-      return new BlobHandle(
-        typeof t.id === "string" ? t.id : "",
-        typeof t.mime === "string" ? t.mime : "application/octet-stream",
-        typeof t.size === "number" ? t.size : 0,
-      );
+      const t = (v as Record<string, unknown>)[BLOB_TAG];
+      // A handle only for a well-formed tag: an object with a string id
+      // and numeric size. Anything else using the key ("$blob": null, a
+      // number, a partial object) is the caller's own data — decode it
+      // through the plain-object branch like any other value.
+      if (
+        t !== null &&
+        typeof t === "object" &&
+        typeof (t as Record<string, unknown>).id === "string" &&
+        typeof (t as Record<string, unknown>).size === "number"
+      ) {
+        const tag = t as { id: string; mime?: unknown; size: number };
+        return new BlobHandle(
+          tag.id,
+          typeof tag.mime === "string" ? tag.mime : "application/octet-stream",
+          tag.size,
+        );
+      }
     }
     if (Array.isArray(v)) return v.map(fromWire);
     return Object.fromEntries(

@@ -145,6 +145,17 @@ test("$b64 still decodes to Uint8Array (capability-off fallback)", async () => {
   assert.deepEqual([...r], [104, 105]);
 });
 
+for (const bad of [null, 5, { id: 1 }]) {
+  test(`malformed $blob ${JSON.stringify(bad)} stays plain data`, async () => {
+    const b = fakeBridge();
+    setBridge(b);
+    const p = call("x");
+    await tick();
+    b.emitTask(100, streamDone(100, { $blob: bad }));
+    assert.deepEqual(await p, { $blob: bad });
+  });
+}
+
 // ---- url ---------------------------------------------------------------------
 
 test(".url uses the Windows form under a Windows UA", () => {
@@ -177,7 +188,7 @@ test("stream() advances by bytes received across short 206s", async () => {
   // 10 bytes at 3/request: 4 range requests, positions from bytes received.
   assert.deepEqual(
     requests.map((r) => r.range),
-    ["bytes=0-", "bytes=3-", "bytes=6-", "bytes=9-"],
+    ["bytes=0-9", "bytes=3-9", "bytes=6-9", "bytes=9-9"],
   );
   assert.equal(requests.length, 4, "stream must stop at size — no 5th read");
 });
@@ -226,6 +237,53 @@ test("mediaUrl() builds a blob: object URL and release() revokes it", async () =
       1,
     );
   } finally {
+    URL.revokeObjectURL = savedRevoke;
+  }
+});
+
+test("concurrent mediaUrl() calls share one object URL", async () => {
+  globalThis.fetch = cappedServer(new Uint8Array([1, 2, 3]), 64);
+  const savedCreate = URL.createObjectURL;
+  let made = 0;
+  URL.createObjectURL = () => `blob:shared-${++made}`;
+  try {
+    const h = new BlobHandle("m", "audio/wav", 3);
+    const [u1, u2] = await Promise.all([h.mediaUrl(), h.mediaUrl()]);
+    assert.equal(u1, u2);
+    assert.equal(made, 1, "two callers, one object URL");
+  } finally {
+    URL.createObjectURL = savedCreate;
+  }
+});
+
+test("release() during an in-flight mediaUrl() leaves no unrevoked URL", async () => {
+  let releaseFetch;
+  globalThis.fetch = () => new Promise((r) => (releaseFetch = r));
+  const created = [];
+  const revoked = [];
+  const savedCreate = URL.createObjectURL;
+  const savedRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => {
+    const u = `blob:flight-${created.length}`;
+    created.push(u);
+    return u;
+  };
+  URL.revokeObjectURL = (u) => revoked.push(u);
+  try {
+    const b = fakeBridge();
+    setBridge(b);
+    const h = new BlobHandle("m", "audio/wav", 10);
+    const p = h.mediaUrl();
+    await h.release(); // lands while the ranged read is still pending
+    releaseFetch({
+      ok: true,
+      status: 206,
+      arrayBuffer: async () => new Uint8Array(10).buffer,
+    });
+    await assert.rejects(p, /released/);
+    assert.deepEqual(revoked, created, "the URL built after release is revoked");
+  } finally {
+    URL.createObjectURL = savedCreate;
     URL.revokeObjectURL = savedRevoke;
   }
 });
