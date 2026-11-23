@@ -1,0 +1,56 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>b0 other</title></head>
+<body><pre id="log">running…</pre>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const log = (m) => { document.getElementById("log").textContent += "\n" + m; };
+const BASE = navigator.userAgent.includes("Windows") || navigator.userAgent.includes("Android")
+  ? "http://pylair.localhost" : "pylair://localhost";
+const B = (id) => `${BASE}/b/${id}`;
+
+const results = [];
+const rec = (name, ok, detail) => { results.push({ name, ok, detail: String(detail) }); log(`${ok ? "ok" : "FAIL"} ${name}: ${detail}`); };
+const timeout = (p, ms = 9000) => Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error("timeout")), ms))]);
+
+const el = (tag, src) => timeout(new Promise((res, rej) => {
+  const e = document.createElement(tag);
+  e.onload = () => res("loaded");
+  e.onerror = () => rej(new Error(`${tag} onerror`));
+  e.src = src;
+  document.body.appendChild(e);
+}));
+
+const fetchStatus = async (url) => {
+  const r = await timeout(fetch(url));
+  return { status: r.status, len: (await r.arrayBuffer()).byteLength };
+};
+
+const workerFetch = (url) => timeout(new Promise((res, rej) => {
+  const w = new Worker("worker.js");
+  w.onmessage = (e) => res(e.data);
+  w.onerror = (e) => rej(new Error(e.message || "worker error"));
+  w.postMessage(url);
+}));
+
+(async () => {
+  rec("origin", true, location.origin + " | base=" + BASE);
+
+  // own blob — control: this window owns img_other
+  try { await el("img", B("img_other")); rec("img own blob", true, "onload"); }
+  catch (e) { rec("img own blob", false, e.message); }
+  try { const r = await fetchStatus(B("img_other")); rec("fetch own blob", r.status === 200 && r.len === 10381, JSON.stringify(r)); }
+  catch (e) { rec("fetch own blob", false, e.message); }
+
+  // cross-window reads of main's blobs — every request type must 403
+  try { const r = await fetchStatus(B("img_main")); rec("fetch main's denied", r.status === 403, JSON.stringify(r)); }
+  catch (e) { rec("fetch main's denied", false, e.message); }
+  try { await el("img", B("img_main")); rec("img main's denied", false, "onload fired"); }
+  catch (e) { rec("img main's denied", true, e.message); }
+  try { await el("audio", B("audio_main")); rec("audio main's denied", false, "onload fired"); }
+  catch (e) { rec("audio main's denied", true, e.message); }
+  try { const m = await workerFetch(B("img_main")); rec("worker fetch main's denied", m.status === 403, JSON.stringify(m)); }
+  catch (e) { rec("worker fetch main's denied", false, e.message); }
+
+  await invoke("b0_report", { report: { window: "other", results } });
+})();
+</script></body></html>

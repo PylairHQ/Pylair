@@ -1,0 +1,98 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>b0 main</title></head>
+<body><pre id="log">running…</pre>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const log = (m) => { document.getElementById("log").textContent += "\n" + m; };
+// Windows/Android serve custom schemes as http://<scheme>.localhost;
+// macOS/Linux as <scheme>://localhost (protocol::origin in tauri).
+const BASE = navigator.userAgent.includes("Windows") || navigator.userAgent.includes("Android")
+  ? "http://pylair.localhost" : "pylair://localhost";
+const B = (id) => `${BASE}/b/${id}`;
+
+const results = [];
+const rec = (name, ok, detail) => { results.push({ name, ok, detail: String(detail) }); log(`${ok ? "ok" : "FAIL"} ${name}: ${detail}`); };
+const timeout = (p, ms = 9000) => Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error("timeout")), ms))]);
+
+const el = (tag, src) => timeout(new Promise((res, rej) => {
+  const e = document.createElement(tag);
+  e.onload = () => res("loaded");
+  e.onerror = () => rej(new Error(`${tag} onerror`));
+  e.src = src;
+  document.body.appendChild(e);
+}));
+
+const fetchStatus = async (url, headers) => {
+  const r = await timeout(fetch(url, { headers }));
+  return { status: r.status, len: (await r.arrayBuffer()).byteLength, cr: r.headers.get("content-range") };
+};
+
+const xhrStatus = (url) => timeout(new Promise((res, rej) => {
+  const x = new XMLHttpRequest();
+  x.open("GET", url);
+  x.onload = () => res(x.status);
+  x.onerror = () => rej(new Error("xhr error"));
+  x.send();
+}));
+
+const workerFetch = (url) => timeout(new Promise((res, rej) => {
+  const w = new Worker("worker.js");
+  w.onmessage = (e) => res(e.data);
+  w.onerror = (e) => rej(new Error(e.message || "worker error"));
+  w.postMessage(url);
+}));
+
+async function audioSeek(url) {
+  const a = document.createElement("audio");
+  a.src = url;
+  a.preload = "auto";
+  document.body.appendChild(a);
+  await timeout(new Promise((res, rej) => { a.onloadedmetadata = res; a.onerror = () => rej(new Error("audio onerror")); }), 15000);
+  const before = (await invoke("b0_scheme_log")).filter((l) => l.includes("audio_main")).length;
+  await timeout(new Promise((res, rej) => { a.onseeked = res; a.onerror = () => rej(new Error("seek error")); a.currentTime = 90.0; }), 12000);
+  const lines = (await invoke("b0_scheme_log")).filter((l) => l.includes("audio_main"));
+  return { seeked: true, duration: a.duration, audioReqs: lines.length, ranged: lines.filter((l) => l.includes("-> 206") || l.includes("range=bytes")).length, lines };
+}
+
+(async () => {
+  const ids = await invoke("b0_blob_ids");
+  rec("origin", true, location.origin + " | base=" + BASE);
+
+  try { await el("img", B("img_main")); rec("img own blob", true, "onload"); }
+  catch (e) { rec("img own blob", false, e.message); }
+
+  try { const r = await fetchStatus(B("img_main")); rec("fetch own blob", r.status === 200 && r.len === 10381, JSON.stringify(r)); }
+  catch (e) { rec("fetch own blob", false, e.message); }
+
+  try { const r = await fetchStatus(B("img_main"), { Range: "bytes=0-99" }); rec("fetch Range", r.status === 206 && r.len === 100, JSON.stringify(r)); }
+  catch (e) { rec("fetch Range", false, e.message); }
+
+  try { const s = await xhrStatus(B("img_main")); rec("xhr own blob", s === 200, "status " + s); }
+  catch (e) { rec("xhr own blob", false, e.message); }
+
+  try { const m = await workerFetch(B("img_main")); rec("worker fetch own", m.status === 200, JSON.stringify(m)); }
+  catch (e) { rec("worker fetch own", false, e.message); }
+
+  try { const m = await workerFetch(B("img_other")); rec("worker fetch other's", m.status === 403, JSON.stringify(m)); }
+  catch (e) { rec("worker fetch other's", false, e.message); }
+
+  try { const r = await fetchStatus(B("img_other")); rec("fetch other's blob denied", r.status === 403, JSON.stringify(r)); }
+  catch (e) { rec("fetch other's blob denied", false, e.message); }
+
+  try { await el("img", B("img_other")); rec("img other's denied", false, "onload fired"); }
+  catch (e) { rec("img other's denied", true, e.message); }
+
+  try { const r = await fetchStatus(B("does_not_exist")); rec("404 unknown id", r.status === 404, "status " + r.status); }
+  catch (e) { rec("404 unknown id", false, e.message); }
+
+  try { const r = await fetchStatus(`${BASE}/../etc`); rec("bad path rejected", r.status === 400, "status " + r.status); }
+  catch (e) { rec("bad path rejected", false, e.message); }
+
+  try { const a = await audioSeek(B("audio_main")); rec("audio seek", a.seeked && a.duration > 119 && a.ranged >= 1, `dur=${a.duration} audioReqs=${a.audioReqs} ranged=${a.ranged}`); }
+  catch (e) { rec("audio seek", false, e.message); }
+
+  const schemeLog = await invoke("b0_scheme_log");
+  rec("labels seen", schemeLog.every((l) => l.includes("label=main") || l.includes("label=other")), JSON.stringify(schemeLog));
+  await invoke("b0_report", { report: { window: "main", results } });
+})();
+</script></body></html>
