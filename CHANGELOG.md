@@ -8,6 +8,20 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Blob URLs, Python side.** `pylair.Blob` lands: `Blob(data, mime=...)`
+  and `Blob.from_path(path, mime=..., copy=...)` write (atomic rename) or
+  hardlink the payload into the host-provided `PYLAIR_BLOB_DIR` and
+  serialize as `{"$blob": {"id","mime","size"}}` in results and stream
+  chunks. The runtime flushes `blob.register` (id, path, mime, size,
+  task_id) ahead of the carrying frame on the same FIFO writer, so the
+  host's owner-bound registry always learns a blob before its tag
+  arrives. Isolated and warm workers materialize blobs into the
+  inherited dir and ride their registrations home in the result payload,
+  re-bound to the parent's task. With `PYLAIR_BLOB_DIR` unset (older
+  host) a Blob degrades to `$b64` when it fits the frame cap, else the
+  call fails `LIMIT_EXCEEDED` naming the feature — never a silent drop.
+  The reference app gains a `make_blob` fixture for the acceptance leg.
+
 - **Blob URLs, host side (crate only).** The `pylair-blob` URI scheme is
   registered and a per-generation blob directory (`<app cache>/pylair-blobs/gen-N`)
   is exported to the backend as `PYLAIR_BLOB_DIR`, implementing the host

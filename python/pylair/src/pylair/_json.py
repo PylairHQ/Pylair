@@ -5,6 +5,9 @@ datetime — this layer makes the annotated types in docs/codegen.md
 actually round-trip:
 
   bytes/bytearray -> {"$b64": "<base64>"}  (restored by object_hook)
+  pylair.Blob     -> {"$blob": {"id","mime","size"}} — bytes live in
+                     PYLAIR_BLOB_DIR; registration rides ahead of the
+                     carrying frame (decision 0010)
   @dataclass      -> dataclasses.asdict
   datetime/date/time -> ISO 8601 string
   Enum -> its value; set/frozenset -> list
@@ -34,6 +37,8 @@ import typing
 import weakref
 from typing import Any
 
+from pylair._blob import Blob, BlobFallbackExceeded  # noqa: F401 — re-export for senders
+
 _B64_TAG = "$b64"
 
 # JS Number.MAX_SAFE_INTEGER — the largest int that survives JSON.parse.
@@ -50,6 +55,8 @@ class InvalidParams(Exception):
 
 
 def _default(obj: Any) -> Any:
+    if isinstance(obj, Blob):
+        return obj._to_wire(None)
     if isinstance(obj, (bytes, bytearray)):
         return {_B64_TAG: base64.b64encode(bytes(obj)).decode("ascii")}
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -141,6 +148,12 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             continue
         if isinstance(node, (bytes, bytearray)):
             continue  # _default -> {"$b64": str} — a plain string leaf.
+        if isinstance(node, Blob):
+            # _default -> {"$blob": {...}} — a leaf. The capability-off
+            # fallback has to fit the frame cap BEFORE the encode writes
+            # files or the call dies mid-serialize.
+            node._fallback_check()
+            continue
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             # _default -> asdict: the fields land one level deeper and can
             # carry guarded values the old re-parse caught on the text.
@@ -157,6 +170,35 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             continue
         # Anything else: _default raises TypeError at dumps time — the
         # same error the caller maps today; no pre-check needed.
+
+
+def dumps_collect(
+    obj: Any, regs: dict[str, Blob], depth_limit: int | None = None
+) -> str:
+    """dumps + collect the handles minted during serialization.
+
+    `regs` fills with {Blob: _BlobHandle} — keyed by object identity, so
+    the same Blob twice in one frame is one handle while each PASS mints
+    fresh ones (the Blob is re-sendable). The caller flushes each handle
+    as a `blob.register` notification AHEAD of the carrying frame
+    (decision 0010 §3 — a single writer's FIFO makes
+    registration-before-use atomic). If the dump raises after some
+    handles already wrote files, those files are unlinked: nothing was
+    ever registered, so Python still owns them.
+    """
+    check_wire(obj, depth_limit)
+
+    def default(o: Any) -> Any:
+        if isinstance(o, Blob):
+            return o._to_wire(regs)
+        return _default(o)
+
+    try:
+        return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+    except BaseException:
+        for b in regs.values():
+            b._unlink()
+        raise
 
 
 def dumps(obj: Any, depth_limit: int | None = None) -> str:

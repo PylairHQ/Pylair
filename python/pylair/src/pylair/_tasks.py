@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import signal
 import struct
@@ -143,7 +144,16 @@ class _WarmWorkerDead(Exception):
 
 class TaskRegistry:
     def __init__(self, send: Callable[[dict], None]) -> None:
-        self._send = send
+        # The real sink is Runtime._send(msg, task_id=None) — the
+        # blob.register flush binds the owner from the task id. A unit
+        # sink that accepts just the message keeps its old call shape.
+        params = inspect.signature(send).parameters.values()
+        if "task_id" in (p.name for p in params) or any(
+            p.kind == p.VAR_KEYWORD for p in params
+        ):
+            self._send = send
+        else:
+            self._send = lambda msg, task_id=None: send(msg)
         self._tasks: dict[int | str, Task] = {}
         # The host's control lane can outrun the call that registers a task:
         # hold cancels/credit for not-yet-known ids and apply them at start.
@@ -388,7 +398,14 @@ class TaskRegistry:
                 # rides inside dumps' single pre-walk (MAX_DEPTH - 4
                 # leaves room for the notification envelope).
                 try:
-                    _body = _json.dumps(value, MAX_DEPTH - 4).encode()
+                    # Serialize the chunk value for the cap check exactly
+                    # as the frame will — a Blob mints a handle either way.
+                    _regs: dict = {}
+                    _body = _json.dumps_collect(value, _regs, MAX_DEPTH - 4).encode()
+                    # This pass's handle was only for the cap check — the
+                    # frame's own dump mints the one that registers.
+                    for _h in _regs.values():
+                        _h._unlink()
                 except _json.DepthExceeded:
                     self._finish(
                         task,
@@ -418,7 +435,8 @@ class TaskRegistry:
                     proto.notification(
                         "stream.chunk",
                         {"task": task.id, "seq": task.seq, "value": value},
-                    )
+                    ),
+                    task_id=task.id,
                 )
                 task.seq += 1
         except StopAsyncIteration:
@@ -493,6 +511,7 @@ class TaskRegistry:
                     ),
                 )
             else:
+                self._forward_blob_regs(task, payload)
                 self._finish(task, proto.response(task.call_id, payload["result"]))
         except asyncio.CancelledError:
             await self._kill_worker(task)
@@ -659,6 +678,7 @@ class TaskRegistry:
                 ),
             )
         else:
+            self._forward_blob_regs(task, payload)
             self._finish(task, proto.response(task.call_id, payload["result"]))
 
     async def _acquire_warm(self, task: Task, pool: _WarmPool) -> _WarmMember:
@@ -1333,6 +1353,18 @@ class TaskRegistry:
                         ),
                     )
 
+    def _forward_blob_regs(self, task: Task, payload: dict) -> None:
+        """A worker wrote blob files into the shared PYLAIR_BLOB_DIR and
+        returned their registration params in its payload — it has no
+        host channel, so the runtime forwards each as `blob.register`
+        bound to this task BEFORE the response (decision 0010 §4).
+        """
+        for r in payload.get("blobs") or []:
+            if isinstance(r, dict):
+                self._send(
+                    proto.notification("blob.register", {**r, "task_id": task.id})
+                )
+
     def _finish(self, task: Task, terminal: dict) -> None:
         if task.done:
             return  # a cancelled task's late result is discarded
@@ -1340,7 +1372,7 @@ class TaskRegistry:
         if task.kind == "isolated" and not task.warm:
             self._isolated -= 1
         try:
-            self._send(terminal)  # serializes on the event loop
+            self._send(terminal, task_id=task.id)  # serializes on the event loop
         except (TypeError, ValueError) as e:
             # Result not wire-serializable (numpy/tensor object, NaN) —
             # fail this one call, never the runtime (protocol §2).

@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
+import pylair
 from pylair import expose
 
 
@@ -515,3 +516,75 @@ def app_data_dir_env() -> str | None:
 @expose(worker={"mode": "warm"})
 def warm_app_data_dir_env() -> str | None:
     return os.environ.get("PYLAIR_APP_DATA_DIR")
+
+
+# ---- blob values (decision 0010) ---------------------------------------------
+# Small payload fixtures for the wire/runtime tests: the runtime's
+# response carries a $blob tag, the file lands under PYLAIR_BLOB_DIR, and
+# the worker variants prove registrations ride home through the parent.
+
+
+@expose
+def make_blob() -> "pylair.Blob":
+    return pylair.Blob(b"tiny-png-ish-bytes", mime="image/png")
+
+
+@expose
+async def stream_blob() -> AsyncGenerator:
+    """One scalar chunk, then a Blob chunk — ordering must hold for
+    stream.chunk frames exactly as for responses (§3)."""
+    import pylair
+
+    yield "lead"
+    yield pylair.Blob(b"streamed-blob-bytes", mime="text/plain")
+
+
+@expose
+def make_blob_path(tmp_name: str) -> "pylair.Blob":
+    """from_path — hardlink into the blob dir (source lives beside the
+    dir in the test so the hardlink path provably applies)."""
+    return pylair.Blob.from_path(tmp_name, mime="audio/wav")
+
+
+@expose(isolated=True)
+def isolated_blob() -> dict:
+    """A Blob made in an isolated worker — the registration must ride
+    back in the payload and the parent must bind it to this task."""
+    import os
+
+    return {
+        "pid": os.getpid(),
+        "dir": os.environ.get("PYLAIR_BLOB_DIR"),
+        "blob": pylair.Blob(b"isolated-worker-bytes", mime="text/plain"),
+    }
+
+
+@expose(worker={"mode": "warm"})
+def warm_blob() -> dict:
+    import os
+
+    return {
+        "pid": os.getpid(),
+        "dir": os.environ.get("PYLAIR_BLOB_DIR"),
+        "blob": pylair.Blob(b"warm-worker-bytes", mime="text/plain"),
+    }
+
+
+@expose
+def make_blob_copy(src: str) -> "pylair.Blob":
+    """copy=True forces the plain-copy path even when a hardlink would
+    work — the test asserts a second inode, not a shared one."""
+    import pylair
+
+    return pylair.Blob.from_path(src, mime="text/plain", copy=True)
+
+
+# The SAME Blob object returned by any number of calls — a module-level
+# cache. Every call must mint its own handle: fresh id, fresh file.
+
+
+@expose
+def shared_blob() -> pylair.Blob:
+    if getattr(shared_blob, "_cached", None) is None:
+        shared_blob._cached = pylair.Blob(b"shared-cached-payload", mime="text/plain")
+    return shared_blob._cached

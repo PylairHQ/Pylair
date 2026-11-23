@@ -338,3 +338,13 @@ def models_selftest_cleanup() -> dict:
         srv.shutdown()
         _model_state["server"] = None
     return {"removed": True}
+
+
+@expose
+def make_blob() -> "pylair.Blob":
+    """Blob fixture (decision 0010): a tiny PNG-ish payload the acceptance
+    PR fetches through the pylair-blob scheme — the bridge carries the
+    $blob tag, the client resolves it to a URL."""
+    import pylair
+
+    return pylair.Blob(b"pylair-blob-reference-payload", mime="image/png")

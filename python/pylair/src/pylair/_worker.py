@@ -190,13 +190,16 @@ def _invoke(
     module_name: str,
     input: dict,
     on_start=None,
+    regs: dict | None = None,
 ) -> dict:
     """Run one call against the resolved registry entry; build its payload.
 
     Shared by one-shot and serve mode — every boundary error is a payload,
     never a worker exit (a nonzero exit reads as WORKER_DIED upstream).
     `on_start` fires once, right before the raise window opens — serve
-    mode uses it for the "started" frame.
+    mode uses it for the "started" frame. `regs` is the caller's blob
+    handle map: serialize `payload` with the same map so a Blob's tag is
+    the handle its `blobs` entry registers.
     """
     global _raise_active
     try:
@@ -217,7 +220,15 @@ def _invoke(
         finally:
             _raise_active = False
         try:
-            _json.check_wire(result, _transport.MAX_DEPTH - 2)
+            # dumps_collect runs check_wire inside AND materializes any
+            # Blob: the file lands in the inherited PYLAIR_BLOB_DIR and
+            # its registration rides home in `blobs` — the parent
+            # forwards it as blob.register before the response, bound to
+            # the task's owner (decision 0010 §4; a worker has no host
+            # channel of its own). The caller serializes `payload` with
+            # the SAME regs so the tag in `result` is the minted handle's.
+            regs = regs if regs is not None else {}
+            _json.dumps_collect(result, regs, _transport.MAX_DEPTH - 2)
         except _json.DepthExceeded:
             # A result deeper than the host's parser limit would arrive
             # as a malformed frame and kill the runtime — the parent maps
@@ -232,7 +243,27 @@ def _invoke(
                     },
                 }
             }
-        return {"result": result}
+        except _json.BlobFallbackExceeded as e:
+            return {
+                "error": {
+                    "code": proto.LIMIT_EXCEEDED,
+                    "message": str(e),
+                    "data": {"limit": "max_frame", "feature": "blob"},
+                }
+            }
+        except (TypeError, ValueError) as e:
+            # Same boundary the parent's _finish draws: a value the codec
+            # can't hold is this call's error, never the worker's death.
+            return {
+                "error": {
+                    "message": f"result is not wire-serializable: {e}",
+                    "data": {"type": "SerializationError"},
+                }
+            }
+        payload = {"result": result}
+        if regs:
+            payload["blobs"] = [b._register_params() for b in regs.values()]
+        return payload
     except KeyboardInterrupt:
         # The interrupt landed inside the raise window — a distinct
         # result on the private channel so the parent can tell
@@ -299,6 +330,7 @@ def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
                 payload = {"ready": True}
             chan.write_frame(_json.dumps(payload).encode())
             continue
+        regs: dict = {}
         payload = (
             import_error
             if import_error is not None
@@ -308,9 +340,10 @@ def _serve_loop(module_name: str, fn_name: str, out_fd: int) -> int:
                 module_name,
                 msg.get("input") or {},
                 on_start=lambda: chan.write_frame(_STARTED),
+                regs=regs,
             )
         )
-        chan.write_frame(_json.dumps(payload).encode())
+        chan.write_frame(_json.dumps_collect(payload, regs).encode())
 
 
 def main() -> int:
@@ -353,11 +386,13 @@ def main() -> int:
         entry = exposed_functions().get(fn_name)
         raw = sys.stdin.buffer.read()
         input = _json.loads(raw) if raw else {}
-        payload = _invoke(entry, fn_name, module_name, input)
+        regs: dict = {}
+        payload = _invoke(entry, fn_name, module_name, input, regs=regs)
     except BaseException as e:  # noqa: BLE001 - boundary: report everything
         payload = _exception_payload(e)
+        regs = {}
 
-    os.write(out_fd, _json.dumps(payload).encode())
+    os.write(out_fd, _json.dumps_collect(payload, regs).encode())
     return 0
 
 

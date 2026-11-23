@@ -167,7 +167,7 @@ class Server:
         rem = max(self._deadline - time.monotonic(), 0.0)
         return rem if cap is None else min(cap, rem)
 
-    def _send(self, msg: dict) -> None:
+    def _send(self, msg: dict, task_id: int | str | None = None) -> None:
         # Serialize HERE, on the caller's thread (the event loop for task
         # results): a TypeError/ValueError can then be turned into an
         # INTERNAL response for that one call. The writer thread only ever
@@ -176,8 +176,9 @@ class Server:
         # nested deeper than the host's parser limit is a malformed frame
         # on arrival — fail just this call with the typed error instead of
         # killing the runtime. A notification has no caller: drop it.
+        regs: dict = {}
         try:
-            body = _json.dumps(msg, MAX_DEPTH).encode()
+            body = _json.dumps_collect(msg, regs, MAX_DEPTH).encode()
         except _json.DepthExceeded:
             rid = msg.get("id")
             if isinstance(rid, (int, str)):
@@ -194,9 +195,29 @@ class Server:
                     f"{msg.get('method', 'response')}) — host could not parse it"
                 )
                 return
+        except _json.BlobFallbackExceeded as e:
+            # A Blob on a host without PYLAIR_BLOB_DIR whose $b64 can't
+            # fit the frame cap — fail this call naming the feature
+            # (decision 0010 §3); never silently drop the value.
+            rid = msg.get("id")
+            if isinstance(rid, (int, str)):
+                body = _json.dumps(
+                    proto.error_response(
+                        rid,
+                        proto.LIMIT_EXCEEDED,
+                        str(e),
+                        {"limit": "max_frame", "feature": "blob"},
+                    )
+                ).encode()
+            else:
+                _log(f"dropping outbound frame: {e}")
+                return
         if len(body) > MAX_FRAME and isinstance(msg.get("id"), (int, str)):
             # An oversized RESPONSE would trip the host's read cap and kill
             # the runtime — fail just this call with the typed error (RC.8A).
+            for h in regs.values():
+                h._unlink()  # materialized but the tag never ships
+            regs.clear()
             body = _json.dumps(
                 proto.error_response(
                     msg["id"],
@@ -205,6 +226,43 @@ class Server:
                     {"limit": "max_frame", "max": MAX_FRAME},
                 )
             ).encode()
+        if regs and task_id is None:
+            # A Blob can only travel a frame the host can bind to a task —
+            # call responses and stream.chunks. Anything else (events,
+            # readiness, stray notifications) would ship a tag whose
+            # register the crate drops as owner-less and the URL 404s.
+            # Refuse it instead: nothing registered, files unlinked, and
+            # the developer gets the rule, not a dead link.
+            for h in regs.values():
+                h._unlink()
+            regs.clear()
+            kind = msg.get("method") or "response"
+            why = (
+                f"outbound {kind!r} frame carries a Blob but has no task "
+                "binding — Blobs can only be returned from calls or streams"
+            )
+            rid = msg.get("id")
+            if isinstance(rid, (int, str)):
+                body = _json.dumps(
+                    proto.error_response(rid, proto.INTERNAL, why)
+                ).encode()
+            else:
+                _log(f"dropping {why}")
+                return
+        # Registration-before-use (decision 0010 §3): every $blob tag in
+        # the carrying frame is registered with the host first — same
+        # caller thread, sequential puts, one writer FIFO. The owner is
+        # bound by the host from task_id, never trusted from here.
+        for h in regs.values():
+            h._registered = True
+            self._out.put_nowait(
+                _json.dumps(
+                    proto.notification(
+                        "blob.register",
+                        {**h._register_params(), "task_id": task_id},
+                    )
+                ).encode()
+            )
         try:
             self._out.put_nowait(body)
         except queue.Full:
