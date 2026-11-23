@@ -44,7 +44,9 @@ jobs:
         run: PYLAIR_B0_OUT="$GITHUB_WORKSPACE/spikes/b0-blobs/out" timeout 180 xvfb-run -a ./target/debug/b0-blobs
       - name: Run spike (macOS)
         if: runner.os == 'macOS'
-        run: PYLAIR_B0_OUT="$GITHUB_WORKSPACE/spikes/b0-blobs/out" timeout 180 ./target/debug/b0-blobs
+        # no coreutils timeout on macOS — the app self-exits after both
+        # windows report; the step timeout is the backstop.
+        run: PYLAIR_B0_OUT="$GITHUB_WORKSPACE/spikes/b0-blobs/out" ./target/debug/b0-blobs
       - name: Run spike (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
