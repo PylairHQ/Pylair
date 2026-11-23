@@ -131,6 +131,9 @@ _interrupt_installed = False
 # cancel path interrupts only after this frame lands, so a signal can
 # never be wasted on a worker that has not reached the user function.
 _STARTED = b'{"started": true}'
+_IGNORED_LINE = (
+    "[pylair] worker: interrupt outside the raise window — ignored\n".encode()
+)
 
 
 def _install_interrupt() -> None:
@@ -147,11 +150,18 @@ def _install_interrupt() -> None:
         _interrupt_seen += 1
         if _raise_active:
             raise KeyboardInterrupt
-        print(
-            "[pylair] worker: interrupt outside the raise window — ignored",
-            file=sys.stderr,
-            flush=True,
-        )
+        # Not a buffered print: a second signal landing while the writer
+        # is mid-write re-enters it and raises RuntimeError, escaping
+        # into whatever the main thread was running — inside the serve
+        # loop's channel reads/writes that exit reads as worker death.
+        # os.write has no Python-level buffer state to re-enter; nested
+        # calls merely interleave the line.
+        try:
+            os.write(sys.stderr.fileno(), _IGNORED_LINE)
+        except (OSError, ValueError, AttributeError):
+            # Closed fd, a rebound/None sys.stderr — a diagnostic never
+            # gets to kill the worker.
+            pass
 
     global _interrupt_installed
     _interrupt_installed = True
