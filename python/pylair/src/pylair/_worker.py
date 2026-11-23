@@ -217,7 +217,14 @@ def _invoke(
         finally:
             _raise_active = False
         try:
-            _json.check_wire(result, _transport.MAX_DEPTH - 2)
+            # dumps_collect runs check_wire inside AND materializes any
+            # Blob: the file lands in the inherited PYLAIR_BLOB_DIR and
+            # its registration rides home in `blobs` — the parent
+            # forwards it as blob.register before the response, bound to
+            # the task's owner (decision 0010 §4; a worker has no host
+            # channel of its own).
+            regs: dict = {}
+            _json.dumps_collect(result, regs, _transport.MAX_DEPTH - 2)
         except _json.DepthExceeded:
             # A result deeper than the host's parser limit would arrive
             # as a malformed frame and kill the runtime — the parent maps
@@ -232,7 +239,27 @@ def _invoke(
                     },
                 }
             }
-        return {"result": result}
+        except _json.BlobFallbackExceeded as e:
+            return {
+                "error": {
+                    "code": proto.LIMIT_EXCEEDED,
+                    "message": str(e),
+                    "data": {"limit": "max_frame", "feature": "blob"},
+                }
+            }
+        except (TypeError, ValueError) as e:
+            # Same boundary the parent's _finish draws: a value the codec
+            # can't hold is this call's error, never the worker's death.
+            return {
+                "error": {
+                    "message": f"result is not wire-serializable: {e}",
+                    "data": {"type": "SerializationError"},
+                }
+            }
+        payload = {"result": result}
+        if regs:
+            payload["blobs"] = [b._register_params() for b in regs.values()]
+        return payload
     except KeyboardInterrupt:
         # The interrupt landed inside the raise window — a distinct
         # result on the private channel so the parent can tell
