@@ -675,14 +675,24 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     // Relay the id NOW so win-b can fetch this blob while it is alive —
     // owner binding (403) is only observable on a live registry entry.
     await within(call("selftest_blob_store", { id: res.id }), 30_000, "selftest_blob_store");
+    // A raw fetch rejection names nothing — label each step so the
+    // verdict's fail:<step> locates it (a bare "Failed to fetch" was
+    // opaque on the first CI round).
+    const stepFetch = (init: RequestInit | undefined, step: string) =>
+      fetch(url, init).then(
+        (r) => r,
+        (e: unknown) => {
+          throw new Error(`${step}: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      );
     // Full fetch → 200 + exact bytes.
-    const full = await within(fetch(url), 15_000, "fetch");
+    const full = await within(stepFetch(undefined, "fetch"), 15_000, "fetch");
     if (full.status !== 200)
       throw new Error(`fetch: status ${full.status}, expected 200`);
     bytesEq(await full.arrayBuffer(), EXPECTED, "fetch");
     // Range fetch → 206 + exact slice + Content-Range.
     const rng = await within(
-      fetch(url, { headers: { Range: "bytes=2-7" } }),
+      stepFetch({ headers: { Range: "bytes=2-7" } }, "range"),
       15_000,
       "range fetch",
     );
@@ -721,7 +731,17 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     const mu = await within(res.mediaUrl(), 15_000, "mediaUrl");
     if (!mu.startsWith("blob:"))
       throw new Error(`mediaUrl: ${JSON.stringify(mu)} is not a blob: URL`);
-    bytesEq(await (await within(fetch(mu), 15_000, "mediaUrl fetch")).arrayBuffer(), EXPECTED, "mediaUrl");
+    const muRes = await within(
+      fetch(mu).then(
+        (r) => r,
+        (e: unknown) => {
+          throw new Error(`mediaUrl fetch: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      ),
+      15_000,
+      "mediaUrl fetch",
+    );
+    bytesEq(await muRes.arrayBuffer(), EXPECTED, "mediaUrl");
     // win-b's fetch of OUR blob must be refused — owner binding. Its
     // verdict travels through Python-side state (selftest_blob_verdict),
     // not the b-report: the report is bound to win-b's own routine

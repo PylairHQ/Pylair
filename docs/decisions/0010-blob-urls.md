@@ -117,14 +117,15 @@ fired. Media via a custom scheme is real on WebView2.
 already implied by `default-src 'self'`:
 
 ```
-connect-src 'self' ipc: http://ipc.localhost pylair-blob: http://pylair-blob.localhost
+connect-src 'self' blob: ipc: http://ipc.localhost pylair-blob: http://pylair-blob.localhost
 img-src 'self' data: blob: pylair-blob: http://pylair-blob.localhost
 media-src 'self' blob: pylair-blob: http://pylair-blob.localhost
 ```
 
-(`blob:` for the `mediaUrl()` object URL, and `'self'` on `media-src`
-is required — the directive's mere presence drops the `default-src`
-fallback bundled media relied on.)
+(`blob:` for the `mediaUrl()` object URL — `connect-src` needs it too
+or `fetch`/`XHR` on the URL is CSP-refused on every platform — and
+`'self'` on `media-src` is required: the directive's mere presence
+drops the `default-src` fallback bundled media relied on.)
 
 (Both scheme spellings, so one CSP covers all OSes.) The wrap template's
 CSP is updated identically for consistency, though wrap pages are remote
