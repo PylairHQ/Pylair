@@ -1054,6 +1054,18 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
     }
   }
 
+  // The report cannot ride emit/emitTo: a `core:event:deny-emit(-to)` entry
+  // (as the default template ships) denies those commands origin-wide —
+  // Tauri ignores window scoping for denials — so win-b relays through an
+  // ACL-checked command whose Rust side emits for it. It must land NOW —
+  // the owner awaits it inside window-fairness/event-scoping — so it goes
+  // out BEFORE the blob probe below: that probe waits on the owner's own
+  // later progress (the blob check's selftest_blob_store), and holding
+  // the report behind it deadlocks the owner's 60s await.
+  await invoke("plugin:pylair|python_selftest_b_report", {
+    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe, fairnessProbe },
+  }).catch(() => {});
+
   // Blob owner-binding probe (decisions 0010): the owner's "blob" check
   // relays a live blob id through selftest_blob_store; this window reads
   // it back via selftest_blob_id, fetches that URL, and records the
@@ -1123,12 +1135,4 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
     }
     await call("selftest_blob_outcome", { v: verdict }).catch(() => {});
   }
-
-  // The report cannot ride emit/emitTo: a `core:event:deny-emit(-to)` entry
-  // (as the default template ships) denies those commands origin-wide —
-  // Tauri ignores window scoping for denials — so win-b relays through an
-  // ACL-checked command whose Rust side emits for it.
-  await invoke("plugin:pylair|python_selftest_b_report", {
-    report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe, fairnessProbe },
-  }).catch(() => {});
 }

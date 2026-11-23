@@ -25,7 +25,9 @@
 //!
 //! Every response — errors included — carries `Accept-Ranges: bytes`,
 //! `Access-Control-Allow-Origin` echoing the app origin exactly with
-//! `Vary: Origin` (never `*`), `Cache-Control: no-store` and
+//! `Access-Control-Expose-Headers: Accept-Ranges, Content-Range` (the
+//! fetch is always cross-origin, so CORS would hide both from a JS range
+//! client), `Vary: Origin` (never `*`), `Cache-Control: no-store` and
 //! `X-Content-Type-Options: nosniff` (a foreign page's element load could
 //! otherwise pull a text/JSON blob in via script/link; nosniff makes the
 //! engine refuse to execute it).
@@ -712,6 +714,14 @@ fn respond(
         .header(http::header::CONTENT_LENGTH, body.len().to_string())
         .header(http::header::ACCEPT_RANGES, "bytes")
         .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, acao)
+        // The fetch is always cross-origin (the app's origin is never the
+        // blob origin), so CORS hides every non-safelisted header from
+        // Response.headers — a JS range client could not read the
+        // Content-Range the reply carries. Expose the two it needs.
+        .header(
+            http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "Accept-Ranges, Content-Range",
+        )
         .header(http::header::VARY, "Origin")
         .header(http::header::CACHE_CONTROL, "no-store")
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff");
