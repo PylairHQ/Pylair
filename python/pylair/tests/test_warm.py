@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -58,17 +59,65 @@ def _wait_pidfile(path, timeout: float = 15.0) -> int:
     return int(path.read_text().strip())
 
 
-def _diagnose(runtime, pid: int | None = None) -> str:
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _children(pid: int) -> list[int]:
+    """Direct children of a worker pid — on POSIX the parent-death
+    reaper is the one expected child; pgrep covers Linux + macOS, and
+    Windows spawns no reaper."""
+    if sys.platform == "win32":
+        return []
+    out = subprocess.run(
+        ["pgrep", "-P", str(pid)], check=False, capture_output=True, text=True
+    ).stdout
+    return [int(x) for x in out.split()]
+
+
+def _pid_state(pid: int) -> str:
+    """A ps state letter (R/S/Z/…) or 'gone' — diagnostic only."""
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return out or "gone"
+
+
+def _watch_deaths(pids: list, stop: threading.Event, out: list) -> None:
+    """Append (role, pid) to `out` in the order each watched pid goes
+    away — run beside a SIGINT hammer so a dead-worker failure names
+    who died first instead of only reporting the channel EOF."""
+    pending = list(pids)
+    while pending and not stop.is_set():
+        for role, pid in pending[:]:
+            if not _pid_alive(pid):
+                out.append((role, pid))
+                pending.remove((role, pid))
+        time.sleep(0.0005)
+
+
+def _diagnose(runtime, pid: int | None = None, deaths: list | None = None) -> str:
     """Failure context for a silent/hung warm call: whether the serving
-    member is still alive plus the runtime's stderr tail — member stderr
-    is forwarded there live, so a worker exception shows up."""
+    member is still alive, the state of its children (the POSIX reaper),
+    a death-order list when a watcher ran, plus the runtime's stderr
+    tail — member stderr is forwarded there live, so a worker exception
+    shows up, and the parent's EOF line carries the worker's rc."""
     parts = []
     if pid is not None:
-        try:
-            os.kill(pid, 0)
-            parts.append(f"member pid {pid} is alive")
-        except OSError as e:
-            parts.append(f"member pid {pid} is gone ({e})")
+        state = "alive" if _pid_alive(pid) else "gone"
+        parts.append(f"member pid {pid} is {state}")
+        kids = [(p, _pid_state(p)) for p in _children(pid)]
+        parts.append(f"member children (reaper): {kids or 'none'}")
+    if deaths is not None:
+        order = ", ".join(f"{role} {p}" for role, p in deaths) or "<none yet>"
+        parts.append(f"death order (first listed died first): {order}")
     tail = list(runtime.stderr_lines)[-30:]
     parts.append("runtime stderr tail:\n" + ("\n".join(tail) or "<empty>"))
     return "\n".join(parts)
@@ -692,6 +741,17 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
     # The marker lands at fn entry — the hammer starts while the fn
     # builds its result and keeps firing through flag-clear/write/idle.
     pid = _wait_pidfile(m1)
+    # Death-order witness (POSIX): records worker/reaper in the order
+    # they die so a _WarmWorkerDead names its mechanism on failure.
+    deaths: list = []
+    wstop = threading.Event()
+    watcher = None
+    if sys.platform != "win32":
+        group = [("worker", pid), *[("reaper", p) for p in _children(pid)]]
+        watcher = threading.Thread(
+            target=_watch_deaths, args=(group, wstop, deaths), daemon=True
+        )
+        watcher.start()
     stop = threading.Event()
 
     def hammer():
@@ -714,14 +774,19 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
         resp = runtime.recv(timeout=30)
     except queue.Empty:
         raise AssertionError(
-            f"no response under the SIGINT hammer\n{_diagnose(runtime, pid)}"
+            f"no response under the SIGINT hammer\n{_diagnose(runtime, pid, deaths)}"
         )
     stop.set()
     t.join(timeout=5)
+    wstop.set()
+    if watcher is not None:
+        watcher.join(timeout=2)
     if "error" in resp:
         # A signal slipped inside the raise window — the interrupted
         # payload, mapped for a call with no cancel in flight.
-        assert resp["error"]["message"] == "worker call interrupted"
+        assert resp["error"]["message"] == "worker call interrupted", _diagnose(
+            runtime, pid, deaths
+        )
     else:
         # Every signal landed post-window: recorded and ignored, and the
         # frame that was already writing completed intact.
@@ -737,6 +802,39 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
     )
     assert runtime.recv()["result"]["pid"] == pid, (
         "interrupt at completion broke the member"
+    )
+
+
+def test_warm_interrupt_burst_at_idle_survives(runtime):
+    """Back-to-back SIGINTs while the member sits in `read_frame`: the
+    handler's "outside the raise window" diagnostic used to print() to
+    buffered stderr — a second signal mid-write re-entered the writer
+    and raised RuntimeError inside the serve loop's channel reads,
+    killing the member (the CI flake this suite guards). Signals arrive
+    here faster than one diagnostic write completes, so the collision
+    — not just its rate — is what the burst pins. POSIX only."""
+    if sys.platform == "win32":
+        pytest.skip("process-group SIGINT is POSIX-only")
+    runtime.recv()
+    runtime.send(call(1, "warm_pid", task=1))
+    pid = runtime.recv()["result"]
+    deaths: list = []
+    wstop = threading.Event()
+    group = [("worker", pid), *[("reaper", p) for p in _children(pid)]]
+    watcher = threading.Thread(
+        target=_watch_deaths, args=(group, wstop, deaths), daemon=True
+    )
+    watcher.start()
+    for _ in range(400):
+        try:
+            os.killpg(pid, signal.SIGINT)
+        except (ProcessLookupError, OSError):
+            break
+    wstop.set()
+    watcher.join(timeout=2)
+    runtime.send(call(2, "warm_pid", task=2))
+    assert runtime.recv()["result"] == pid, (
+        f"idle interrupt burst broke the member\n{_diagnose(runtime, pid, deaths)}"
     )
 
 
