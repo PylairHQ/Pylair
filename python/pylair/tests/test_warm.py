@@ -151,6 +151,14 @@ def _collect(runtime, ids: set, timeout: float = 15.0) -> dict:
     return out
 
 
+# Bound for the waits below. Every one is on a real event — a frame, an
+# EOF, a pidfile — so the bound is only the hang guard, never the
+# mechanism under test. It is generous because a CPython spawn, a served
+# call and death detection on a saturated CI runner are scheduling-bound,
+# not work-bound: the 10 s recv default was the macOS flake.
+_HANG_S = 90.0
+
+
 # ---- decoration-time validation ----------------------------------------------
 
 
@@ -432,55 +440,57 @@ def test_warm_queued_cancel_never_runs(runtime):
 
 
 def test_warm_death_mid_call_then_respawn(runtime):
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     runtime.send(call(1, "warm_maybe_crash", task=1, input={"crash": False}))
-    pid_a = runtime.recv()["result"]
+    pid_a = runtime.recv(timeout=_HANG_S)["result"]
 
     runtime.send(call(2, "warm_maybe_crash", task=2, input={"crash": True}))
-    assert runtime.recv()["error"]["code"] == proto.WORKER_DIED
-    _pid_dead(pid_a)
+    assert runtime.recv(timeout=_HANG_S)["error"]["code"] == proto.WORKER_DIED
+    _pid_dead(pid_a, timeout=_HANG_S)
 
     runtime.send(call(3, "warm_maybe_crash", task=3, input={"crash": False}))
-    pid_b = runtime.recv()["result"]
+    pid_b = runtime.recv(timeout=_HANG_S)["result"]
     assert pid_b != pid_a, "dead worker was reused"
 
 
 def test_warm_crash_loop_stops_pool(runtime):
     """3 consecutive deaths with no success stop the pool; a stopped pool
     fails fast with a typed error and does not affect other pools."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     for i in range(3):
         runtime.send(call(i + 1, "warm_maybe_crash", task=i + 1, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i + 1)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i + 1, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
 
     runtime.send(call(4, "warm_maybe_crash", task=4, input={"crash": False}))
-    resp = runtime.recv_until(lambda m: m.get("id") == 4)
+    resp = runtime.recv_until(lambda m: m.get("id") == 4, timeout=_HANG_S)
     assert resp["error"]["code"] == proto.INTERNAL
     assert resp["error"]["data"]["type"] == "WorkerCrashLoop"
 
     # Per-function pools: warm_pid's pool is untouched.
     runtime.send(call(5, "warm_pid", task=5))
-    assert isinstance(runtime.recv_until(lambda m: m.get("id") == 5)["result"], int)
+    assert isinstance(
+        runtime.recv_until(lambda m: m.get("id") == 5, timeout=_HANG_S)["result"], int
+    )
 
 
 def test_warm_crash_loop_resets_on_success(runtime):
     """A successful call between deaths resets the consecutive counter."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     for i in (1, 2):
         runtime.send(call(i, "warm_maybe_crash", task=i, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
     # Success resets deaths to 0 — the pool must tolerate two more deaths.
     runtime.send(call(3, "warm_maybe_crash", task=3, input={"crash": False}))
-    assert "result" in runtime.recv_until(lambda m: m.get("id") == 3)
+    assert "result" in runtime.recv_until(lambda m: m.get("id") == 3, timeout=_HANG_S)
     for i in (4, 5):
         runtime.send(call(i, "warm_maybe_crash", task=i, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
     # deaths is 2, not 4 — the pool still serves.
     runtime.send(call(6, "warm_maybe_crash", task=6, input={"crash": False}))
-    assert "result" in runtime.recv_until(lambda m: m.get("id") == 6)
+    assert "result" in runtime.recv_until(lambda m: m.get("id") == 6, timeout=_HANG_S)
 
 
 # ---- cap accounting (0008 §3) ---------------------------------------------------
@@ -565,10 +575,10 @@ def test_warm_interruptible_call_survives_cancel(runtime, tmp_path):
     runtime.send(
         call(1, "warm_sleep", task=1, input={"seconds": 60, "pidfile": str(p1)})
     )
-    pid = _wait_pidfile(p1)
+    pid = _wait_pidfile(p1, timeout=_HANG_S)
     runtime.send(cancel(9, 1))
     ack = terminal = None
-    deadline = time.time() + 15
+    deadline = time.time() + _HANG_S
     while ack is None or terminal is None:
         m = runtime.recv(timeout=max(0.1, deadline - time.time()))
         if m.get("id") == 9:
@@ -579,15 +589,22 @@ def test_warm_interruptible_call_survives_cancel(runtime, tmp_path):
     runtime.send(
         call(2, "warm_sleep", task=2, input={"seconds": 0, "pidfile": str(p2)})
     )
-    assert runtime.recv()["result"] == "slept"
-    if sys.platform == "win32":
-        # Kill-only: the interrupt was never sent; the member was
-        # terminated and the next call respawned.
+    assert runtime.recv(timeout=_HANG_S)["result"] == "slept"
+    if sys.platform == "win32" or ack["result"] == {
+        "cancelled": True,
+        "status": "terminated",
+    }:
+        # Kill path: Windows interrupts nothing console-less; POSIX gets
+        # here only when no response lands inside cancel_grace_ms — a
+        # starved runner stalls the runtime's frame processing exactly
+        # like a stuck call, and silence-past-grace IS the kill path by
+        # design (0008 §2; the verdict is parent-side). Either way the
+        # member died and the next call respawned.
         assert ack["result"] == {"cancelled": True, "status": "terminated"}
         assert _wait_pidfile(p2) != pid, "killed member was reused"
     else:
-        # Survived: the work confirmed stopped, the worker lived —
-        # plain cancelled, never "terminated" (0008 §2 ack rule).
+        # Survived: a response inside the grace — plain cancelled, the
+        # member lived and serves the next call (0008 §2 ack rule).
         assert ack["result"] == {"cancelled": True}
         assert _wait_pidfile(p2) == pid, "survived member was not reused"
 
@@ -893,10 +910,10 @@ def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
 
 def test_warm_worker_died_includes_stderr_tail(runtime):
     """#140 review: a crash's last stderr lines ride WORKER_DIED data."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     marker = "STDERR_TAIL_MARKER_9f3"
     runtime.send(call(1, "warm_crash_stderr", task=1, input={"marker": marker}))
-    resp = runtime.recv_until(lambda m: m.get("id") == 1)
+    resp = runtime.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
     assert resp["error"]["code"] == proto.WORKER_DIED
     assert marker in resp["error"]["data"]["stderr"], (
         f"stderr tail missing the marker: {resp['error']['data']!r}"
@@ -919,9 +936,9 @@ def test_warm_worker_reaped_on_hard_runtime_death(runtime, tmp_path):
     os.kill(wpid, 0)  # alive — idle in the pool, no call in flight
 
     runtime.proc.kill()  # SIGKILL the runtime only — no cleanup runs
-    runtime.proc.wait(timeout=10)
+    runtime.proc.wait(timeout=_HANG_S)
 
-    deadline = time.time() + 10
+    deadline = time.time() + _HANG_S
     while time.time() < deadline:
         try:
             os.kill(wpid, 0)

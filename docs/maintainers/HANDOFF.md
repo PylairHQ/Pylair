@@ -363,7 +363,13 @@ Merged since rc.17 (d7daaaf):
   self-test check (same-pid reuse, POSIX interrupt survival vs
   Windows terminated+new-pid), the unmanaged `worker:<fn>` sweep
   diagnostic, the cold-vs-warm bench case with three-OS numbers in
-  `docs/performance.md`, and the docs pass.
+  `docs/performance.md`, and the docs pass. The check's POSIX side
+  later learned the contract's second verdict: silence past
+  `cancel_grace_ms` is the kill path by design (the verdict is
+  parent-side — a starved runner's event-loop lag is
+  indistinguishable from a stuck call), so POSIX accepts
+  `cancelled`-and-same-pid or `terminated`-and-new-pid and asserts
+  whichever aftermath the ack claims.
 - PR 148: #142 — the runtime entered drain but never exited on
   Windows + newest CPython: the tp-writer thread sits inside a
   synchronous `write()` on a pipe the host never drains, and

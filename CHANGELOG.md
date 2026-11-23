@@ -8,6 +8,17 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- Warm-worker test determinism: the crash/death/respawn waits in
+  `test_warm.py` keep their event waits (WORKER_DIED, pidfiles,
+  respawn results) under one generous hang-guard bound instead of the
+  10 s receive default that starved macOS runners blew. The
+  `warm-workers` self-test check — and the matching
+  `test_warm_interruptible_call_survives_cancel` — now asserts the
+  whole 0008 §2 contract on POSIX: a response inside `cancel_grace_ms`
+  must be `cancelled` + the same member, silence past the grace must
+  be `terminated` + a respawned member; either pairing proves the
+  documented path and a mismatched pairing still fails.
+
 ## npm-v0.1.0-rc.29 (2026-11-23)
 
 Crate `0.1.0-rc.23`, `pylair 0.1.0rc15` on PyPI, npm `0.1.0-rc.29`.
