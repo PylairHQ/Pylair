@@ -6,6 +6,24 @@ the npm trio (`@pylair/client`, `@pylair/cli`, `create-pylair`) each carry
 their own number. Entries below are keyed by the npm release tag, which is
 what the GitHub releases page publishes.
 
+## Unreleased
+
+- **Blob URLs, host side (crate only).** The `pylair-blob` URI scheme is
+  registered and a per-generation blob directory (`<app cache>/pylair-blobs/gen-N`)
+  is exported to the backend as `PYLAIR_BLOB_DIR`, implementing the host
+  half of `docs/decisions/0010-blob-urls.md`: `blob.register`/`blob.release`
+  notifications bind blobs to their task's owning window (the owner comes
+  from `TaskMeta.owner`, never from the payload), files are served to the
+  owning webview only, with an origin gate, owner-label check, hand-rolled
+  Range/206, `PYLAIR_BLOB_MAX_FULL_BODY` (64 MiB) and
+  `PYLAIR_BLOB_MAX_RANGE_BYTES` (8 MiB) response caps, registered
+  size+mtime verification (`410` on in-place source rewrites), exact-origin
+  ACAO + `Vary: Origin` + `nosniff` on every response, the
+  512 MiB/2 GiB/256-handle limits, and window-close + generation-end +
+  startup-sweep cleanup. A new `python_release_blob` command backs client
+  `release()`. The Python `Blob` API, the `$blob` wire tag and the client
+  handle land in the follow-up PRs — nothing emits blobs yet.
+
 ## npm-v0.1.0-rc.27 (2026-11-22)
 
 Crate `0.1.0-rc.21`, `pylair 0.1.0rc13` on PyPI, npm `0.1.0-rc.27`.

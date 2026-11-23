@@ -182,6 +182,13 @@ foreign-origin fetch therefore fails twice: the handler 403s it, and
 even a hypothetical pass would fail the CORS check since the page's
 origin isn't in the response.
 
+Every response — errors included — also carries `Accept-Ranges: bytes`,
+`Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. The
+last matters for the no-`Origin` path: element loads carry no `Origin`,
+so a foreign page sitting in the owner window could pull a text or JSON
+blob in through a `<script>` or `<link>` tag and read it; `nosniff`
+makes the engine refuse the MIME-mismatched load.
+
 **Proven on all three engines** (run 45121029887): after both windows
 finish, the spike navigates `main` to a page served from
 `http://127.0.0.1:<port>` — the label stays `main`, the origin becomes

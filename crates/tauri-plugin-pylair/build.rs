@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "python_call",
     "python_call_stream",
     "python_grant_credit",
+    "python_release_blob",
     "python_cancel",
     "python_retry",
     "python_state",
