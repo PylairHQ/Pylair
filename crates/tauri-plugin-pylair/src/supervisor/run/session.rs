@@ -24,7 +24,38 @@ use super::{
     classify_pong, drain_exited_inbox, fail_all, kill_and_reap, ChildIo, ChildReadErr, ExitCause,
     PendingKind, PongVerdict, Supervisor, TaskMeta,
 };
+use crate::blobs::Reject;
 use crate::protocol::{self as proto, ErrorObj, InMsg};
+
+/// `$blob` tag ids nested anywhere inside a delivered frame value.
+/// Depth-capped far past the wire's own MAX_DEPTH — tags deeper than
+/// that never shipped, so their ids stay pending and are released as
+/// orphans rather than trusted to a page that cannot see them.
+fn blob_ids_in(v: &Value, depth: usize, out: &mut Vec<String>) {
+    if depth == 0 {
+        return;
+    }
+    match v {
+        Value::Object(map) => {
+            if let Some(id) = map
+                .get("$blob")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+            {
+                out.push(id.to_string());
+            }
+            for x in map.values() {
+                blob_ids_in(x, depth - 1, out);
+            }
+        }
+        Value::Array(xs) => {
+            for x in xs {
+                blob_ids_in(x, depth - 1, out);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// The steady-state bookkeeping of one runtime generation (everything
 /// `run_child` used to keep in locals), plus the supervisor and child IO it
@@ -52,6 +83,20 @@ pub(super) struct Session<'a> {
     /// the dir could not be resolved — blobs are then disabled for the
     /// generation (decision 0010 §3: env absence is the capability bit).
     pub(super) blob_dir: Option<(PathBuf, PathBuf)>,
+    /// `blob.register` rejections keyed by task id. A register lands on
+    /// the FIFO ahead of the frame carrying its `$blob` tag, so the tag
+    /// would arrive unresolvable — the task's own terminal (or the next
+    /// `stream.chunk`) delivers the rejection as a typed error instead
+    /// (decision 0010 §6: caps are LIMIT_EXCEEDED + data.limit, anything
+    /// else INTERNAL).
+    pub(super) blob_rejects: HashMap<u64, Reject>,
+    /// Ids a `blob.register` succeeded for, whose `$blob` tag the page
+    /// has not yet received, keyed by task. One frame can carry several
+    /// tags — when the frame is replaced by an error (or never reaches
+    /// a consumer), the page never learns the earlier ids; they are
+    /// released there rather than holding slots and disk until the
+    /// window closes — which is exactly when limits are near.
+    pub(super) blob_pending: HashMap<u64, Vec<String>>,
 }
 
 impl<'a> Session<'a> {
@@ -74,6 +119,141 @@ impl<'a> Session<'a> {
             pongs_received: 0,
             ping_seq: 0,
             blob_dir,
+            blob_rejects: HashMap::new(),
+            blob_pending: HashMap::new(),
+        }
+    }
+
+    /// A rejected `blob.register` becomes the task's own error
+    /// (decision 0010 §6): a registry cap is `LIMIT_EXCEEDED` with the
+    /// doc's `data.limit` name and a message naming the env knob;
+    /// anything malformed is `INTERNAL`. The alternative — shipping the
+    /// response with its `$blob` tag intact — fetches as a 404 with no
+    /// hint that `release()` would have freed the slot.
+    fn blob_reject_err(&self, rej: Reject) -> ErrorObj {
+        let limits = &crate::blobs::lock_blobs(&self.sup.blobs).limits;
+        match rej {
+            Reject::Limit(name) => {
+                let (knob, max) = match name {
+                    "blob_bytes" => ("PYLAIR_MAX_BLOB_BYTES", Some(limits.max_blob_bytes)),
+                    "blob_total" => ("PYLAIR_MAX_BLOB_TOTAL", Some(limits.max_blob_total)),
+                    "blob_handles" => (
+                        "PYLAIR_MAX_BLOBS_PER_WINDOW",
+                        Some(limits.max_blobs_per_window as u64),
+                    ),
+                    _ => ("per-window share of PYLAIR_MAX_BLOB_TOTAL", None),
+                };
+                let hint = if name == "blob_bytes" {
+                    "the blob itself is over the cap — releasing other handles cannot help"
+                } else {
+                    "call release() on BlobHandles the page is done with"
+                };
+                ErrorObj {
+                    code: proto::LIMIT_EXCEEDED,
+                    message: format!("blob.register refused on the {name} cap ({knob}) — {hint}"),
+                    data: Some(match max {
+                        Some(max) => serde_json::json!({"limit": name, "max": max}),
+                        None => serde_json::json!({"limit": name}),
+                    }),
+                }
+            }
+            Reject::Bad(why) => ErrorObj {
+                code: proto::INTERNAL,
+                message: format!("blob.register rejected: {why}"),
+                data: None,
+            },
+            Reject::Foreign => ErrorObj {
+                code: proto::INTERNAL,
+                message: "blob.register rejected: handle owned by another window".into(),
+                data: None,
+            },
+        }
+    }
+
+    /// Release every registered-but-undelivered blob id a task holds —
+    /// the frame that would have carried their tags was replaced or
+    /// never reached a consumer, so the page can never name them. The
+    /// registry release unlinks the file and frees the handle slot and
+    /// generation bytes.
+    fn release_pending_blobs(&mut self, task: u64) {
+        let Some(ids) = self.blob_pending.remove(&task) else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let mut reg = crate::blobs::lock_blobs(&self.sup.blobs);
+        for id in &ids {
+            reg.release(id);
+        }
+        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+            "task {task}: released {} orphaned blob handle(s)",
+            ids.len()
+        )));
+    }
+
+    /// A frame reached the page: its `$blob` ids are page-owned now.
+    /// Anything else registered since the last forwarded frame is an
+    /// orphan — released before it can hold a slot.
+    fn settle_shipped_blobs(&mut self, task: u64, shipped: &[String]) {
+        let Some(ids) = self.blob_pending.remove(&task) else {
+            return;
+        };
+        let orphans: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !shipped.iter().any(|s| s == id))
+            .collect();
+        if orphans.is_empty() {
+            return;
+        }
+        let mut reg = crate::blobs::lock_blobs(&self.sup.blobs);
+        for id in &orphans {
+            reg.release(id);
+        }
+        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+            "task {task}: released {} orphaned blob handle(s)",
+            orphans.len()
+        )));
+    }
+
+    /// Scan the value being delivered for `$blob` ids, then settle.
+    fn settle_forwarded_blobs(&mut self, task: u64, v: &Value) {
+        if !self.blob_pending.contains_key(&task) {
+            return;
+        }
+        let mut shipped = Vec::new();
+        blob_ids_in(v, 64, &mut shipped);
+        self.settle_shipped_blobs(task, &shipped);
+    }
+
+    /// Tombstone a task the host ended early — the same treatment a
+    /// client cancel gives it: drop the accounting, then send the
+    /// runtime a `cancel` request so the producer stops instead of
+    /// running on unobserved.
+    fn finish_task(&mut self, call_id: u64, task: u64) {
+        self.task_of_call.remove(&call_id);
+        if let Some(meta) = self.tasks.remove(&task) {
+            self.sup.fair.lock().unwrap().note_finished(
+                &meta.owner,
+                meta.is_stream,
+                meta.is_isolated,
+            );
+        }
+        self.blob_rejects.remove(&task);
+        self.release_pending_blobs(task);
+        if self.done_tasks.len() >= 1024 {
+            self.done_tasks.clear();
+        }
+        self.done_tasks.insert(task);
+        let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
+        let (ack, _) = oneshot::channel();
+        if send_ctrl(
+            &self.io,
+            &proto::request(cid, "cancel", serde_json::json!({"task": task})),
+            self.sup.config.max_frame,
+        ) {
+            self.pending
+                .insert(cid, PendingKind::Cancel { respond: ack });
         }
     }
 }
@@ -248,11 +428,32 @@ impl Session<'_> {
     ) -> ControlFlow<ExitCause> {
         match msg {
             Some(Ok(InMsg::Response { id, result, error })) => {
-                let out = match (result, error) {
+                let task = self.task_of_call.get(&id).copied();
+                let mut out = match (result, error) {
                     (_, Some(e)) => Err(e),
                     (r, None) => Ok(r.unwrap_or(Value::Null)),
                 };
+                // A blob.register rejection arrived ahead of this
+                // terminal on the FIFO — the result's $blob tag would
+                // 404. Deliver the rejection as the call's error
+                // instead (decision 0010 §6).
+                if let Some(t) = task {
+                    if let Some(rej) = self.blob_rejects.remove(&t) {
+                        out = Err(self.blob_reject_err(rej));
+                    }
+                }
+                let mut delivered = false;
                 if let Some(kind) = self.pending.remove(&id) {
+                    delivered = true;
+                    // Settle pending blob ids while `out` is still
+                    // readable: Ok ships its tags to the page; any
+                    // error ships none — those handles are orphans.
+                    if let Some(t) = task {
+                        match &out {
+                            Ok(v) => self.settle_forwarded_blobs(t, v),
+                            Err(_) => self.release_pending_blobs(t),
+                        }
+                    }
                     match kind {
                         PendingKind::Call(tx) => {
                             let _ = tx.send(out);
@@ -263,6 +464,14 @@ impl Session<'_> {
                         }
                     }
                 }
+                // A terminal nobody receives — the call was already
+                // finished by a cancel, or the id was never a call.
+                // Its registered blobs are orphans regardless.
+                if !delivered {
+                    if let Some(t) = task {
+                        self.release_pending_blobs(t);
+                    }
+                }
                 if let Some(task) = self.task_of_call.remove(&id) {
                     if let Some(meta) = self.tasks.remove(&task) {
                         self.sup.fair.lock().unwrap().note_finished(
@@ -271,6 +480,8 @@ impl Session<'_> {
                             meta.is_isolated,
                         );
                     }
+                    self.blob_rejects.remove(&task);
+                    self.release_pending_blobs(task);
                     if self.done_tasks.len() >= 1024 {
                         self.done_tasks.clear();
                     }
@@ -354,7 +565,41 @@ impl Session<'_> {
                                 "protocol violation: task {task} sent an uncredited stream.chunk"
                             )));
                         }
+                        // A blob.register rejection for this task
+                        // already landed — the chunk's $blob would be
+                        // unresolvable. End the stream with the reason
+                        // and cancel the producer the way a client
+                        // cancel would.
+                        if let Some(rej) = self.blob_rejects.remove(&task) {
+                            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                                "task {task}: blob.register rejected — ending the stream"
+                            )));
+                            // Ids that DID register since the last
+                            // forwarded chunk never reach the page —
+                            // release them before the error goes out.
+                            self.release_pending_blobs(task);
+                            if let Some(call_id) = self.tasks.get(&task).map(|m| m.call_id) {
+                                if let Some(PendingKind::Stream(sink)) =
+                                    self.pending.remove(&call_id)
+                                {
+                                    sink.finish(Err(self.blob_reject_err(rej)));
+                                }
+                                self.finish_task(call_id, task);
+                            }
+                            return ControlFlow::Continue(());
+                        }
+                        // The ids this chunk ships — needed only when a
+                        // pending registration exists; scanned before
+                        // `value` moves into the sink.
+                        let shipped = if self.blob_pending.contains_key(&task) {
+                            let mut ids = Vec::new();
+                            blob_ids_in(&value, 64, &mut ids);
+                            ids
+                        } else {
+                            Vec::new()
+                        };
                         let mut abandoned = None;
+                        let mut delivered_chunk = false;
                         if let Some(meta) = self.tasks.get_mut(&task) {
                             // Each delivered chunk consumed one
                             // credit (RC.8A accounting).
@@ -363,8 +608,16 @@ impl Session<'_> {
                             {
                                 if let Err(why) = sink.chunk(seq, value) {
                                     abandoned = Some((meta.call_id, why));
+                                } else {
+                                    delivered_chunk = true;
                                 }
                             }
+                        }
+                        if delivered_chunk {
+                            // The tags it carries are page-owned now;
+                            // any id still pending is an orphan —
+                            // released inside the settle.
+                            self.settle_shipped_blobs(task, &shipped);
                         }
                         if let Some((call_id, why)) = abandoned {
                             // The consumer stalled or vanished, or a
@@ -412,32 +665,11 @@ impl Session<'_> {
                             if let Some(PendingKind::Stream(sink)) = self.pending.remove(&call_id) {
                                 sink.finish(Err(err));
                             }
-                            self.task_of_call.remove(&call_id);
-                            if let Some(meta) = self.tasks.remove(&task) {
-                                self.sup.fair.lock().unwrap().note_finished(
-                                    &meta.owner,
-                                    meta.is_stream,
-                                    meta.is_isolated,
-                                );
-                            }
                             // The stream is over (its terminal was just
                             // delivered): tombstone it like a finished task,
                             // so a later cancel says `completed` and a credit
                             // grant says "already finished", not `not_found`.
-                            if self.done_tasks.len() >= 1024 {
-                                self.done_tasks.clear();
-                            }
-                            self.done_tasks.insert(task);
-                            let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                            let (ack, _) = oneshot::channel();
-                            if send_ctrl(
-                                &self.io,
-                                &proto::request(cid, "cancel", serde_json::json!({"task": task})),
-                                self.sup.config.max_frame,
-                            ) {
-                                self.pending
-                                    .insert(cid, PendingKind::Cancel { respond: ack });
-                            }
+                            self.finish_task(call_id, task);
                         }
                     }
                     "app.component" => {
@@ -484,14 +716,36 @@ impl Session<'_> {
                             .and_then(|m| m.owner.clone());
                         match owner {
                             Some(owner) => {
-                                if let Err(why) =
-                                    crate::blobs::lock_blobs(&self.sup.blobs).register(&p, &owner)
+                                match crate::blobs::lock_blobs(&self.sup.blobs).register(&p, &owner)
                                 {
-                                    let _ =
-                                        self.sup.events.try_send(RuntimeEvent::Stderr(format!(
-                                            "pylair: blob.register {} rejected: {why:?}",
-                                            p["id"].as_str().unwrap_or("?")
-                                        )));
+                                    Ok(()) => {
+                                        // Registered but not yet
+                                        // shipped — released if the
+                                        // carrying frame never makes
+                                        // the page.
+                                        if let (Some(t), Some(id)) = (task, p["id"].as_str()) {
+                                            self.blob_pending
+                                                .entry(t)
+                                                .or_default()
+                                                .push(id.to_string());
+                                        }
+                                    }
+                                    Err(why) => {
+                                        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
+                                            format!(
+                                                "pylair: blob.register {} rejected: {why:?}",
+                                                p["id"].as_str().unwrap_or("?")
+                                            ),
+                                        ));
+                                        // The rejection is the task's
+                                        // problem: its carrying frame is
+                                        // next on this FIFO, and that
+                                        // frame's terminal (or next chunk)
+                                        // delivers it as the error.
+                                        if let Some(t) = task {
+                                            self.blob_rejects.insert(t, why);
+                                        }
+                                    }
                                 }
                             }
                             None => {

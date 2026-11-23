@@ -220,6 +220,26 @@ def test_register_precedes_stream_chunk(tmp_path):
         rt.proc.wait(timeout=10)
 
 
+def test_stream_chunk_writes_exactly_one_file(tmp_path):
+    """_pump_stream's cap check must not mint a handle — the dry pass
+    probes with a placeholder tag, so the one Blob chunk writes one
+    file, not two."""
+    rt = Runtime(env={"PYLAIR_BLOB_DIR": str(tmp_path)})
+    try:
+        rt.recv()
+        rt.send(call(1, "stream_blob", task=9))
+        rt.send(grant(9))
+        while True:
+            if rt.recv().get("id") == 1:
+                break
+        files = [p for p in tmp_path.iterdir() if not p.name.startswith(".tmp")]
+        assert len(files) == 1
+        assert files[0].read_bytes() == b"streamed-blob-bytes"
+    finally:
+        rt.kill()
+        rt.proc.wait(timeout=10)
+
+
 def test_worker_isolated_blob_registers_through_parent(tmp_path):
     rt = Runtime(env={"PYLAIR_BLOB_DIR": str(tmp_path)})
     try:

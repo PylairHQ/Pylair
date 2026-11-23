@@ -172,6 +172,17 @@ class Blob:
             regs[self] = h
         return h._tag
 
+    def _to_wire_dry(self) -> dict:
+        """Cap-check tag: byte-identical in length to what `_to_wire`
+        emits, without materializing a file or reading the source. The
+        id is always 22 urlsafe chars and the `$b64` fallback is a
+        pure function of `size`, so placeholders keep the frame's real
+        length exactly.
+        """
+        if _blob_dir() is None:
+            return {_B64_TAG: "A" * ((self.size + 2) // 3 * 4)}
+        return {_BLOB_TAG: {"id": "0" * 22, "mime": self._mime, "size": self.size}}
+
     def _fallback_check(self) -> None:
         """check_wire's leaf visit: with the capability off the fallback
         is `$b64` — prove it fits before any file is read or written.

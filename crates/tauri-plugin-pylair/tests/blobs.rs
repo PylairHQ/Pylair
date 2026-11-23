@@ -257,12 +257,15 @@ fn limits_blob_handles_per_window() {
         .unwrap()
         .register(&json!({"id": "a3", "path": path.to_string_lossy()}), "main");
     assert!(matches!(res, Err(Reject::Limit("blob_handles"))));
-    // A second window's allowance is independent.
+    // A second window's allowance is independent — with its own payload
+    // file, since a3's rejected payload was unlinked.
+    let path2 = dir.join("b1.bin");
+    std::fs::write(&path2, b"1").unwrap();
     assert!(r
         .lock()
         .unwrap()
         .register(
-            &json!({"id": "b1", "path": path.to_string_lossy()}),
+            &json!({"id": "b1", "path": path2.to_string_lossy()}),
             "second"
         )
         .is_ok());
@@ -311,12 +314,30 @@ fn register_rejects_foreign_paths_dup_ids_and_no_dir() {
         "main",
     );
     assert!(matches!(res, Err(Reject::Bad(_))));
-    reg_blob(&r, &dir, "a1", "main", b"1");
-    let dup = r.lock().unwrap().register(
-        &json!({"id": "a1", "path": dir.join("a1.bin").to_string_lossy()}),
+    // A pre-containment rejection never unlinks: the outside file is
+    // not ours to touch.
+    assert!(outside.exists());
+    let live = reg_blob(&r, &dir, "a1", "main", b"1");
+    // Duplicate id naming the LIVE blob's own path — the classic case
+    // where an unlink would kill a serving blob.
+    let dup = r
+        .lock()
+        .unwrap()
+        .register(&json!({"id": "a1", "path": live.to_string_lossy()}), "main");
+    assert!(matches!(dup, Err(Reject::Bad(_))));
+    assert!(live.exists());
+    let res = serve(&r, "main", &req("/b/a1", &[("Origin", APP_ORIGIN)]));
+    assert_eq!(res.status(), StatusCode::OK);
+    // Duplicate id with a fresh payload path — still pre-containment,
+    // so that file stays on disk for the generation-end sweep.
+    let dup_path = dir.join("dup-payload.bin");
+    std::fs::write(&dup_path, b"2").unwrap();
+    let dup2 = r.lock().unwrap().register(
+        &json!({"id": "a1", "path": dup_path.to_string_lossy()}),
         "main",
     );
-    assert!(matches!(dup, Err(Reject::Bad(_))));
+    assert!(matches!(dup2, Err(Reject::Bad(_))));
+    assert!(dup_path.exists());
     // No generation dir (capability off) → every register is Bad.
     let (r2, _) = BlobRegistry::new(small_limits());
     let res = r2.lock().unwrap().register(
@@ -324,6 +345,49 @@ fn register_rejects_foreign_paths_dup_ids_and_no_dir() {
         "main",
     );
     assert!(matches!(res, Err(Reject::Bad(_))));
+}
+
+/// A rejection AFTER the containment check unlinks the payload: Python
+/// materialized it before registering and no registry entry exists to
+/// clean it up, so it would otherwise leak uncounted disk until the
+/// generation ends.
+#[test]
+fn post_containment_rejection_unlinks_the_payload() {
+    let mut limits = small_limits();
+    limits.max_blob_bytes = 4;
+    limits.max_blob_total = 64;
+    limits.max_blobs_per_window = 1;
+    let (r, dir) = fixture(limits);
+    // Over the per-blob cap.
+    let big = dir.join("big.bin");
+    std::fs::write(&big, b"12345").unwrap();
+    let res = r
+        .lock()
+        .unwrap()
+        .register(&json!({"id": "big", "path": big.to_string_lossy()}), "main");
+    assert!(matches!(res, Err(Reject::Limit("blob_bytes"))));
+    assert!(!big.exists());
+    // Invalid mime — also post-containment.
+    let badmime = dir.join("badmime.bin");
+    std::fs::write(&badmime, b"1").unwrap();
+    let res = r.lock().unwrap().register(
+        &json!({"id": "bm", "path": badmime.to_string_lossy(), "mime": "bad\nmime"}),
+        "main",
+    );
+    assert!(matches!(res, Err(Reject::Bad(_))));
+    assert!(!badmime.exists());
+    // A refused payload is not ours only when a live blob aliases the
+    // path — then the unlink is skipped and the live blob still serves.
+    // (`max_blobs_per_window = 1` forces the rejection on `a2`.)
+    let live = reg_blob(&r, &dir, "a1", "main", b"1");
+    let res = r
+        .lock()
+        .unwrap()
+        .register(&json!({"id": "a2", "path": live.to_string_lossy()}), "main");
+    assert!(matches!(res, Err(Reject::Limit("blob_handles"))));
+    assert!(live.exists());
+    let res = serve(&r, "main", &req("/b/a1", &[("Origin", APP_ORIGIN)]));
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[test]

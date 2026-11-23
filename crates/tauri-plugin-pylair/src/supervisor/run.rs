@@ -147,7 +147,12 @@ pub fn spawn(
     let fair = Fairness::new(limits.per_window_fairness);
     // The blob registry (decision 0010) — shared with the scheme handler
     // and window-destroy hook through `Handle`, same as `fair`/`health`.
-    let (blobs, blob_warns) = BlobRegistry::new(BlobLimits::from_env());
+    let (blobs, blob_warns) = BlobRegistry::new(
+        config
+            .blob_limits
+            .clone()
+            .unwrap_or_else(BlobLimits::from_env),
+    );
     for w in blob_warns {
         let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
     }
