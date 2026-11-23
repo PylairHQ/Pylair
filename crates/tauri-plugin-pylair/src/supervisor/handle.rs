@@ -17,6 +17,7 @@ use super::health::{
     LastExitSnapshot, LivenessSnapshot, LoadSnapshot, RestartsSnapshot, SelfResource, SelfSnapshot,
 };
 use super::stream::{stream_pair, StreamRx, StreamSink};
+use crate::blobs::BlobRegistryRef;
 use crate::protocol::{self as proto, ErrorObj};
 use crate::util::fmt_state;
 
@@ -141,6 +142,10 @@ pub struct Handle {
     /// Per-window accounting shared with the actor
     /// (docs/decisions/0005). Counting only - nothing is refused.
     pub(super) fair: FairnessRef,
+    /// Live blob handles shared with the actor and the `pylair-blob`
+    /// scheme handler (docs/decisions/0010): `blob.register` fills it,
+    /// window destroy drops an owner's entries, generation end clears it.
+    pub(super) blobs: BlobRegistryRef,
     /// The `Handle::health` reads of the shared health block
     /// (docs/decisions/0006 §1) plus the three config constants its
     /// schema publishes.
@@ -462,6 +467,29 @@ impl Handle {
             })?;
         let task = task_rx.await.map_err(|_| stopped_err())??;
         Ok((task, items_rx))
+    }
+
+    /// The shared blob registry (decision 0010) — the scheme handler,
+    /// the window-destroy hook and tests reach it through here.
+    #[doc(hidden)]
+    pub fn blobs(&self) -> BlobRegistryRef {
+        self.blobs.clone()
+    }
+
+    /// `python_release_blob` / client `release()`: drop the handle and
+    /// unlink the file. Owner-checked like every command — `caller` is
+    /// the invoking window's label, never a JS parameter. Idempotent: an
+    /// unknown id is Ok(false), a foreign-owned id is PERMISSION_DENIED.
+    pub async fn release_blob(&self, id: &str, caller: &str) -> Result<bool, ErrorObj> {
+        self.blobs
+            .lock()
+            .unwrap()
+            .release_owned(id, caller)
+            .map_err(|_| ErrorObj {
+                code: proto::PERMISSION_DENIED,
+                message: "blob is owned by another window".into(),
+                data: None,
+            })
     }
 
     /// Retry after a Failed state — respawns the runtime fresh.

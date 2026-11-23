@@ -166,6 +166,19 @@ impl<R: Runtime> Builder<R> {
                     .unwrap_or(true)
             });
         }
+        // Binary blobs (docs/decisions/0010): registered blobs are served
+        // to their owning webview only — the handler resolves the
+        // requesting label and the app origins it may claim per request.
+        plugin = plugin.register_asynchronous_uri_scheme_protocol(
+            crate::blobs::SCHEME,
+            |ctx, req, responder| {
+                let app = ctx.app_handle().clone();
+                let label = ctx.webview_label().to_string();
+                std::thread::spawn(move || {
+                    responder.respond(crate::blobs::serve_request(&app, &label, &req));
+                });
+            },
+        );
         plugin
             .setup(move |app, _api| {
                 let wrap_rt = if self.wrap {
@@ -174,6 +187,14 @@ impl<R: Runtime> Builder<R> {
                     None
                 };
                 let mut config = self.config.clone();
+                // Blob root (decision 0010): `<cache>/pylair-blobs/gen-N`
+                // per generation, exported as PYLAIR_BLOB_DIR. Same
+                // resolve/mkdir rule as PYLAIR_APP_DATA_DIR — a failure
+                // leaves the capability off and logs, never crashes.
+                if config.blob_root.is_none() {
+                    config.blob_root =
+                        crate::blobs::BlobRegistry::resolve_root(app.path().app_cache_dir());
+                }
                 let spec = match (&wrap_rt, self.lazy.as_ref()) {
                     (Some(rt), _) => {
                         config.ready_timeout =
@@ -300,12 +321,15 @@ impl<R: Runtime> Builder<R> {
                 {
                     app.state::<Registry>().lock().unwrap().drop_label(label);
                     // Its tasks die with it — nobody left to see the results.
+                    // Its blob handles die too (decision 0010 §6: window
+                    // close frees the window's live blobs).
                     // Window events run on the main thread with no reactor
                     // entered — spawn the send on Tauri's runtime, exactly
                     // like the actor/Exit/on_drop paths below.
                     if let Some(rt) = app.try_state::<PyRuntime>() {
                         let h = rt.0.clone();
                         let owner = label.to_string();
+                        h.blobs().lock().unwrap().drop_owner(&owner);
                         tauri::async_runtime::spawn(async move { h.cancel_owner(owner).await });
                     }
                 }

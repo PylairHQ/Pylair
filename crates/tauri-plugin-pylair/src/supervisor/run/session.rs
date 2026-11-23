@@ -47,10 +47,25 @@ pub(super) struct Session<'a> {
     pub(super) io: ChildIo,
     pub(super) pongs_received: u64,
     pub(super) ping_seq: u64,
+    /// This generation's `PYLAIR_BLOB_DIR` (raw path + canonical root the
+    /// registry enforces registration containment against), or None when
+    /// the dir could not be resolved — blobs are then disabled for the
+    /// generation (decision 0010 §3: env absence is the capability bit).
+    pub(super) blob_dir: Option<(PathBuf, PathBuf)>,
 }
 
 impl<'a> Session<'a> {
-    pub(super) fn new(sup: &'a mut Supervisor, io: ChildIo) -> Self {
+    pub(super) fn new(
+        sup: &'a mut Supervisor,
+        io: ChildIo,
+        blob_dir: Option<(PathBuf, PathBuf)>,
+    ) -> Self {
+        // The new generation's namespace: clears anything left over and
+        // sets the canonical containment root for `blob.register`.
+        sup.blobs
+            .lock()
+            .unwrap()
+            .set_generation(blob_dir.as_ref().map(|(_, c)| c.clone()));
         Session {
             sup,
             done_tasks: HashSet::new(),
@@ -60,6 +75,7 @@ impl<'a> Session<'a> {
             io,
             pongs_received: 0,
             ping_seq: 0,
+            blob_dir,
         }
     }
 }
@@ -92,6 +108,19 @@ impl Drop for Session<'_> {
                 .sup
                 .events
                 .try_send(RuntimeEvent::HealthChanged(payload));
+        }
+        // Blob lifetime ends with the generation (decision 0010 §6): the
+        // registry empties and the dir is deleted wholesale. Every exit
+        // path out of `run_child` lands here, so crash, clean shutdown
+        // and dev restart are covered the same way.
+        self.sup.blobs.lock().unwrap().end_generation();
+        if let Some((dir, _)) = self.blob_dir.take() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                    "pylair: could not remove blob dir {} ({e})",
+                    dir.display()
+                )));
+            }
         }
     }
 }
@@ -442,6 +471,47 @@ impl Session<'_> {
                         if let Some(payload) = ev {
                             let _ = self.sup.events.try_send(RuntimeEvent::AppChanged(payload));
                         }
+                    }
+                    "blob.register" => {
+                        // Owner binding (decision 0010 §2): the task_id in
+                        // the payload only RESOLVES the owner — the label
+                        // itself comes from TaskMeta.owner, never from
+                        // Python or JS input. A register for a task this
+                        // generation doesn't know (or an owner-less one)
+                        // cannot name a window and is dropped. FIFO makes
+                        // this land before the frame carrying the $blob.
+                        let task = p["task_id"].as_u64();
+                        let owner = task
+                            .and_then(|t| self.tasks.get(&t))
+                            .and_then(|m| m.owner.clone());
+                        match owner {
+                            Some(owner) => {
+                                if let Err(why) =
+                                    self.sup.blobs.lock().unwrap().register(&p, &owner)
+                                {
+                                    let _ =
+                                        self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                                            "pylair: blob.register {} rejected: {why:?}",
+                                            p["id"].as_str().unwrap_or("?")
+                                        )));
+                                }
+                            }
+                            None => {
+                                let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
+                                    format!(
+                                        "pylair: blob.register {} for unknown/owner-less task — dropped",
+                                        p["id"].as_str().unwrap_or("?")
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    "blob.release" => {
+                        // Backend-initiated release — drop + unlink. The
+                        // runtime is trusted app code: no owner check here
+                        // (the JS release path checks via release_owned).
+                        let id = p["id"].as_str().unwrap_or_default();
+                        self.sup.blobs.lock().unwrap().release(id);
                     }
                     _ => {} // unknown notifications are ignored (spec §8)
                 }

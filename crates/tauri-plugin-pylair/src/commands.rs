@@ -233,6 +233,23 @@ fn python_selftest_b_report<R: Runtime>(
         })
 }
 
+/// Client `handle.release()` (decision 0010 §4/§6): drop a blob handle
+/// and unlink its file. Owner-checked from `window.label()` like every
+/// command — a second window cannot release (or even probe) another's
+/// blobs: a missing id and a foreign id are both `false`/`denied`… except
+/// a foreign id answers PERMISSION_DENIED, matching `python_cancel`'s
+/// owner-rejected outcome.
+#[tauri::command]
+async fn python_release_blob<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    reg: tauri::State<'_, Registry>,
+    rt: tauri::State<'_, PyRuntime>,
+    id: String,
+) -> Result<bool, ErrorObj> {
+    subscribed(&window, &reg);
+    rt.0.release_blob(&id, window.label()).await
+}
+
 #[tauri::command]
 async fn python_cancel<R: Runtime>(
     window: tauri::WebviewWindow<R>,
@@ -330,6 +347,7 @@ pub(super) fn invoke_handler<R: Runtime>(
         python_call,
         python_call_stream,
         python_grant_credit,
+        python_release_blob,
         python_cancel,
         python_retry,
         python_state,

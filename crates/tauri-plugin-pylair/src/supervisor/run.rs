@@ -27,6 +27,7 @@ use super::platform_unix::PdeathAnchor;
 use super::spawn::spawn_child;
 use super::stream::StreamSink;
 use super::wire::{cancel_outcome, jitter, mtime, Ctrl};
+use crate::blobs::{BlobLimits, BlobRegistry, BlobRegistryRef};
 use crate::protocol::{self as proto, ErrorObj, InMsg};
 
 mod handshake;
@@ -144,6 +145,23 @@ pub fn spawn(
     config.limits = limits.clone();
     let limits = Arc::new(limits);
     let fair = Fairness::new(limits.per_window_fairness);
+    // The blob registry (decision 0010) — shared with the scheme handler
+    // and window-destroy hook through `Handle`, same as `fair`/`health`.
+    let (blobs, blob_warns) = BlobRegistry::new(BlobLimits::from_env());
+    for w in blob_warns {
+        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
+    }
+    // Crash residue from a previous boot: no generation owns the
+    // `gen-*` dirs under the root yet (decision 0010 §6 startup sweep).
+    if let Some(root) = &config.blob_root {
+        let removed = BlobRegistry::sweep(root);
+        if removed > 0 {
+            let _ = events.try_send(RuntimeEvent::Stderr(format!(
+                "pylair: swept {removed} stale blob generation dir(s) under {}",
+                root.display()
+            )));
+        }
+    }
     // The health block (decisions 0006 §1) — shared with Handle like
     // the fairness map; written only at bookkeeping points, never on
     // a hot path.
@@ -175,6 +193,7 @@ pub fn spawn(
         ready_since: None,
         shutdown_acks: Vec::new(),
         shutdown_outcome: None,
+        blobs: blobs.clone(),
         #[cfg(target_os = "linux")]
         pdeath_anchor: None,
     }
@@ -195,6 +214,7 @@ pub fn spawn(
             limits,
             fair,
             health,
+            blobs,
         },
         actor,
     )
@@ -233,6 +253,10 @@ struct Supervisor {
     shutdown_acks: Vec<oneshot::Sender<ShutdownOutcome>>,
     /// What the most recent shutdown actually achieved (RC.6C).
     shutdown_outcome: Option<ShutdownOutcome>,
+    /// Live blob handles (decision 0010): `blob.register` resolves the
+    /// owner through `Session.tasks`, `Session::drop` wipes the
+    /// generation's entries and dir.
+    blobs: BlobRegistryRef,
     /// Linux only: the one long-lived pdeathsig anchor thread every spawn
     /// in this supervisor's lifetime goes through (created lazily).
     /// Dropping it at actor exit closes the job channel; the thread then
@@ -368,19 +392,45 @@ impl Supervisor {
                 State::Starting,
                 format!("spawning (gen {})", self.generation),
             );
+            // Per-generation blob dir (decision 0010): the spec's env is
+            // host-authoritative — strip any PYLAIR_BLOB_DIR the spec
+            // carried (the capability bit is the host's to give), then
+            // export this generation's own dir when the root resolved.
+            let mut spec = self.spec.clone();
+            spec.env.retain(|(k, _)| k != crate::blobs::BLOB_DIR_ENV);
+            let blob_dir =
+                BlobRegistry::generation_dir(self.config.blob_root.as_deref(), self.generation);
+            match &blob_dir {
+                Some((dir, _)) => {
+                    spec.env.push((
+                        crate::blobs::BLOB_DIR_ENV.into(),
+                        dir.to_string_lossy().into_owned(),
+                    ));
+                }
+                None => {
+                    if self.config.blob_root.is_some() {
+                        let _ = self.events.try_send(RuntimeEvent::Stderr(format!(
+                            "pylair: could not create blob dir for gen {} — PYLAIR_BLOB_DIR unset",
+                            self.generation
+                        )));
+                    }
+                }
+            }
             #[cfg(target_os = "linux")]
-            let spawned = spawn_child(
-                &self.spec,
-                &self.config,
-                &self.events,
-                &mut self.pdeath_anchor,
-            )
-            .await;
+            let spawned =
+                spawn_child(&spec, &self.config, &self.events, &mut self.pdeath_anchor).await;
             #[cfg(not(target_os = "linux"))]
-            let spawned = spawn_child(&self.spec, &self.config, &self.events).await;
+            let spawned = spawn_child(&spec, &self.config, &self.events).await;
             let cause = match spawned {
-                Ok(io) => self.run_child(io).await,
-                Err(e) => ExitCause::Crashed(format!("spawn failed: {e}")),
+                Ok(io) => self.run_child(io, blob_dir).await,
+                Err(e) => {
+                    // The dir was created for a generation that never ran —
+                    // don't leave it for the sweep to find later.
+                    if let Some((dir, _)) = &blob_dir {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    ExitCause::Crashed(format!("spawn failed: {e}"))
+                }
             };
             // The generation is over, so its url is stale: a restart is a
             // new process on a new port (protocol-v1 section 4.1).
@@ -518,7 +568,10 @@ impl Supervisor {
     }
 
     /// One runtime lifecycle: handshake, then serve until exit/kill.
-    async fn run_child(&mut self, io: ChildIo) -> ExitCause {
+    /// `blob_dir` is this generation's `PYLAIR_BLOB_DIR` (raw path and its
+    /// canonical form for registration containment) — the Session owns
+    /// its lifecycle and deletes it at teardown.
+    async fn run_child(&mut self, io: ChildIo, blob_dir: Option<(PathBuf, PathBuf)>) -> ExitCause {
         // Phases. Each phase starts at a marker comment; the code lives in:
         //
         // 1. Spawn and hello (`handshake.rs`, "---- handshake: hello within
@@ -550,7 +603,7 @@ impl Supervisor {
         };
 
         // ---- serving ----
-        let mut session = Session::new(self, io);
+        let mut session = Session::new(self, io, blob_dir);
         let mut ping_tick = interval(session.sup.config.ping_interval);
         ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

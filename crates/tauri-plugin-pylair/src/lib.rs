@@ -9,6 +9,8 @@ pub mod protocol;
 pub mod supervisor;
 pub mod transport;
 
+#[doc(hidden)]
+pub mod blobs;
 mod builder;
 mod commands;
 mod fn_scope;

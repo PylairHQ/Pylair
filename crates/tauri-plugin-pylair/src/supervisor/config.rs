@@ -371,6 +371,14 @@ pub struct SupervisorConfig {
     /// runtime (no crash accounting). Falls back to the
     /// PYLAIR_RESTART_TRIGGER env var when unset.
     pub restart_trigger: Option<PathBuf>,
+    /// Root of the per-generation blob directories (decision 0010):
+    /// `<blob_root>/gen-<n>` is created per spawn, exported to the child
+    /// as `PYLAIR_BLOB_DIR` and deleted at generation end. `None` (the
+    /// default, or when the cache dir could not be resolved) disables
+    /// blobs — the runtime then falls back to `$b64`. The plugin builder
+    /// fills this from `app.path().app_cache_dir()`; tests set it to a
+    /// temp dir.
+    pub blob_root: Option<PathBuf>,
     /// Concurrency/queue/buffer ceilings (RC.8A). Validated and logged at
     /// supervisor start.
     pub limits: Limits,
@@ -397,6 +405,7 @@ impl Default for SupervisorConfig {
             cancel_timeout: Duration::from_secs(5),
             max_frame: proto::max_frame(),
             restart_trigger: None,
+            blob_root: None,
             limits: Limits::default(),
         }
     }

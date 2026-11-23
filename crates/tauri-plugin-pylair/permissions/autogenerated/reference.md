@@ -7,6 +7,7 @@ Call exposed Python functions, stream results, cancel tasks, read runtime state 
 - `allow-python-call`
 - `allow-python-call-stream`
 - `allow-python-grant-credit`
+- `allow-python-release-blob`
 - `allow-python-cancel`
 - `allow-python-state`
 - `allow-python-health`
@@ -172,6 +173,32 @@ Enables the python_health command without any pre-configured scope.
 <td>
 
 Denies the python_health command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:allow-python-release-blob`
+
+</td>
+<td>
+
+Enables the python_release_blob command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:deny-python-release-blob`
+
+</td>
+<td>
+
+Denies the python_release_blob command without any pre-configured scope.
 
 </td>
 </tr>

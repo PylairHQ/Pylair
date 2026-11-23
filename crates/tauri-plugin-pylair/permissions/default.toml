@@ -10,6 +10,7 @@ permissions = [
   "allow-python-call",
   "allow-python-call-stream",
   "allow-python-grant-credit",
+  "allow-python-release-blob",
   "allow-python-cancel",
   "allow-python-state",
   "allow-python-health",
