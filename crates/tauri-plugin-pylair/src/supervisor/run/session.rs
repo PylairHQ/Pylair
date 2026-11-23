@@ -62,9 +62,7 @@ impl<'a> Session<'a> {
     ) -> Self {
         // The new generation's namespace: clears anything left over and
         // sets the canonical containment root for `blob.register`.
-        sup.blobs
-            .lock()
-            .unwrap()
+        crate::blobs::lock_blobs(&sup.blobs)
             .set_generation(blob_dir.as_ref().map(|(_, c)| c.clone()));
         Session {
             sup,
@@ -113,7 +111,7 @@ impl Drop for Session<'_> {
         // registry empties and the dir is deleted wholesale. Every exit
         // path out of `run_child` lands here, so crash, clean shutdown
         // and dev restart are covered the same way.
-        self.sup.blobs.lock().unwrap().end_generation();
+        crate::blobs::lock_blobs(&self.sup.blobs).end_generation();
         if let Some((dir, _)) = self.blob_dir.take() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
                 let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
@@ -487,7 +485,7 @@ impl Session<'_> {
                         match owner {
                             Some(owner) => {
                                 if let Err(why) =
-                                    self.sup.blobs.lock().unwrap().register(&p, &owner)
+                                    crate::blobs::lock_blobs(&self.sup.blobs).register(&p, &owner)
                                 {
                                     let _ =
                                         self.sup.events.try_send(RuntimeEvent::Stderr(format!(
@@ -511,7 +509,7 @@ impl Session<'_> {
                         // runtime is trusted app code: no owner check here
                         // (the JS release path checks via release_owned).
                         let id = p["id"].as_str().unwrap_or_default();
-                        self.sup.blobs.lock().unwrap().release(id);
+                        crate::blobs::lock_blobs(&self.sup.blobs).release(id);
                     }
                     _ => {} // unknown notifications are ignored (spec §8)
                 }

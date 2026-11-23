@@ -31,8 +31,9 @@
 //! engine refuse to execute it).
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -400,15 +401,30 @@ impl BlobRegistry {
         Some((dir, canon))
     }
 
-    /// Serve one scheme request. Free of Tauri types beyond `http` so the
-    /// whole decision tree is unit-testable; the adapter in `builder.rs`
-    /// resolves `allowed` origins and the requesting webview's label.
+    /// Serve one scheme request — the convenience wrapper that runs both
+    /// phases under the caller's guard. The real adapter (and the test
+    /// that proves the split) calls `prepare_serve` under the registry
+    /// lock, drops the guard, then runs `finish_serve` for all disk IO —
+    /// one large read can then never stall `blob.register`/`release` or
+    /// another window's request behind the same mutex.
     pub fn serve(
-        &mut self,
+        &self,
         label: &str,
         allowed_origins: &[String],
         req: &http::Request<Vec<u8>>,
     ) -> http::Response<Vec<u8>> {
+        Self::finish_serve(self.prepare_serve(label, allowed_origins, req))
+    }
+
+    /// Phase 1, under the lock and doing NO disk IO: origin gate → method
+    /// → id shape → lookup → owner → caps → range parse. Returns either a
+    /// terminal reply or everything the unlocked read phase needs.
+    pub fn prepare_serve(
+        &self,
+        label: &str,
+        allowed_origins: &[String],
+        req: &http::Request<Vec<u8>>,
+    ) -> ServePlan {
         let method = req.method().clone();
         let path = req.uri().path().to_string();
         let origin = req
@@ -422,26 +438,14 @@ impl BlobRegistry {
             .or_else(|| allowed_origins.first().cloned())
             .unwrap_or_default();
 
-        let respond = |status: StatusCode, mime: &str, body: Vec<u8>, extra: &[(&str, String)]| {
-            let mut b = http::Response::builder()
-                .status(status)
-                .header(http::header::CONTENT_TYPE, mime)
-                .header(http::header::CONTENT_LENGTH, body.len().to_string())
-                .header(http::header::ACCEPT_RANGES, "bytes")
-                .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, &acao)
-                .header(http::header::VARY, "Origin")
-                .header(http::header::CACHE_CONTROL, "no-store")
-                .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff");
-            for (k, v) in extra {
-                b = b.header(*k, v);
-            }
-            b.body(body).unwrap()
+        let reply = |status: StatusCode, mime: &str, body: Vec<u8>, extra: &[(&str, String)]| {
+            ServePlan::Reply(respond(&acao, status, mime, body, extra))
         };
 
         // 1. Origin gate — before anything touches the map (§2).
         if let Some(o) = &origin {
             if !allowed_origins.contains(o) {
-                return respond(
+                return reply(
                     StatusCode::FORBIDDEN,
                     "text/plain; charset=utf-8",
                     b"foreign origin".to_vec(),
@@ -450,7 +454,7 @@ impl BlobRegistry {
             }
         }
         if method == http::Method::OPTIONS {
-            return respond(
+            return reply(
                 StatusCode::NO_CONTENT,
                 "text/plain; charset=utf-8",
                 Vec::new(),
@@ -461,7 +465,7 @@ impl BlobRegistry {
             );
         }
         if method != http::Method::GET && method != http::Method::HEAD {
-            return respond(
+            return reply(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "text/plain; charset=utf-8",
                 b"method not allowed".to_vec(),
@@ -481,7 +485,7 @@ impl BlobRegistry {
                 id.to_string()
             }
             _ => {
-                return respond(
+                return reply(
                     StatusCode::BAD_REQUEST,
                     "text/plain; charset=utf-8",
                     b"bad blob path".to_vec(),
@@ -493,7 +497,7 @@ impl BlobRegistry {
         // 3. Lookup → owner check (owner came from TaskMeta.owner at
         //    registration — never from the request).
         let Some(entry) = self.blobs.get(&id) else {
-            return respond(
+            return reply(
                 StatusCode::NOT_FOUND,
                 "text/plain; charset=utf-8",
                 b"no such blob".to_vec(),
@@ -501,129 +505,205 @@ impl BlobRegistry {
             );
         };
         if entry.owner != label {
-            return respond(
+            return reply(
                 StatusCode::FORBIDDEN,
                 "text/plain; charset=utf-8",
                 b"blob owned by another window".to_vec(),
                 &[],
             );
         }
-        let (path, mime, reg_size, reg_mtime) = (
-            entry.path.clone(),
-            entry.mime.clone(),
-            entry.size,
-            entry.mtime,
-        );
-        let total = reg_size;
+        let read = ServeRead {
+            acao: acao.clone(),
+            method,
+            mime: entry.mime.clone(),
+            path: entry.path.clone(),
+            total: entry.size,
+            mtime: entry.mtime,
+            range: None,
+        };
 
-        // 4. Registered-metadata verify: a `from_path` source rewritten in
-        //    place changes size+mtime under the same inode → 410, never
-        //    silently-stale bytes (decision 0010 §4).
-        let stat_ok = std::fs::metadata(&path)
-            .map(|m| (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
-            .is_ok_and(|cur| cur == (reg_size, reg_mtime));
-        if !stat_ok {
-            return respond(
-                StatusCode::GONE,
-                "text/plain; charset=utf-8",
-                b"blob source changed".to_vec(),
-                &[],
-            );
-        }
-
-        // 5. Serve. Range absent → full body under the cap only; a larger
-        //        ask is refused with `Accept-Ranges` pointing the way.
+        // 4. Range. Absent → full body under the cap only; a larger ask is
+        //    refused with `Accept-Ranges` pointing the way. Present →
+        //    parse, cap to `max_range_bytes` (a short 206 is legal HTTP,
+        //    §1 — media stacks and blob.stream() re-request).
         let range = req
             .headers()
             .get(http::header::RANGE)
             .and_then(|v| v.to_str().ok());
         let Some(range) = range else {
-            if total > self.limits.max_full_body {
-                return respond(
+            if read.total > self.limits.max_full_body {
+                return reply(
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     "text/plain; charset=utf-8",
                     format!(
-                        "full-body read refused: {total} bytes > {} cap; issue a Range request",
-                        self.limits.max_full_body
+                        "full-body read refused: {} bytes > {} cap; issue a Range request",
+                        read.total, self.limits.max_full_body
                     )
                     .into_bytes(),
-                    &[("Content-Range", format!("bytes */{total}"))],
+                    &[("Content-Range", format!("bytes */{}", read.total))],
                 );
             }
-            let body = if method == http::Method::HEAD {
-                Vec::new()
-            } else {
-                match std::fs::read(&path) {
-                    Ok(d) if d.len() as u64 == total => d,
-                    _ => {
-                        return respond(
-                            StatusCode::GONE,
-                            "text/plain; charset=utf-8",
-                            b"blob source changed".to_vec(),
-                            &[],
-                        )
-                    }
-                }
-            };
-            let mut r = respond(StatusCode::OK, &mime, body, &[]);
-            if method == http::Method::HEAD {
-                // HEAD answers headers for the full object.
-                r.headers_mut().insert(
-                    http::header::CONTENT_LENGTH,
-                    total.to_string().parse().unwrap(),
-                );
-            }
-            return r;
+            return ServePlan::Read(read);
         };
 
-        let (start, end) = match parse_range(range, total) {
+        let (start, end) = match parse_range(range, read.total) {
             Some(se) => se,
             None => {
-                return respond(
+                return reply(
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     "text/plain; charset=utf-8",
                     b"range unsatisfiable".to_vec(),
-                    &[("Content-Range", format!("bytes */{total}"))],
+                    &[("Content-Range", format!("bytes */{}", read.total))],
                 )
             }
         };
-        // Truncate to the range cap: a short 206 is legal HTTP (§1) —
-        // media stacks and blob.stream() re-request the remainder.
-        let end = end.min(start + self.limits.max_range_bytes - 1);
-        let body = if method == http::Method::HEAD {
-            Vec::new()
-        } else {
-            match std::fs::read(&path) {
-                Ok(d) if d.len() as u64 == total => d[start as usize..=end as usize].to_vec(),
-                _ => {
-                    return respond(
-                        StatusCode::GONE,
-                        "text/plain; charset=utf-8",
-                        b"blob source changed".to_vec(),
-                        &[],
-                    )
-                }
-            }
-        };
-        let mut r = respond(
-            StatusCode::PARTIAL_CONTENT,
-            &mime,
-            body,
-            &[("Content-Range", format!("bytes {start}-{end}/{total}"))],
-        );
-        if method == http::Method::HEAD {
-            r.headers_mut().insert(
-                http::header::CONTENT_LENGTH,
-                (end - start + 1).to_string().parse().unwrap(),
-            );
-        }
-        r
+        ServePlan::Read(ServeRead {
+            range: Some((start, end.min(start + self.limits.max_range_bytes - 1))),
+            ..read
+        })
     }
+
+    /// Phase 2, with NO registry lock held: open the file, verify the
+    /// registered (size, mtime) against the OPEN HANDLE (fstat — stat and
+    /// read then agree on the same inode), seek and `read_exact` only the
+    /// bytes the response needs. Any disagreement — deleted, in-place
+    /// rewrite mid-read, short read — is 410, never stale bytes.
+    pub fn finish_serve(plan: ServePlan) -> http::Response<Vec<u8>> {
+        let ServePlan::Read(read) = plan else {
+            let ServePlan::Reply(r) = plan else {
+                unreachable!()
+            };
+            return r;
+        };
+        let gone = || {
+            respond(
+                &read.acao,
+                StatusCode::GONE,
+                "text/plain; charset=utf-8",
+                b"blob source changed".to_vec(),
+                &[],
+            )
+        };
+        let mut f = match std::fs::File::open(&read.path) {
+            Ok(f) => f,
+            Err(_) => return gone(),
+        };
+        let meta_ok = f
+            .metadata()
+            .map(|m| (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
+            .is_ok_and(|cur| cur == (read.total, read.mtime));
+        if !meta_ok {
+            return gone();
+        }
+        let head = read.method == http::Method::HEAD;
+        match read.range {
+            None => {
+                let body = if head {
+                    Vec::new()
+                } else {
+                    let mut buf = vec![0u8; read.total as usize];
+                    if f.read_exact(&mut buf).is_err() {
+                        return gone();
+                    }
+                    buf
+                };
+                let mut r = respond(&read.acao, StatusCode::OK, &read.mime, body, &[]);
+                if head {
+                    // HEAD answers headers for the full object.
+                    r.headers_mut().insert(
+                        http::header::CONTENT_LENGTH,
+                        read.total.to_string().parse().unwrap(),
+                    );
+                }
+                r
+            }
+            Some((start, end)) => {
+                let len = (end - start + 1) as usize;
+                let body = if head {
+                    Vec::new()
+                } else {
+                    let mut buf = vec![0u8; len];
+                    if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut buf).is_err() {
+                        return gone();
+                    }
+                    buf
+                };
+                let mut r = respond(
+                    &read.acao,
+                    StatusCode::PARTIAL_CONTENT,
+                    &read.mime,
+                    body,
+                    &[(
+                        "Content-Range",
+                        format!("bytes {start}-{end}/{}", read.total),
+                    )],
+                );
+                if head {
+                    r.headers_mut().insert(
+                        http::header::CONTENT_LENGTH,
+                        len.to_string().parse().unwrap(),
+                    );
+                }
+                r
+            }
+        }
+    }
+}
+
+/// What `prepare_serve` decided under the lock: either the request dies
+/// with a reply, or it proceeds to the lock-free disk phase.
+pub enum ServePlan {
+    Reply(http::Response<Vec<u8>>),
+    Read(ServeRead),
+}
+
+/// Everything `finish_serve` needs — cloned registry data and request
+/// facts, so phase 2 touches no shared state.
+pub struct ServeRead {
+    acao: String,
+    method: http::Method,
+    mime: String,
+    path: PathBuf,
+    total: u64,
+    mtime: SystemTime,
+    /// `None` = full body (already cap-checked); `Some((start, end))` is
+    /// already truncated to `max_range_bytes`.
+    range: Option<(u64, u64)>,
+}
+
+/// The uniform response shape — every reply, errors included, carries the
+/// hardened headers (decision 0010 §2).
+fn respond(
+    acao: &str,
+    status: StatusCode,
+    mime: &str,
+    body: Vec<u8>,
+    extra: &[(&str, String)],
+) -> http::Response<Vec<u8>> {
+    let mut b = http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, mime)
+        .header(http::header::CONTENT_LENGTH, body.len().to_string())
+        .header(http::header::ACCEPT_RANGES, "bytes")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, acao)
+        .header(http::header::VARY, "Origin")
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    for (k, v) in extra {
+        b = b.header(*k, v);
+    }
+    b.body(body).unwrap()
 }
 
 /// `bytes=a-b`, `bytes=a-`, `bytes=-n` — one range only; anything else
 /// (multi-range, bad numbers, other units, start ≥ size) is unsatisfiable.
 fn parse_range(range: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        // Any range on an empty blob is unsatisfiable — and `total - 1`
+        // below would underflow, panicking under the registry lock and
+        // poisoning the mutex for the supervisor actor too.
+        return None;
+    }
     let spec = range.strip_prefix("bytes=")?;
     let (a, b) = spec.split_once('-')?;
     if a.is_empty() {
@@ -712,15 +792,29 @@ pub fn serve_request<R: Runtime>(
     req: &http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
     let origins = app_origins(app, label);
-    if let Some(rt) = app.try_state::<crate::registry::PyRuntime>() {
-        let arc = rt.0.blobs();
-        let mut reg = arc.lock().unwrap();
-        reg.serve(label, &origins, req)
-    } else {
-        // No supervisor yet — nothing can be registered; the gates still
-        // answer consistently (a 404 carries the same hardened headers).
-        let (arc, _) = BlobRegistry::new(BlobLimits::from_env());
-        let res = arc.lock().unwrap().serve(label, &origins, req);
-        res
-    }
+    let plan = {
+        // Phase 1 under the lock, phase 2 (all disk IO) after the guard
+        // drops — one large read never stalls the supervisor actor's
+        // register/release or another window's request on this mutex.
+        // Poison-tolerant like every registry lock: a panicking request
+        // must not take the actor's later locks down with it.
+        let arc = if let Some(rt) = app.try_state::<crate::registry::PyRuntime>() {
+            rt.0.blobs()
+        } else {
+            // No supervisor yet — nothing can be registered; the gates
+            // still answer consistently (a 404 carries the same hardened
+            // headers).
+            BlobRegistry::new(BlobLimits::from_env()).0
+        };
+        let plan = lock_blobs(&arc).prepare_serve(label, &origins, req);
+        plan
+    };
+    BlobRegistry::finish_serve(plan)
+}
+
+/// Lock the shared registry, surviving a poisoned mutex — a request that
+/// panics elsewhere must not deny every later lock for the supervisor
+/// actor or the scheme handler.
+pub fn lock_blobs(arc: &BlobRegistryRef) -> MutexGuard<'_, BlobRegistry> {
+    arc.lock().unwrap_or_else(|e| e.into_inner())
 }

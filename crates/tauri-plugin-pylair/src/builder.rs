@@ -329,7 +329,7 @@ impl<R: Runtime> Builder<R> {
                     if let Some(rt) = app.try_state::<PyRuntime>() {
                         let h = rt.0.clone();
                         let owner = label.to_string();
-                        h.blobs().lock().unwrap().drop_owner(&owner);
+                        crate::blobs::lock_blobs(&h.blobs()).drop_owner(&owner);
                         tauri::async_runtime::spawn(async move { h.cancel_owner(owner).await });
                     }
                 }
