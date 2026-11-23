@@ -577,3 +577,14 @@ def make_blob_copy(src: str) -> "pylair.Blob":
     import pylair
 
     return pylair.Blob.from_path(src, mime="text/plain", copy=True)
+
+
+# The SAME Blob object returned by any number of calls — a module-level
+# cache. Every call must mint its own handle: fresh id, fresh file.
+
+
+@expose
+def shared_blob() -> pylair.Blob:
+    if getattr(shared_blob, "_cached", None) is None:
+        shared_blob._cached = pylair.Blob(b"shared-cached-payload", mime="text/plain")
+    return shared_blob._cached

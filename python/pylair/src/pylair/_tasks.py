@@ -398,11 +398,14 @@ class TaskRegistry:
                 # rides inside dumps' single pre-walk (MAX_DEPTH - 4
                 # leaves room for the notification envelope).
                 try:
-                    # The collecting dump materializes any Blob (file
-                    # written, tag cached) so the frame's own serialization
-                    # in _send can register it before the chunk ships.
+                    # Serialize the chunk value for the cap check exactly
+                    # as the frame will — a Blob mints a handle either way.
                     _regs: dict = {}
                     _body = _json.dumps_collect(value, _regs, MAX_DEPTH - 4).encode()
+                    # This pass's handle was only for the cap check — the
+                    # frame's own dump mints the one that registers.
+                    for _h in _regs.values():
+                        _h._unlink()
                 except _json.DepthExceeded:
                     self._finish(
                         task,

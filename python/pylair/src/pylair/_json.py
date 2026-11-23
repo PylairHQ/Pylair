@@ -175,13 +175,16 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
 def dumps_collect(
     obj: Any, regs: dict[str, Blob], depth_limit: int | None = None
 ) -> str:
-    """dumps + collect the Blobs materialized during serialization.
+    """dumps + collect the handles minted during serialization.
 
-    `regs` fills with {id: Blob} for the caller to flush as `blob.register`
-    notifications AHEAD of the carrying frame (decision 0010 §3 — a single
-    writer's FIFO makes registration-before-use atomic). If the dump
-    raises after some blobs already wrote files, those files are unlinked:
-    nothing was ever registered, so Python still owns them.
+    `regs` fills with {Blob: _BlobHandle} — keyed by object identity, so
+    the same Blob twice in one frame is one handle while each PASS mints
+    fresh ones (the Blob is re-sendable). The caller flushes each handle
+    as a `blob.register` notification AHEAD of the carrying frame
+    (decision 0010 §3 — a single writer's FIFO makes
+    registration-before-use atomic). If the dump raises after some
+    handles already wrote files, those files are unlinked: nothing was
+    ever registered, so Python still owns them.
     """
     check_wire(obj, depth_limit)
 

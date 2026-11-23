@@ -52,8 +52,14 @@ def test_blob_serializes_to_tag(tmp_path, monkeypatch):
     assert len(files) == 1 and files[0].read_bytes() == b"hello-blob"
 
 
-def test_blob_id_alphabet():
-    ids = {pylair.Blob(b"").id for _ in range(50)}
+def test_blob_id_alphabet(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    b = pylair.Blob(b"")
+    ids = set()
+    for _ in range(50):
+        regs: dict = {}
+        _json.dumps_collect(b, regs)
+        ids.update(h._id for h in regs.values())
     assert len(ids) == 50
     assert all(_ID_RE.match(i) for i in ids)
 
@@ -72,10 +78,9 @@ def test_from_path_hardlinks(tmp_path, monkeypatch):
     b = pylair.Blob.from_path(src, mime="text/plain")
     regs: dict = {}
     _json.dumps_collect(b, regs)
-    assert b.path is not None
-    assert os.path.samefile(src, b.path), "from_path should hardlink, not copy"
-    assert b.path.parent == tmp_path
-    assert regs[b.id] is b
+    h = regs[b]
+    assert os.path.samefile(src, h._path), "from_path should hardlink, not copy"
+    assert h._path.parent == tmp_path
 
 
 def test_from_path_copy_true(tmp_path, monkeypatch):
@@ -83,9 +88,65 @@ def test_from_path_copy_true(tmp_path, monkeypatch):
     src = tmp_path / "src.txt"
     src.write_bytes(b"copy-me")
     b = pylair.Blob.from_path(src, mime="text/plain", copy=True)
-    _json.dumps_collect(b, {})
-    assert not os.path.samefile(src, b.path)
-    assert b.path.read_bytes() == b"copy-me"
+    regs: dict = {}
+    _json.dumps_collect(b, regs)
+    h = regs[b]
+    assert not os.path.samefile(src, h._path)
+    assert h._path.read_bytes() == b"copy-me"
+
+
+def test_same_object_twice_in_one_frame_is_one_handle(tmp_path, monkeypatch):
+    """The same Blob object appearing twice in a single frame mints ONE
+    handle — one id, one file, one register."""
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    b = pylair.Blob(b"shared")
+    regs: dict = {}
+    out = json.loads(_json.dumps_collect({"x": b, "y": [b]}, regs))
+    assert len(regs) == 1
+    assert out["x"]["$blob"]["id"] == out["y"][0]["$blob"]["id"]
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_second_pass_mints_a_fresh_handle(tmp_path, monkeypatch):
+    """Re-sending the same object: a new id and a new file each time, so
+    a released first handle can never orphan the second send."""
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    b = pylair.Blob(b"payload")
+    r1: dict = {}
+    _json.dumps_collect(b, r1)
+    h1 = r1[b]
+    # The host released the first send — its file is gone.
+    h1._path.unlink()
+    r2: dict = {}
+    _json.dumps_collect(b, r2)
+    h2 = r2[b]
+    assert h1._id != h2._id
+    assert h1._path != h2._path
+    assert h2._path.read_bytes() == b"payload"
+
+
+def test_concurrent_sends_get_distinct_ids(tmp_path, monkeypatch):
+    """Two threads serializing the same Blob — each pass owns its regs,
+    so handles never collide."""
+    import threading
+
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    b = pylair.Blob(b"raced")
+    ids: list[str] = []
+    lock = threading.Lock()
+
+    def go():
+        regs: dict = {}
+        _json.dumps_collect(b, regs)
+        with lock:
+            ids.extend(h._id for h in regs.values())
+
+    ts = [threading.Thread(target=go) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(set(ids)) == 4
 
 
 def test_failed_serialize_unlinks_unregistered_files(tmp_path, monkeypatch):
@@ -243,3 +304,89 @@ def test_capability_off_oversized_names_the_feature(tmp_path):
     finally:
         rt.kill()
         rt.proc.wait(timeout=10)
+
+
+# ---- re-send: the same Blob object across calls -------------------------------
+
+
+def test_same_blob_two_calls_get_two_handles(tmp_path):
+    """A module-level cached Blob returned twice: two calls, two ids —
+    and each registration's file exists independently."""
+    rt = Runtime(env={"PYLAIR_BLOB_DIR": str(tmp_path)})
+    try:
+        rt.recv()
+        handles = []
+        for rid, task in ((1, 11), (2, 12)):
+            rt.send(call(rid, "shared_blob", task=task))
+            reg = rt.recv()
+            assert reg.get("method") == "blob.register"
+            p = reg["params"]
+            assert p["task_id"] == task
+            res = rt.recv()
+            assert res["result"]["$blob"]["id"] == p["id"]
+            handles.append(p)
+        assert handles[0]["id"] != handles[1]["id"]
+        assert handles[0]["path"] != handles[1]["path"]
+        for p in handles:
+            assert Path(p["path"]).read_bytes() == b"shared-cached-payload"
+    finally:
+        rt.kill()
+        rt.proc.wait(timeout=10)
+
+
+def test_resend_after_release_gets_a_fresh_file(tmp_path):
+    """Simulate the host's release: delete the first send's file, then
+    call again — the second registration points at a fresh file."""
+    rt = Runtime(env={"PYLAIR_BLOB_DIR": str(tmp_path)})
+    try:
+        rt.recv()
+        rt.send(call(1, "shared_blob", task=21))
+        p1 = rt.recv()["params"]
+        rt.recv()
+        Path(p1["path"]).unlink()  # host owns the unlink — it's gone
+        rt.send(call(2, "shared_blob", task=22))
+        p2 = rt.recv()["params"]
+        rt.recv()
+        assert p2["id"] != p1["id"] and p2["path"] != p1["path"]
+        assert Path(p2["path"]).read_bytes() == b"shared-cached-payload"
+    finally:
+        rt.kill()
+        rt.proc.wait(timeout=10)
+
+
+# ---- no Blob outside a task -----------------------------------------------------
+
+
+def _send_stub():
+    """A Server-shaped sink: _send only needs `self._out`."""
+    import queue
+
+    from pylair import _server
+
+    rt = _server.Server.__new__(_server.Server)
+    rt._out = queue.Queue()
+    return rt
+
+
+def test_blob_in_taskless_notification_is_dropped(tmp_path, monkeypatch, capsys):
+    """An event-style notification carrying a Blob has no task binding —
+    the frame is refused (logged, not sent) and the file unlinked."""
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    rt = _send_stub()
+    rt._send(proto.notification("app.event", {"payload": pylair.Blob(b"no-owner")}))
+    assert rt._out.empty()
+    assert list(tmp_path.iterdir()) == []
+    assert "only be returned from calls or streams" in capsys.readouterr().err
+
+
+def test_blob_in_taskless_response_fails_the_call(tmp_path, monkeypatch):
+    """A response without a task binding can't carry a Blob either — the
+    call gets an INTERNAL error naming the rule, file unlinked."""
+    monkeypatch.setenv("PYLAIR_BLOB_DIR", str(tmp_path))
+    rt = _send_stub()
+    rt._send(proto.response(5, {"b": pylair.Blob(b"no-owner")}))
+    frame = rt._out.get_nowait()
+    err = json.loads(frame)["error"]
+    assert err["code"] == proto.INTERNAL
+    assert "only be returned from calls or streams" in err["message"]
+    assert list(tmp_path.iterdir()) == []

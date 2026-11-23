@@ -7,6 +7,16 @@ through a `blob.register` notification flushed ahead of the carrying
 frame (registration-before-use — the host never serves an unregistered
 id).
 
+A `Blob` object is an IMMUTABLE DESCRIPTION of its source — bytes or a
+path plus a mime — deliberately sendable more than once (a module-level
+thumbnail cached for the app's life). Every serialization pass that
+carries it mints a fresh `_BlobHandle`: a new id and a new file,
+hard-linked from the source path or written from the bytes. Per-send
+state lives in the collecting pass's `regs` map keyed by object
+identity, so the same object twice in one frame is one handle while two
+calls returning it get independent handles — a later `release()` of one
+can never orphan the other.
+
 The env var is the capability bit (§3): with `PYLAIR_BLOB_DIR` unset —
 an older host, or the host could not create the dir — a Blob degrades to
 `{"$b64": ...}` when that fits the frame cap, else the call fails
@@ -16,8 +26,8 @@ Python side is passive for lifetime (§4): once `blob.register` has been
 flushed the HOST owns the file's unlink (release, window close,
 generation end) — Python code never deletes a registered file. Files
 materialized but never carried by a frame (a serialization that failed
-mid-pass) are unlinked on the error path; everything past that is the
-generation-end sweep, which is bounded residue, never unbounded.
+mid-pass, or a frame refused for lacking a task) are unlinked on the
+error path; everything past that is the generation-end sweep.
 """
 
 from __future__ import annotations
@@ -80,10 +90,14 @@ class Blob:
     re-stats size+mtime per serve, so an in-place rewrite of the source
     answers 410 Gone instead of stale bytes. `copy=True` forces a copy
     for sources that will be rewritten in place.
+
+    The object itself is only a description — `id` and a materialized
+    `path` are per-SEND state and do not exist here; each serialization
+    pass mints a fresh handle so the same Blob can be returned from any
+    number of calls.
     """
 
     def __init__(self, data: bytes | bytearray | memoryview, mime: str = _OCTET):
-        self._id = _new_id()
         self._mime = _check_mime(mime)
         try:
             self._data: bytes | None = bytes(data)
@@ -93,9 +107,6 @@ class Blob:
             ) from None
         self._src: Path | None = None
         self._copy = False
-        self._path: Path | None = None  # materialized file in the blob dir
-        self._wire: dict | None = None  # cached {"$blob": {...}} tag
-        self._registered = False  # a register frame for it reached the queue
 
     @classmethod
     def from_bytes(
@@ -124,28 +135,19 @@ class Blob:
         return b
 
     @property
-    def id(self) -> str:
-        return self._id
-
-    @property
     def mime(self) -> str:
         return self._mime
 
     @property
     def size(self) -> int:
+        """The source's current size — for `from_path` this is a live
+        stat, so an in-place rewrite shows here until the next send
+        mints a handle (the host answers 410 for a stale registration).
+        """
         if self._data is not None:
             return len(self._data)
-        if self._path is not None:
-            return self._path.stat().st_size
         assert self._src is not None
         return self._src.stat().st_size
-
-    @property
-    def path(self) -> Path | None:
-        """The materialized file in the generation's blob dir, or None
-        before encode. Host-internal — never crosses the web boundary.
-        """
-        return self._path
 
     def _bytes(self) -> bytes:
         if self._data is not None:
@@ -153,84 +155,22 @@ class Blob:
         assert self._src is not None
         return self._src.read_bytes()
 
-    def _materialize(self) -> Path:
-        """Write/link the file into `PYLAIR_BLOB_DIR` — idempotent, fully
-        written and closed before it returns (the host re-stats at serve
-        time, so nothing may touch the file after registration).
-        """
-        if self._path is not None:
-            return self._path
-        d = _blob_dir()
-        assert d is not None, "_materialize requires PYLAIR_BLOB_DIR"
-        dest = d / self._id
-        if self._src is not None and not self._copy:
-            try:
-                # Zero-copy when the source shares the volume (the common
-                # case — both live under the app's dirs).
-                os.link(self._src, dest)
-            except OSError:
-                # Cross-filesystem or a fs without hardlinks — plain copy.
-                shutil.copyfile(self._src, dest)
-        else:
-            # Atomic write: a tmp name + rename, so a reader can never
-            # observe a partial file.
-            fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=self._id)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(self._bytes())
-                os.replace(tmp, dest)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-        self._path = dest
-        return dest
-
     def _to_wire(self, regs: dict | None) -> dict:
-        """The value `_default` emits for this object. `regs` — when the
-        caller is a collecting serialization pass — gets {id: self} for
-        the register flush; with None the tag is still emitted (a plain
-        dumps produces a blob the host will serve once registered — or
-        404; result paths always collect).
+        """The value `_default` emits. With `regs` — a collecting pass —
+        mints (or reuses within the pass) this object's handle; with
+        None the tag still materializes a file (a plain dumps produces a
+        blob the host will serve once its register lands — or 404).
         """
         if _blob_dir() is None:
             # Capability off — degrade to b64 (check_wire has already
             # proven it fits the frame cap).
             return {_B64_TAG: base64.b64encode(self._bytes()).decode("ascii")}
-        self._materialize()
+        if regs is not None and self in regs:
+            return regs[self]._tag
+        h = _BlobHandle(self)
         if regs is not None:
-            regs[self._id] = self
-        if self._wire is None:
-            self._wire = {
-                _BLOB_TAG: {"id": self._id, "mime": self._mime, "size": self.size}
-            }
-        return self._wire
-
-    def _register_params(self) -> dict[str, Any]:
-        """The `blob.register` params — host-internal metadata (the path
-        never reaches a webview). The runtime adds task_id.
-        """
-        return {
-            "id": self._id,
-            "path": str(self._path),
-            "mime": self._mime,
-            "size": self.size,
-        }
-
-    def _unlink(self) -> None:
-        """Error path: a file written but never registered is ours to
-        remove. Once a register frame has been queued the host owns the
-        unlink — this becomes a no-op (§4).
-        """
-        if self._registered or self._path is None:
-            return
-        try:
-            os.unlink(self._path)
-        except OSError:
-            pass
-        self._path = None
+            regs[self] = h
+        return h._tag
 
     def _fallback_check(self) -> None:
         """check_wire's leaf visit: with the capability off the fallback
@@ -252,3 +192,78 @@ class Blob:
                 f"$b64 fallback exceeds the {MAX_FRAME}-byte frame cap — "
                 f"upgrade the host or return smaller values"
             )
+
+
+class _BlobHandle:
+    """One send of a Blob — a fresh id, its own file in the blob dir,
+    and the wire artifacts (`$blob` tag + `blob.register` params). Held
+    in the collecting pass's `regs` map, never on the Blob.
+    """
+
+    __slots__ = ("_blob", "_id", "_path", "_registered", "_size", "_tag")
+
+    def __init__(self, blob: Blob):
+        self._id = _new_id()
+        self._blob = blob
+        self._path = self._materialize()
+        self._size = self._path.stat().st_size
+        self._tag = {
+            _BLOB_TAG: {"id": self._id, "mime": blob._mime, "size": self._size}
+        }
+        self._registered = False  # a register frame for it reached the queue
+
+    def _materialize(self) -> Path:
+        """Write/link the file into `PYLAIR_BLOB_DIR`, fully written and
+        closed before it returns (the host re-stats at serve time, so
+        nothing may touch the file after registration).
+        """
+        d = _blob_dir()
+        assert d is not None, "_materialize requires PYLAIR_BLOB_DIR"
+        dest = d / self._id
+        src = self._blob._src
+        if src is not None and not self._blob._copy:
+            try:
+                # Zero-copy when the source shares the volume (the common
+                # case — both live under the app's dirs).
+                os.link(src, dest)
+            except OSError:
+                # Cross-filesystem or a fs without hardlinks — plain copy.
+                shutil.copyfile(src, dest)
+        else:
+            # Atomic write: a tmp name + rename, so a reader can never
+            # observe a partial file.
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=self._id)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(self._blob._bytes())
+                os.replace(tmp, dest)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        return dest
+
+    def _register_params(self) -> dict[str, Any]:
+        """The `blob.register` params — host-internal metadata (the path
+        never reaches a webview). The runtime adds task_id.
+        """
+        return {
+            "id": self._id,
+            "path": str(self._path),
+            "mime": self._blob._mime,
+            "size": self._size,
+        }
+
+    def _unlink(self) -> None:
+        """Error path: a file written but never registered is ours to
+        remove. Once a register frame has been queued the host owns the
+        unlink — this becomes a no-op (§4).
+        """
+        if self._registered:
+            return
+        try:
+            os.unlink(self._path)
+        except OSError:
+            pass
