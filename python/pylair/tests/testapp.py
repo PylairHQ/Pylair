@@ -293,8 +293,12 @@ def warm_break_witness(witness: str, seconds: float, started: str | None = None)
     else:
         _signal.signal(_signal.SIGINT, _on_interrupt)
     if started:
-        with open(started, "w") as f:
-            f.write("running")
+        # Atomic: the test parses this as the member's pid — a bare
+        # open/write would expose the create-then-write gap as "".
+        tmp = started + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(str(os.getpid()))
+        os.replace(tmp, started)
     time.sleep(seconds)
     return "slept"
 
