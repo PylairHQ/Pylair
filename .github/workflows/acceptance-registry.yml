@@ -662,8 +662,9 @@ jobs:
           # Tauri loop/GTK init but still needs its linked system libs.
           docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -e PYLAIR_WARM_EXPECTED -e PYLAIR_MODELS_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
-            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
-            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
+            sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
             /r/usr/bin/app-under-test --self-test
             # WindowDestroyed on the main thread — the rc.3 window-close panic.
             PYLAIR_SELF_TEST_WINDOW_CLOSE=1 timeout 90 xvfb-run -a /r/usr/bin/app-under-test
@@ -1031,8 +1032,9 @@ jobs:
           # checks itself.
           docker run --rm -e APP_BIN -e MARKER -v /tmp/approot:/r:ro ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
-            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
-            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
+            sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
             touch /tmp/wrap-restart-trigger
             export PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger
             timeout 600 xvfb-run -a /r/usr/bin/$APP_BIN 2>&1 | tee /tmp/wrap-self-test.log

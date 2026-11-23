@@ -710,8 +710,9 @@ jobs:
           # Tauri loop/GTK init. It must spawn the bundled interpreter.
           docker run --rm -e APP_BIN="$APP_BIN" -v /tmp/approot:/r:ro ubuntu:22.04 bash -c '
             set -e; export DEBIAN_FRONTEND=noninteractive
-            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
-            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates >/dev/null
+            sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates >/dev/null
             /r/usr/bin/$APP_BIN --self-test'
       - name: Self-test installed app (Linux GUI path, deb + AppImage)
         if: runner.os == 'Linux'
@@ -730,8 +731,9 @@ jobs:
           # directly fails to find WebKitNetworkProcess).
           docker run --rm -e APP_BIN="$APP_BIN" -v /tmp/approot:/r:ro -v /tmp/app.AppImage:/app.AppImage:ro ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
-            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
-            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb libfuse2 >/dev/null
+            sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb libfuse2 >/dev/null
             echo "── deb layout (resource_dir path)"
             PYLAIR_SELF_TEST_GUI=1 xvfb-run -a /r/usr/bin/$APP_BIN
             echo "── appimage layout"
@@ -985,8 +987,9 @@ jobs:
           # same GUI variant the bridge legs use) and checks itself.
           docker run --rm -e APP_BIN -e MARKER -v /tmp/approot:/r:ro ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
-            for i in 1 2 3; do apt-get update -qq && break || sleep 10; done
-            apt-get install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
+            sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 ca-certificates xvfb >/dev/null
             touch /tmp/wrap-restart-trigger
             export PYLAIR_SELF_TEST_WRAP="$MARKER" PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 PYLAIR_RESTART_TRIGGER=/tmp/wrap-restart-trigger
             timeout 600 xvfb-run -a /r/usr/bin/$APP_BIN 2>&1 | tee /tmp/wrap-self-test.log
