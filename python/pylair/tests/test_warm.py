@@ -54,27 +54,113 @@ def cancel(rid: int, task: int) -> dict:
 _HANG_S = 180.0
 
 
+# The runtime the active test is driving — set by the _hang_guard
+# fixture so the file/pid waiters below can dump state on a guard trip
+# without threading the fixture through every helper signature.
+_ACTIVE_RT = None
+
+
+def _hang_dump(runtime) -> str:
+    """State capture for a tripped hang guard (POSIX loop legs only):
+    SIGABRT the runtime so faulthandler dumps every parked thread to its
+    stderr (conftest sets PYTHONFAULTHANDLER; the harness already drains
+    it), then report every member process's ps state — Z = exited and
+    nobody reaped (child watcher / proc.wait suspect), R/S = never
+    crashed, absent = reaped and WORKER_DIED was lost."""
+    parts: list[str] = []
+    if runtime is None or sys.platform == "win32":
+        return "<no runtime diagnostics on this path>"
+    try:
+        os.kill(runtime.proc.pid, signal.SIGABRT)
+        # Let the child's faulthandler dump drain into stderr_lines.
+        time.sleep(2.0)
+    except OSError as e:
+        parts.append(f"SIGABRT to runtime {runtime.proc.pid} failed: {e}")
+    pids = {runtime.proc.pid}
+    try:
+        kids = subprocess.run(
+            ["pgrep", "-P", str(runtime.proc.pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        for k in kids:
+            pids.add(int(k))
+            gkids = subprocess.run(
+                ["pgrep", "-P", k], check=False, capture_output=True, text=True
+            ).stdout.split()
+            pids.update(int(g) for g in gkids)
+    except OSError as e:
+        parts.append(f"pgrep failed: {e}")
+    ps = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "pid,ppid,stat,etime,command",
+            "-p",
+            ",".join(map(str, sorted(pids))),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    parts.append("process states:\n" + ps.stdout + ps.stderr)
+    lsof = subprocess.run(
+        ["lsof", "-p", str(runtime.proc.pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    parts.append(
+        "runtime pipe fds:\n"
+        + "\n".join(x for x in lsof.stdout.splitlines() if "PIPE" in x)
+    )
+    parts.append(
+        "runtime stderr tail (faulthandler dump, newest last):\n"
+        + ("\n".join(list(runtime.stderr_lines)[-200:]) or "<empty>")
+    )
+    return "\n".join(parts)
+
+
 @pytest.fixture(autouse=True)
 def _hang_guard(runtime):
     """Default this module's recv/recv_until to _HANG_S: every call is
-    an event wait whose 10 s harness default was the macOS flake."""
+    an event wait whose 10 s harness default was the macOS flake. A
+    guard trip dumps the runtime's parked threads + member process
+    states before failing."""
+    global _ACTIVE_RT
+    _ACTIVE_RT = runtime
     orig_recv, orig_until = runtime.recv, runtime.recv_until
 
     def recv(timeout=_HANG_S):
-        return orig_recv(timeout=timeout)
+        try:
+            return orig_recv(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(
+                f"recv starved past {timeout}s\n{_hang_dump(runtime)}"
+            ) from None
 
     def recv_until(pred, timeout=_HANG_S):
-        return orig_until(pred, timeout=timeout)
+        try:
+            return orig_until(pred, timeout=timeout)
+        except TimeoutError:
+            raise AssertionError(
+                f"recv_until starved past {timeout}s\n{_hang_dump(runtime)}"
+            ) from None
 
     runtime.recv, runtime.recv_until = recv, recv_until
-    return runtime
+    yield runtime
+    _ACTIVE_RT = None
 
 
 def _wait_file(path, timeout: float = _HANG_S) -> None:
     """Poll for a marker file — never a fixed sleep."""
     deadline = time.time() + timeout
     while not path.exists():
-        assert time.time() < deadline, f"marker {path} never appeared"
+        if time.time() >= deadline:
+            raise AssertionError(
+                f"marker {path} never appeared\n{_hang_dump(_ACTIVE_RT)}"
+            )
         time.sleep(0.05)
 
 
@@ -160,7 +246,9 @@ def _pid_dead(pid: int, timeout: float = _HANG_S) -> None:
         except ProcessLookupError:
             return
         time.sleep(0.05)
-    raise AssertionError(f"pid {pid} still alive after {timeout}s")
+    raise AssertionError(
+        f"pid {pid} still alive after {timeout}s\n{_hang_dump(_ACTIVE_RT)}"
+    )
 
 
 def _collect(runtime, ids: set, timeout: float = _HANG_S) -> dict:

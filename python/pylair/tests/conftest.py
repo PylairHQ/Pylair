@@ -23,6 +23,10 @@ class Runtime:
     def __init__(self, module: str = "testapp", env: dict | None = None):
         env = dict(os.environ) | (env or {})
         env.pop("PYTHONPATH", None)
+        # A SIGABRT to a wedged runtime dumps every thread's stack to its
+        # stderr — the flake-hunt diagnostics in test_warm._hang_dump rely
+        # on it. No effect on normal operation.
+        env["PYTHONFAULTHANDLER"] = "1"
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "pylair", module],
             stdin=subprocess.PIPE,
