@@ -8,6 +8,15 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- CI: `acceptance-registry.yml` folds the three per-framework
+  `macos-latest` wrap legs into one `wrap-acceptance-macos` job that
+  runs command, gradio and streamlit in sequence
+  (`scripts/wrap-acceptance/run-macos-registry.sh`, one framework per
+  step) — matching the consolidation ci.yml already had. Hosted arm64
+  acquisition cancelled two legs in a day; dispatch macos-latest jobs
+  go 4 → 2. Linux/Windows keep per-framework legs; `macos-15-intel`
+  untouched.
+
 ## npm-v0.1.0-rc.29 (2026-11-23)
 
 Crate `0.1.0-rc.23`, `pylair 0.1.0rc15` on PyPI, npm `0.1.0-rc.29`.
