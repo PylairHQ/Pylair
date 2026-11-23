@@ -404,11 +404,36 @@ Merged since rc.17 (d7daaaf):
   arm `PYLAIR_MODELS_EXPECTED=1` only when the resolved pylair is
   ≥ `0.1.0rc14` AND the resolved crate is ≥ `0.1.0-rc.22` (the side
   that passes `PYLAIR_APP_DATA_DIR`).
-- The next release is the full three-registry train: the crate at
-  `0.1.0-rc.22` (PR 150's `PYLAIR_APP_DATA_DIR`), `pylair` at
-  `0.1.0rc14` (PR 148's Windows exit-hang fix + PR 151's
-  `pylair.models`), the npm trio at `0.1.0-rc.28` (the selftest
-  client), with scaffold pins and the template `Cargo.lock`.
+- PR 153: warm-worker interrupt hardening — a second SIGINT landing
+  while the "outside the raise window" diagnostic was mid-print
+  re-entered the buffered stderr writer, and the RuntimeError escaped
+  the serve loop's channel reads into a worker exit (`_WarmWorkerDead`
+  upstream — the CI flake `test_warm_interrupt_as_call_returns`
+  guards). The diagnostic now writes through `os.write` on the raw fd;
+  `test_warm.py` gained a death-order watcher and a 400-signal
+  idle-burst test. Ships in rc14.
+- The next release is the full three-registry train. The bump commit
+  (PR 154) takes the crate to `0.1.0-rc.22` (PR 150's
+  `PYLAIR_APP_DATA_DIR` to the runtime) and `pylair` to `0.1.0rc14`
+  (PR 148's Windows exit-hang fix — the bounded writer join on a
+  stalled host plus the bounded executor join at shutdown — PR 151's
+  `pylair.models`: declarative `models.model()` autostart,
+  `fetch()`/`path()`, resumable verified downloads into the app data
+  dir with readiness progress, cross-origin credential stripping,
+  https-only — and PR 153's warm-worker reentrancy fix).
+  `pylair-ollama` stays `0.1.0-rc.3`. Remaining order:
+
+  1. publish the crate `0.1.0-rc.22` on crates.io;
+  2. publish `pylair 0.1.0rc14` on PyPI;
+  3. the pins PR — npm trio `0.1.0-rc.28`, scaffold pins `rs
+     =0.1.0-rc.22` / `py pylair==0.1.0rc14`, template `Cargo.lock`
+     regenerated against the published crate;
+  4. the npm trio under `--tag next`;
+  5. registry acceptance with `source=registry` and
+     `expect_version 0.1.0-rc.28` — the first run where
+     `PYLAIR_MODELS_EXPECTED` arms (resolved pylair ≥ 0.1.0rc14 AND
+     crate ≥ 0.1.0-rc.22), so a `models` skip fails the leg on every
+     OS.
 
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
