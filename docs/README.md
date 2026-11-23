@@ -27,7 +27,7 @@ Specs and guides for building on Pylair, plus the design history.
 
 ## History and ideas
 
-- [decisions/](decisions/): numbered decision records (0000-0008).
+- [decisions/](decisions/): numbered decision records (0000-0010).
 - [design/](design/): design notes that outgrew a decision record.
 - [ideas.md](ideas.md): parked ideas, not committed scope.
 

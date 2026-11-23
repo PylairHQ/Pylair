@@ -10,7 +10,8 @@ from this file — promote to a milestone or a decision doc first.
 - Unix socket / Windows named pipe transport behind the transport trait.
 - Svelte template (`packages/create-pylair/templates/svelte-ts`).
 - Temp-file-handle transport for bulk binary payloads (images, audio)
-  to replace base64-in-JSON (+33% wire cost) — protocol note §2.
+  to replace base64-in-JSON (+33% wire cost) — protocol note §2 —
+  designed as blob URLs in docs/decisions/0010-blob-urls.md.
 - `{"$bigint": "<decimal>"}` tagging for Python ints beyond ±2^53 —
   emitted as `bigint` in generated TS. Until then the codec rejects
   out-of-range ints with a clear error (docs/codegen.md): annotate

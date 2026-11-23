@@ -1,0 +1,159 @@
+{
+  "reports": [
+    {
+      "results": [
+        {
+          "detail": "http://tauri.localhost | base=http://pylair.localhost",
+          "name": "origin",
+          "ok": true
+        },
+        {
+          "detail": "onload",
+          "name": "img own blob",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":200,\"len\":10381}",
+          "name": "fetch own blob",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":403,\"len\":28}",
+          "name": "fetch main's denied",
+          "ok": true
+        },
+        {
+          "detail": "img onerror",
+          "name": "img main's denied",
+          "ok": true
+        },
+        {
+          "detail": "audio onerror",
+          "name": "audio main's denied",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":403,\"len\":28}",
+          "name": "worker fetch main's denied",
+          "ok": true
+        }
+      ],
+      "window": "other"
+    },
+    {
+      "results": [
+        {
+          "detail": "http://tauri.localhost | base=http://pylair.localhost",
+          "name": "origin",
+          "ok": true
+        },
+        {
+          "detail": "onload",
+          "name": "img own blob",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":200,\"len\":10381,\"cr\":null}",
+          "name": "fetch own blob",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":206,\"len\":100,\"cr\":null}",
+          "name": "fetch Range",
+          "ok": true
+        },
+        {
+          "detail": "status 200",
+          "name": "xhr own blob",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":200,\"len\":10381}",
+          "name": "worker fetch own",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":403,\"len\":28}",
+          "name": "worker fetch other's",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":403,\"len\":28,\"cr\":null}",
+          "name": "fetch other's blob denied",
+          "ok": true
+        },
+        {
+          "detail": "img onerror",
+          "name": "img other's denied",
+          "ok": true
+        },
+        {
+          "detail": "status 404",
+          "name": "404 unknown id",
+          "ok": true
+        },
+        {
+          "detail": "status 400",
+          "name": "bad path rejected",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":416,\"len\":75,\"cr\":null}",
+          "name": "full-body over cap refused",
+          "ok": true
+        },
+        {
+          "detail": "{\"status\":206,\"len\":4194304,\"cr\":null}",
+          "name": "open range → short 206",
+          "ok": true
+        },
+        {
+          "detail": "before=200/4096 after=410",
+          "name": "mutated source → 410",
+          "ok": true
+        },
+        {
+          "detail": "dur=120 audioReqs=5 ranged=4",
+          "name": "audio seek (capped ranges)",
+          "ok": true
+        },
+        {
+          "detail": "[\"SCHEME label=main origin=- method=GET path=/b/img_main range=- -> 200\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=bytes=0-99 -> 206\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 403\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 403\",\"SCHEME label=main origin=- method=GET path=/b/img_other range=- -> 403\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/does_not_exist range=- -> 404\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/etc range=- -> 400\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/audio_main range=- -> 416\",\"SCHEME label=other origin=- method=GET path=/b/img_other range=- -> 200\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/audio_main range=bytes=0- -> 206\",\"SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 200\",\"SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 403\",\"SCHEME label=other origin=- method=GET path=/b/img_main range=- -> 403\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/mut_main range=- -> 200\",\"SCHEME label=other origin=- method=GET path=/b/audio_main range=bytes=0- -> 403\",\"SCHEME label=main origin=http://tauri.localhost method=GET path=/b/mut_main range=- -> 410\",\"SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 403\",\"SCHEME label=main origin=- method=GET path=/b/audio_main range=bytes=0- -> 206\",\"SCHEME label=main origin=- method=GET path=/b/audio_main range=bytes=15859712- -> 206\"]",
+          "name": "labels seen",
+          "ok": true
+        }
+      ],
+      "window": "main"
+    }
+  ],
+  "scheme_log": [
+    "SCHEME label=main origin=- method=GET path=/b/img_main range=- -> 200",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=bytes=0-99 -> 206",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 200",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 403",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 403",
+    "SCHEME label=main origin=- method=GET path=/b/img_other range=- -> 403",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/does_not_exist range=- -> 404",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/etc range=- -> 400",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/audio_main range=- -> 416",
+    "SCHEME label=other origin=- method=GET path=/b/img_other range=- -> 200",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/audio_main range=bytes=0- -> 206",
+    "SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_other range=- -> 200",
+    "SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=other origin=- method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/mut_main range=- -> 200",
+    "SCHEME label=other origin=- method=GET path=/b/audio_main range=bytes=0- -> 403",
+    "SCHEME label=main origin=http://tauri.localhost method=GET path=/b/mut_main range=- -> 410",
+    "SCHEME label=other origin=http://tauri.localhost method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=main origin=- method=GET path=/b/audio_main range=bytes=0- -> 206",
+    "SCHEME label=main origin=- method=GET path=/b/audio_main range=bytes=15859712- -> 206",
+    "SCHEME label=main origin=http://127.0.0.1:59563 method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=main origin=http://127.0.0.1:59563 method=GET path=/b/img_main range=bytes=0-9 -> 403",
+    "SCHEME label=main origin=http://127.0.0.1:59563 method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=main origin=http://127.0.0.1:59563 method=GET path=/b/img_main range=- -> 403",
+    "SCHEME label=main origin=- method=GET path=/b/img_main range=- -> 200",
+    "SCHEME label=main origin=http://127.0.0.1:59563 method=GET path=/b/zzdone range=- -> 204"
+  ]
+}
