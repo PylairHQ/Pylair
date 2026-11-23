@@ -650,7 +650,15 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
       blobArmed = false;
       return;
     }
-    const EXPECTED = new TextEncoder().encode("pylair-blob-reference-payload");
+    // The fixture's 1x1 RGBA PNG — the <img> step needs bytes the
+    // engine can decode or it fires error, not load.
+    const EXPECTED = new Uint8Array([
+      137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+      0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0,
+      0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 96, 0, 0,
+      0, 5, 0, 1, 165, 246, 69, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+      66, 96, 130,
+    ]);
     const bytesEq = (buf: ArrayBuffer, want: Uint8Array, step: string) => {
       const got = new Uint8Array(buf);
       if (got.length !== want.length)

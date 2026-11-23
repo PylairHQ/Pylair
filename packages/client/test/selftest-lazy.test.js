@@ -86,7 +86,13 @@ test("flag set, chunk missing: reports a failing verdict and rejects", { timeout
 // and mediaUrl()'s blob: URL. Node has fetch/Response/Blob but no Image
 // and no scheme server, so these stand in per test. `webviewState` is
 // the shared flag the bridge mock flips when python_release_blob lands.
-const BLOB_BYTES = new TextEncoder().encode("pylair-blob-reference-payload");
+const BLOB_BYTES = new Uint8Array([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+  0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0,
+  0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 96, 0, 0,
+  0, 5, 0, 1, 165, 246, 69, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+  66, 96, 130,
+]);
 const webviewState = { released: false };
 let savedFetch, savedImage;
 
