@@ -273,6 +273,9 @@ async fn per_blob_bytes_cap() {
         .unwrap_err();
     assert_limit(&err, "blob_bytes");
     assert!(err.message.contains("PYLAIR_MAX_BLOB_BYTES"));
+    // The rejected payload was unlinked at the post-containment
+    // rejection — an over-cap result must not leak uncounted disk.
+    assert_eq!(gen_dir_files(&root), 0, "rejected payload must be unlinked");
 
     h.shutdown().await;
 }
@@ -420,11 +423,11 @@ async fn orphan_ids_released_on_replaced_response() {
         blob_registered(&h, &keep),
         "the pre-existing handle must still be live"
     );
-    // Orphan files are unlinked. The one extra file is the REJECTED
-    // register's payload — Python materializes before the register
-    // lands, and its untrusted path never got a registry entry, so
-    // nothing may unlink it; the generation-end sweep owns it.
-    assert_eq!(gen_dir_files(&root), 2, "orphan files must be unlinked");
+    // Every orphan file is gone: the released ids' payloads are
+    // unlinked by the registry, and the rejected register's own
+    // payload was unlinked at the post-containment rejection — only
+    // the still-live `keep` blob's file remains.
+    assert_eq!(gen_dir_files(&root), 1, "orphan files must be unlinked");
 
     h.shutdown().await;
 }
@@ -473,12 +476,12 @@ async fn orphan_ids_released_on_replaced_chunk() {
     assert_limit(&err, "blob_handles");
 
     // The refused chunk's two registered ids are released; chunk 1's
-    // handle — already delivered — stays live. (Two files: the live
-    // one plus the rejected register's untracked payload — generation
-    // sweep territory, not something a path-untrusted unlink may touch.)
+    // handle — already delivered — stays live. One file on disk: the
+    // rejected register's payload was unlinked at the post-containment
+    // rejection.
     assert_eq!(live_blobs(&h), 1);
     assert!(blob_registered(&h, &keep));
-    assert_eq!(gen_dir_files(&root), 2);
+    assert_eq!(gen_dir_files(&root), 1);
 
     h.shutdown().await;
 }

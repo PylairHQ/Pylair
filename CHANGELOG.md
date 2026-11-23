@@ -19,7 +19,9 @@ what the GitHub releases page publishes.
   producer is cancelled the way a client cancel would. Ids that
   registered inside a frame that never reaches the page (an earlier tag
   in the same multi-blob frame, or a dropped terminal) are released
-  immediately instead of leaking handle slots until the window closes.
+  immediately instead of leaking handle slots until the window closes,
+  and a payload rejected after the containment check is unlinked on the
+  spot so an over-limit result can't pile up uncounted disk on retries.
   The share bound now uses the real decision-0005 formula (pool minus
   peers' unclaimed reserves) — the old one could never fire — and
   `SupervisorConfig.blob_limits` can override the env knobs.

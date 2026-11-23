@@ -219,6 +219,32 @@ impl BlobRegistry {
         if !path.starts_with(dir) {
             return Err(Reject::Bad("path outside the blob dir"));
         }
+        // Containment passed: `path` is a canonical file inside this
+        // generation's blob dir. Python materialized the payload before
+        // registering, so a rejection from here leaves the file orphaned
+        // — no registry entry exists to clean it up and `blob_total`
+        // never counted it. Unlink it now (the generation-end sweep is
+        // too late: retries of an over-limit result would pile up
+        // uncounted megabytes). The guard is a paranoid alias check —
+        // a buggy backend could send a live blob's path under a new id.
+        let res = self.register_contained(params, path.clone(), owner);
+        if res.is_err() && !self.blobs.values().any(|b| b.path == path) {
+            let _ = std::fs::remove_file(&path);
+        }
+        res
+    }
+
+    /// The post-containment half of `register()`: `path` is already
+    /// canonicalized and proven inside the generation dir. Any `Err`
+    /// here is a rejection of the payload itself, so the caller unlinks
+    /// the file.
+    fn register_contained(
+        &mut self,
+        params: &Value,
+        path: PathBuf,
+        owner: &str,
+    ) -> Result<(), Reject> {
+        let id = params["id"].as_str().unwrap_or("");
         let mime = params["mime"].as_str().unwrap_or(DEFAULT_MIME);
         if mime.is_empty()
             || !mime
