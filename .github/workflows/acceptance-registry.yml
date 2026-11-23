@@ -84,7 +84,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           ACCEPTANCE='{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"windows-latest","build_shell":"pwsh"},{"os":"macos-latest"},{"os":"macos-15-intel"}]}'
-          WRAP='{"os":["ubuntu-22.04","windows-latest","macos-latest"],"framework":["command","gradio","streamlit"],"include":[{"os":"ubuntu-22.04","bundles":"deb"},{"os":"windows-latest","bundles":"nsis"},{"os":"macos-latest","bundles":"app"},{"os":"windows-latest","framework":"command","build_shell":"pwsh"}]}'
+          WRAP='{"os":["ubuntu-22.04","windows-latest"],"framework":["command","gradio","streamlit"],"include":[{"os":"ubuntu-22.04","bundles":"deb"},{"os":"windows-latest","bundles":"nsis"},{"os":"windows-latest","framework":"command","build_shell":"pwsh"}]}'
           if [ "$EVENT" != "workflow_dispatch" ]; then
             ACCEPTANCE=$(jq -c '.include |= map(select(.os | startswith("macos") | not))' <<<"$ACCEPTANCE")
             WRAP=$(jq -c '.os |= map(select(startswith("macos") | not)) | .include |= map(select(.os | startswith("macos") | not))' <<<"$WRAP")
@@ -980,7 +980,9 @@ jobs:
       # and run the app), and a pwsh build leg for windows/command (the bridge
       # matrix runs a second Windows leg under pwsh so System32 bsdtar
       # ordering gets exercised on `pylair build`; one leg covers it here, the
-      # other Windows legs build on bash). macOS only on manual dispatch.
+      # other Windows legs build on bash). macOS: see
+      # `wrap-acceptance-macos` below — one job, three frameworks, dispatch
+      # only (hosted arm64 runners starve on three separate legs).
       matrix: ${{ fromJSON(needs.plan.outputs.wrap) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1194,3 +1196,112 @@ jobs:
           if (-not (Select-String -Path $out -Pattern 'wrap-self-test: ok' -Quiet)) {
             Write-Error 'no "wrap-self-test: ok" verdict in the output'; exit 1
           }
+
+  # macOS: ONE job scaffolds, builds, installs and self-tests command, gradio
+  # and streamlit in sequence (scripts/wrap-acceptance/run-macos-registry.sh) —
+  # the same consolidation ci.yml made: three separate legs starved on the
+  # hosted arm64 pool (two registry-wrap legs were cancelled in a day with
+  # "The job was not acquired by Runner of type hosted even after multiple
+  # attempts"). Each framework is its own step and runs even when an earlier
+  # one failed; the job fails at the end if any did. The three builds share
+  # one Rust target dir, so tauri compiles once. Dispatch only: push runs
+  # carry no macOS wrap coverage, before or after this change.
+  wrap-acceptance-macos:
+    name: registry-wrap (macos-latest, ${{ inputs.source || 'pack' }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/wrap-target
+      EXPECT: ${{ inputs.expect_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          # Only pack mode runs `pnpm install` in the workspace; in
+          # registry mode the store dir never exists and setup-node's
+          # post-job cache save fails the whole leg.
+          cache: ${{ (inputs.source || 'pack') == 'pack' && 'pnpm' || '' }}
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+          # One uv cache for the job: gradio and streamlit wheels are the
+          # slow part, and the shared cache now warms all three frameworks.
+          cache-suffix: wrap-registry-macos
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+
+      - name: Build workspace packages
+        if: ${{ (inputs.source || 'pack') == 'pack' }}
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+
+      - name: npm-pack the packages the wrap app needs
+        if: ${{ (inputs.source || 'pack') == 'pack' }}
+        shell: bash
+        run: |
+          # A wrap app depends on @pylair/cli only (no @pylair/client,
+          # nothing talks to the bridge), plus create-pylair to scaffold.
+          mkdir -p packs
+          PACKS=$(pwd)/packs
+          for p in packages/cli packages/create-pylair; do
+            (cd "$p" && npm pack --pack-destination "$PACKS" >/dev/null)
+          done
+          ls -la packs
+
+      # rust-cache wants a Cargo workspace to key on: scaffold one app now
+      # (run-macos-registry.sh scaffolds each framework afresh; the shared
+      # target dir lives outside it).
+      - name: Scaffold an app for the Rust cache key
+        shell: bash
+        run: |
+          if [ "$SOURCE" = pack ]; then
+            mkdir -p cp-src
+            tar -xzf packs/create-pylair-*.tgz -C cp-src
+            node cp-src/package/dist/index.js wrap-app --mode wrap
+          else
+            npx -y create-pylair@next wrap-app --mode wrap
+          fi
+      # Distinct shared-key from ci.yml's `wrap-macOS`: the resolved crate
+      # here is the published one, not a path dep.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: wrap-app/src-tauri
+          shared-key: wrap-registry-macOS
+
+      - name: "registry wrap: command (FastAPI)"
+        id: command
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos-registry.sh command
+      - name: "registry wrap: gradio"
+        id: gradio
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos-registry.sh gradio
+      - name: "registry wrap: streamlit"
+        id: streamlit
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/wrap-acceptance/run-macos-registry.sh streamlit
+      - name: Fail the job if any framework failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          COMMAND: ${{ steps.command.outcome }}
+          GRADIO: ${{ steps.gradio.outcome }}
+          STREAMLIT: ${{ steps.streamlit.outcome }}
+        run: |
+          failed=""
+          for f in COMMAND GRADIO STREAMLIT; do
+            [ "${!f}" = "success" ] || failed="$failed $f(${!f})"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::macOS registry-wrap frameworks that did not pass:$failed"
+            exit 1
+          fi
+          echo "command, gradio and streamlit all passed on macOS"
