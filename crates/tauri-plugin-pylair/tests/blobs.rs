@@ -79,6 +79,13 @@ fn assert_base_headers(h: &HeaderMap) {
     assert_eq!(hdr(h, "access-control-allow-origin"), APP_ORIGIN);
     assert_eq!(hdr(h, "vary"), "Origin");
     assert_eq!(hdr(h, "accept-ranges"), "bytes");
+    // The fetch is always cross-origin: without expose-headers CORS
+    // hides Content-Range from Response.headers (the self-test's range
+    // assertion saw null on every OS before this).
+    assert_eq!(
+        hdr(h, "access-control-expose-headers"),
+        "Accept-Ranges, Content-Range"
+    );
     assert_eq!(hdr(h, "cache-control"), "no-store");
     assert_eq!(hdr(h, "x-content-type-options"), "nosniff");
     assert_ne!(hdr(h, "access-control-allow-origin"), "*");

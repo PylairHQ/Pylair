@@ -9,7 +9,7 @@
  * `PythonError`, `ipc` and `CMD` is inside a function body.
  */
 
-import { call, cancel, health, LimitExceededError, onApp, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
+import { BlobHandle, call, cancel, health, LimitExceededError, onApp, onHealth, onStderr, PERMISSION_DENIED, PermissionDeniedError, PythonError, stream } from "./index.js";
 import { CMD, ipc, liveTasks } from "./internal.js";
 
 // ---- installed-webview self-test --------------------------------------------
@@ -624,6 +624,161 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   if (!modelsArmed && checks["models"] === "ok")
     checks["models"] =
       "skipped: backend has no models fixtures (resolved pylair predates the model manager)";
+  // Blob URLs (decisions 0010): the fixture returns a small Blob whose
+  // $blob tag decodes to a BlobHandle. The whole fetch surface is
+  // asserted through the REAL webview — full fetch, a ranged 206,
+  // stream() reassembly, an <img> element load, a mediaUrl() blob: URL,
+  // release() then a refused fetch, and win-b's fetch of the same URL
+  // refused by owner binding. A -32601 fixture is the pack/registry
+  // skip; a result arriving as plain bytes is the older-host $b64
+  // downgrade — also a skip. Needs pylair >= 0.1.0rc15 (Blob),
+  // crate >= 0.1.0-rc.23 (registry + scheme) and the client that
+  // decodes it — CI arms PYLAIR_BLOB_EXPECTED on the same gate.
+  let blobArmed = true;
+  await run("blob", async () => {
+    let res: unknown;
+    try {
+      res = await within(call("make_blob"), 30_000, "make_blob");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) {
+        blobArmed = false;
+        return;
+      }
+      throw e;
+    }
+    if (!(res instanceof BlobHandle)) {
+      blobArmed = false;
+      return;
+    }
+    // The fixture's 1x1 RGBA PNG — the <img> step needs bytes the
+    // engine can decode or it fires error, not load.
+    const EXPECTED = new Uint8Array([
+      137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+      0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0,
+      0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 96, 0, 0,
+      0, 5, 0, 1, 165, 246, 69, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+      66, 96, 130,
+    ]);
+    const bytesEq = (buf: ArrayBuffer, want: Uint8Array, step: string) => {
+      const got = new Uint8Array(buf);
+      if (got.length !== want.length)
+        throw new Error(`${step}: ${got.length} bytes, expected ${want.length}`);
+      for (let i = 0; i < got.length; i++)
+        if (got[i] !== want[i])
+          throw new Error(`${step}: byte ${i} differs (${got[i]} != ${want[i]})`);
+    };
+    if (res.size !== EXPECTED.length)
+      throw new Error(`decode: size ${res.size}, expected ${EXPECTED.length}`);
+    if (res.mime !== "image/png")
+      throw new Error(`decode: mime ${JSON.stringify(res.mime)}, expected "image/png"`);
+    const url = res.url;
+    // Relay the id NOW so win-b can fetch this blob while it is alive —
+    // owner binding (403) is only observable on a live registry entry.
+    await within(call("selftest_blob_store", { id: res.id }), 30_000, "selftest_blob_store");
+    // A raw fetch rejection names nothing — label each step so the
+    // verdict's fail:<step> locates it (a bare "Failed to fetch" was
+    // opaque on the first CI round).
+    const stepFetch = (init: RequestInit | undefined, step: string) =>
+      fetch(url, init).then(
+        (r) => r,
+        (e: unknown) => {
+          throw new Error(`${step}: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      );
+    // Full fetch → 200 + exact bytes.
+    const full = await within(stepFetch(undefined, "fetch"), 15_000, "fetch");
+    if (full.status !== 200)
+      throw new Error(`fetch: status ${full.status}, expected 200`);
+    bytesEq(await full.arrayBuffer(), EXPECTED, "fetch");
+    // Range fetch → 206 + exact slice + Content-Range.
+    const rng = await within(
+      stepFetch({ headers: { Range: "bytes=2-7" } }, "range"),
+      15_000,
+      "range fetch",
+    );
+    if (rng.status !== 206)
+      throw new Error(`range: status ${rng.status}, expected 206`);
+    if (rng.headers.get("content-range") !== `bytes 2-7/${EXPECTED.length}`)
+      throw new Error(
+        `range: content-range ${JSON.stringify(rng.headers.get("content-range"))}, expected "bytes 2-7/${EXPECTED.length}"`,
+      );
+    bytesEq(await rng.arrayBuffer(), EXPECTED.subarray(2, 8), "range");
+    // stream() reassembles the exact bytes over ranged reads.
+    bytesEq(await new Response(res.stream()).arrayBuffer(), EXPECTED, "stream");
+    // An <img> load — the element path every platform must serve (the
+    // WebKitGTK media case is mediaUrl()'s, covered just below).
+    const Img = (
+      globalThis as {
+        Image?: new () => {
+          onload: (() => void) | null;
+          onerror: (() => void) | null;
+          src: string;
+        };
+      }
+    ).Image;
+    if (!Img) throw new Error("img: no Image constructor in this webview");
+    await within(
+      new Promise<void>((resolve, reject) => {
+        const img = new Img();
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("img: element fired error"));
+        img.src = url;
+      }),
+      15_000,
+      "img load",
+    );
+    // mediaUrl() — a blob: object URL whose fetched bytes match.
+    const mu = await within(res.mediaUrl(), 15_000, "mediaUrl");
+    if (!mu.startsWith("blob:"))
+      throw new Error(`mediaUrl: ${JSON.stringify(mu)} is not a blob: URL`);
+    const muRes = await within(
+      fetch(mu).then(
+        (r) => r,
+        (e: unknown) => {
+          throw new Error(`mediaUrl fetch: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      ),
+      15_000,
+      "mediaUrl fetch",
+    );
+    bytesEq(await muRes.arrayBuffer(), EXPECTED, "mediaUrl");
+    // win-b's fetch of OUR blob must be refused — owner binding. Its
+    // verdict travels through Python-side state (selftest_blob_verdict),
+    // not the b-report: the report is bound to win-b's own routine
+    // timing and awaiting it here would stall window-fairness's
+    // rendezvous. The verdict must land BEFORE release(): a 403 needs
+    // a live registry entry — a post-release fetch would 404 on
+    // absence alone and prove nothing about binding.
+    let verdict = "";
+    for (let i = 0; i < 240; i++) {
+      verdict = await within(
+        call<string>("selftest_blob_verdict", {}),
+        30_000,
+        "selftest_blob_verdict",
+      );
+      if (verdict) break;
+      await sleep(500);
+    }
+    if (!verdict.startsWith("refused"))
+      throw new Error(
+        `cross-window: win-b did not report a refusal (verdict ${JSON.stringify(verdict || "<none in 120s>")})`,
+      );
+    // release() frees it — the next fetch of the same URL must fail.
+    await res.release();
+    const post = await within(
+      fetch(url).then(
+        (r) => `HTTP ${r.status}`,
+        (e: unknown) => `network error (${e instanceof Error ? e.message : String(e)})`,
+      ),
+      15_000,
+      "post-release fetch",
+    );
+    if (post !== "HTTP 404" && !post.startsWith("network error"))
+      throw new Error(`release: post-release fetch gave ${post}, expected 404 or a network error`);
+  });
+  if (!blobArmed && checks["blob"] === "ok")
+    checks["blob"] =
+      "skipped: backend has no make_blob fixture, or the resolved host predates blob URLs (result came back as $b64 bytes)";
   await run("event-scoping", async () => {
     const b = await within(bReport, 30_000, "win-b report");
     if ((b.sawEvents ?? 0) !== 0)
@@ -930,8 +1085,82 @@ async function selfTestIntruder(spec: SelfTestSpec): Promise<void> {
   // The report cannot ride emit/emitTo: a `core:event:deny-emit(-to)` entry
   // (as the default template ships) denies those commands origin-wide —
   // Tauri ignores window scoping for denials — so win-b relays through an
-  // ACL-checked command whose Rust side emits for it.
+  // ACL-checked command whose Rust side emits for it. It must land NOW —
+  // the owner awaits it inside window-fairness/event-scoping — so it goes
+  // out BEFORE the blob probe below: that probe waits on the owner's own
+  // later progress (the blob check's selftest_blob_store), and holding
+  // the report behind it deadlocks the owner's 60s await.
   await invoke("plugin:pylair|python_selftest_b_report", {
     report: { sawEvents, everCancelled, anyGrantSucceeded, seenSample, sawStderr, sawStderrAny, denyProbe, fairnessProbe },
   }).catch(() => {});
+
+  // Blob owner-binding probe (decisions 0010): the owner's "blob" check
+  // relays a live blob id through selftest_blob_store; this window reads
+  // it back via selftest_blob_id, fetches that URL, and records the
+  // outcome via selftest_blob_outcome — all Python-side state (the
+  // b_seen/holds_active pattern), so neither window's report or check
+  // timing couples to the other's progress. A live registry entry must
+  // refuse a foreign window: 403 (or a fetch-layer rejection, recorded
+  // as refused) is the pass; a 200 means the blob served a non-owner.
+  {
+    const blobUrl = (id: string) => {
+      // Mirrors BlobHandle.url / convertFileSrc: Windows/Android get
+      // http://<scheme>.localhost, everything else <scheme>://localhost.
+      const ua = navigator.userAgent;
+      const base =
+        ua.includes("Windows") || ua.includes("Android")
+          ? "http://pylair-blob.localhost"
+          : "pylair-blob://localhost";
+      return `${base}/b/${id}`;
+    };
+    let verdict: string;
+    let id: string | undefined;
+    let missing = false;
+    let pollError: string | undefined;
+    // Quiet gate first: a selftest_blob_* poll is a real task, and one
+    // landing while main's window-fairness flood is still in flight
+    // would tip the global count to the cap — the refused call would
+    // then name the global cap instead of window_share. health() is a
+    // host command: waiting here costs no slot. A host predating
+    // python_health proceeds immediately — a crate that old predates
+    // blob URLs anyway, so the fixture poll below answers -32601.
+    let quiet = false;
+    for (let i = 0; i < 240 && !quiet; i++) {
+      quiet = await health().then(
+        (h) => h.load.tasks === 0,
+        () => true, // health-less host: an old crate predates blob URLs anyway
+      );
+      if (!quiet) await sleep(250);
+    }
+    for (let i = 0; i < 240 && id === undefined && !missing && pollError === undefined; i++) {
+      const v = await call<string>("selftest_blob_id", {}).then(
+        (s) => ({ s }),
+        (e: unknown) =>
+          e instanceof PythonError && e.code === -32601
+            ? ({ missing: true } as const)
+            : ({ err: e instanceof Error ? e.message : String(e) } as const),
+      );
+      if ("missing" in v) missing = true;
+      else if ("err" in v) pollError = v.err;
+      else if (v.s) id = v.s;
+      else await sleep(500);
+    }
+    if (missing) verdict = "skipped: no selftest_blob_id fixture";
+    else if (pollError !== undefined) verdict = `error: ${pollError}`;
+    else if (id === undefined) verdict = "error: no blob id relayed within 120s";
+    else {
+      // try/catch, not just .then(onErr): AbortSignal.timeout itself
+      // throws on a webview too old to carry it.
+      try {
+        verdict = await fetch(blobUrl(id), { signal: AbortSignal.timeout(15_000) }).then(
+          (r) =>
+            r.status === 403 || r.status === 404 ? `refused:${r.status}` : `served:${r.status}`,
+          (e: unknown) => `refused:neterr:${e instanceof Error ? e.message : String(e)}`,
+        );
+      } catch (e) {
+        verdict = `error: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    await call("selftest_blob_outcome", { v: verdict }).catch(() => {});
+  }
 }
