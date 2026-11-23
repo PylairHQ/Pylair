@@ -1870,17 +1870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "__APP_NAME__"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-pylair",
-]
-
-[[package]]
 name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2630,6 +2619,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "__APP_NAME__"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-pylair",
 ]
 
 [[package]]
@@ -3473,9 +3473,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.21"
+version = "0.1.0-rc.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b949ad3986693f2e0ef75993752497da68d97d841863730809df6c3b809f585"
+checksum = "206da96cb2a2b9f2bfff4d546fd2063ae981662120aa81677d0ed4ad6864cc39"
 dependencies = [
  "async-trait",
  "dunce",

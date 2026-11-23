@@ -421,15 +421,17 @@ Merged since rc.17 (d7daaaf):
   `fetch()`/`path()`, resumable verified downloads into the app data
   dir with readiness progress, cross-origin credential stripping,
   https-only — and PR 153's warm-worker reentrancy fix).
-  `pylair-ollama` stays `0.1.0-rc.3`. Remaining order:
+  `pylair-ollama` stays `0.1.0-rc.3`. The crate `0.1.0-rc.22` is
+  published on crates.io (checksum `206da96c…4cc39`) and `pylair
+  0.1.0rc14` on PyPI. This pins commit (PR 155) moves the npm trio
+  to `0.1.0-rc.28`, the scaffold pins to `rs =0.1.0-rc.22` /
+  `py pylair==0.1.0rc14`, and regenerates both template `Cargo.lock`
+  files against the published crate. Remaining order:
 
-  1. publish the crate `0.1.0-rc.22` on crates.io;
-  2. publish `pylair 0.1.0rc14` on PyPI;
-  3. the pins PR — npm trio `0.1.0-rc.28`, scaffold pins `rs
-     =0.1.0-rc.22` / `py pylair==0.1.0rc14`, template `Cargo.lock`
-     regenerated against the published crate;
-  4. the npm trio under `--tag next`;
-  5. registry acceptance with `source=registry` and
+  1. pack-mode acceptance green on this commit (scaffolded pins
+     resolve crate rc.22 + pylair rc14, both live);
+  2. the npm trio under `--tag next`;
+  3. registry acceptance with `source=registry` and
      `expect_version 0.1.0-rc.28` — the first run where
      `PYLAIR_MODELS_EXPECTED` arms (resolved pylair ≥ 0.1.0rc14 AND
      crate ≥ 0.1.0-rc.22), so a `models` skip fails the leg on every
