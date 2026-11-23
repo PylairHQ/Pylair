@@ -12,12 +12,20 @@ what the GitHub releases page publishes.
   `test_warm.py` keep their event waits (WORKER_DIED, pidfiles,
   respawn results) under one generous hang-guard bound instead of the
   10 s receive default that starved macOS runners blew. The
-  `warm-workers` self-test check — and the matching
-  `test_warm_interruptible_call_survives_cancel` — now asserts the
-  whole 0008 §2 contract on POSIX: a response inside `cancel_grace_ms`
-  must be `cancelled` + the same member, silence past the grace must
-  be `terminated` + a respawned member; either pairing proves the
-  documented path and a mismatched pairing still fails.
+  `warm-workers` self-test check — and the interrupt-first cancel
+  tests — now assert the whole 0008 §2 contract on POSIX: a response
+  inside `cancel_grace_ms` must be `cancelled` + the same member,
+  silence past the grace must be `terminated` + a respawned member;
+  either pairing proves the documented path and a mismatched pairing
+  still fails.
+- CI: `acceptance-registry.yml` folds the three per-framework
+  `macos-latest` wrap legs into one `wrap-acceptance-macos` job that
+  runs command, gradio and streamlit in sequence
+  (`scripts/wrap-acceptance/run-macos-registry.sh`, one framework per
+  step) — matching the consolidation ci.yml already had. Hosted arm64
+  acquisition cancelled two legs in a day; dispatch macos-latest jobs
+  go 4 → 2. Linux/Windows keep per-framework legs; `macos-15-intel`
+  untouched.
 
 ## npm-v0.1.0-rc.29 (2026-11-23)
 

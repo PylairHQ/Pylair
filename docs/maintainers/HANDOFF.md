@@ -554,6 +554,13 @@ jobs were moved and merged (details in AGENTS.md, "Build / lint / test"):
   checks are gated per step so they keep reporting (see AGENTS.md).
 - `acceptance-registry.yml`: push runs Linux and Windows only; a manual
   dispatch keeps the whole matrix. A `plan` job builds the matrices.
+  The wrap matrix dropped macOS too: three per-framework legs starved
+  on the hosted arm64 pool (two were cancelled on acquisition in one
+  day), so `wrap-acceptance-macos` runs command/gradio/streamlit in
+  sequence via `scripts/wrap-acceptance/run-macos-registry.sh` — the
+  same shape as ci.yml's consolidated job, parametrized on SOURCE
+  (pack/registry) and EXPECT (expect_version). Dispatch macos-latest
+  jobs: 4 → 2 (the bridge `acceptance` leg is the other).
 - If macOS legs still starve, the next lever is the bridge `acceptance`
   job's two macOS legs (scaffold, reference), which were left as they were.
 
