@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import inspect
 import os
 import signal
@@ -36,6 +37,11 @@ MAX_ISOLATED_WORKERS = int(os.environ.get("PYLAIR_MAX_ISOLATED_WORKERS", "8"))
 # this large ends the stream with a typed error instead (RC.8A).
 from pylair._transport import MAX_DEPTH, MAX_FRAME
 
+# Test fault hook (spawned-runtime env): "eperm" makes _killpg raise
+# PermissionError — the macOS zombie-group EPERM that once escaped
+# _kill_proc and left a warm call without a terminal response.
+_KILLPG_FAULT = os.environ.get("PYLAIR_KILLPG_FAULT", "")
+
 # The private worker channel uses the same 4-byte big-endian prefix as
 # the host<->runtime framing (_transport._LEN) — internal protocol.
 _LEN = struct.Struct(">I")
@@ -43,6 +49,17 @@ _LEN = struct.Struct(">I")
 
 def _log(msg: str) -> None:
     print(f"[pylair] {msg}", file=sys.stderr, flush=True)
+
+
+def _killpg(pid: int, sig: int) -> None:
+    """killpg with the fault hook applied — lets the POSIX signal paths
+    be exercised off-macOS under PYLAIR_KILLPG_FAULT. "eperm" raises
+    PermissionError on the escalation signals only (SIGINT stays live):
+    the real chain was interrupt lands, member exits, the kill path's
+    killpg then hits a zombie's group — EPERM on macOS."""
+    if _KILLPG_FAULT == "eperm" and sig != signal.SIGINT:
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+    os.killpg(pid, sig)
 
 
 def _is_int_id(task_id: Any) -> bool:
@@ -511,7 +528,12 @@ class TaskRegistry:
                 self._forward_blob_regs(task, payload)
                 self._finish(task, proto.response(task.call_id, payload["result"]))
         except asyncio.CancelledError:
-            await self._kill_worker(task)
+            # The kill must not cost the terminal — same guarantee as
+            # the warm path's cleanup.
+            try:
+                await self._kill_worker(task)
+            except BaseException as e:  # noqa: BLE001
+                _log(f"isolated worker kill after cancel failed: {e!r}")
             self._finish(
                 task,
                 proto.error_response(
@@ -607,8 +629,13 @@ class TaskRegistry:
                 # the crash-loop limit. The kill path is the same one
                 # process mode uses (SIGTERM->SIGKILL group / taskkill).
                 member.killed = True
-                await self._kill_worker(task)
-                await self._drop_warm_member(pool, member)
+                # Cleanup must never cost the terminal: a raise here
+                # still owes the caller TASK_CANCELLED.
+                try:
+                    await self._kill_worker(task)
+                    await self._drop_warm_member(pool, member)
+                except BaseException as e:  # noqa: BLE001
+                    _log(f"warm member cleanup after cancel failed: {e!r}")
             self._finish(
                 task,
                 proto.error_response(
@@ -640,9 +667,18 @@ class TaskRegistry:
             return
         except BaseException as e:  # noqa: BLE001 - any failure gets a terminal
             # Channel broke, spawn failed, or the worker died mid-call —
-            # drop the suspect member (counted) and respawn lazily.
+            # drop the suspect member (counted) and respawn lazily. The
+            # drop must not cost the terminal: an EPERM from killpg on a
+            # zombie's group (macOS) once escaped here and the caller
+            # waited forever.
             if member is not None:
-                await self._drop_warm_member(pool, member)
+                try:
+                    await self._drop_warm_member(pool, member)
+                except BaseException as cleanup_err:  # noqa: BLE001
+                    _log(
+                        f"warm member drop after {type(e).__name__} failed: "
+                        f"{cleanup_err!r}"
+                    )
             data: dict[str, Any] = {"type": type(e).__name__}
             if member is not None and member.stderr_tail:
                 # The member's last stderr lines — a crash on import or
@@ -906,7 +942,12 @@ class TaskRegistry:
         for pool in self._pools.values():
             for m in list(pool.members):
                 m.killed = True
-                await self._drop_warm_member(pool, m)
+                # One member's reap error must not orphan the rest of
+                # the sweep.
+                try:
+                    await self._drop_warm_member(pool, m)
+                except BaseException as e:  # noqa: BLE001
+                    _log(f"warm member {m.proc.pid} reap failed: {e!r}")
 
     def _stop_pool(self, pool: _WarmPool) -> None:
         """Crash-loop limit: fail-fast the pool (0008 §1). A prewarmed
@@ -1023,7 +1064,7 @@ class TaskRegistry:
         if proc is None or proc.returncode is not None or sys.platform == "win32":
             return
         try:
-            os.killpg(proc.pid, signal.SIGINT)
+            _killpg(proc.pid, signal.SIGINT)
         except (ProcessLookupError, OSError) as e:
             _log(f"warm interrupt for task {task.id} failed: {e!r}")
 
@@ -1058,7 +1099,7 @@ class TaskRegistry:
             if rc != 0:
                 try:
                     proc.kill()
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
             try:
                 await asyncio.wait_for(
@@ -1071,16 +1112,20 @@ class TaskRegistry:
                 )
                 try:
                     proc.kill()
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except TimeoutError:
                     _log(f"worker {proc.pid} survived kill - abandoning reap")
             return
+        # A signal that can't be delivered must never propagate: ESRCH
+        # means the group is gone; EPERM is what macOS raises on our own
+        # child's group once the child is a zombie — already dead either
+        # way, so the bounded reap below is still the right next step.
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
+            _killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             pass
         try:
             await asyncio.wait_for(proc.wait(), timeout=self._budget(ISOLATED_GRACE_S))
@@ -1090,12 +1135,12 @@ class TaskRegistry:
         # not the leader already exited on SIGTERM — a grandchild ignoring
         # SIGTERM must not survive.
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            _killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
             pass
         try:
             proc.kill()
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         await proc.wait()
 

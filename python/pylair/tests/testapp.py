@@ -260,6 +260,22 @@ def warm_interrupt_immune(seconds: float, pidfile: str | None = None) -> str:
     return "slept"
 
 
+@expose(worker={"mode": "warm"})
+def warm_immune_then_crash(die_after: float, pidfile: str | None = None) -> None:
+    """SIGINT-immune member that dies on its own mid-grace — the cancel
+    kill path then hits a zombie's group (EPERM on macOS), the exact
+    chain behind the lost-terminal wedge."""
+    import signal as _signal
+
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    if sys.platform == "win32":
+        _signal.signal(_signal.SIGBREAK, _signal.SIG_IGN)
+    if pidfile:
+        _write_pidfile(pidfile, os.getpid())
+    time.sleep(die_after)
+    os._exit(3)
+
+
 @expose(worker={"mode": "warm", "cancel_grace_ms": 150})
 def warm_immune_fastgrace(seconds: float, pidfile: str | None = None) -> str:
     """Same ignoring worker with a 150 ms grace — proves the configured

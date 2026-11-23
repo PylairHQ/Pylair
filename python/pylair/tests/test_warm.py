@@ -1078,6 +1078,63 @@ def test_warm_worker_died_includes_stderr_tail(runtime):
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_warm_death_with_killpg_eperm_still_reports_and_respawns(tmp_path):
+    """The macOS wedge, reproduced: a member that crashes to a zombie
+    leaves a process group on which killpg raises PermissionError, not
+    ProcessLookupError. Before the fix that escaped _kill_proc and the
+    except handler — the call task ended without a terminal and the
+    caller waited forever. The terminal must now be unconditional."""
+    with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        rt.recv(timeout=_HANG_S)
+        rt.send(call(1, "warm_crash_stderr", task=1, input={"marker": "EPERM_FIRST"}))
+        resp = rt.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
+        assert resp["error"]["code"] == proto.WORKER_DIED, (
+            f"call ended without its WORKER_DIED terminal: {resp!r}"
+        )
+        assert "EPERM_FIRST" in resp["error"]["data"]["stderr"], (
+            f"stderr tail missing: {resp['error']['data']!r}"
+        )
+        # The pool respawns: a second call runs on a fresh member and its
+        # own marker lands in the tail — proof the call executed.
+        rt.send(call(2, "warm_crash_stderr", task=2, input={"marker": "EPERM_SECOND"}))
+        resp = rt.recv_until(lambda m: m.get("id") == 2, timeout=_HANG_S)
+        assert "EPERM_SECOND" in resp["error"]["data"]["stderr"], (
+            f"no respawn — second marker absent: {resp['error']['data']!r}"
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_warm_cancel_with_killpg_eperm_reports_terminated(tmp_path):
+    """Same EPERM through the cancel path: the member is immune to the
+    interrupt but dies on its own mid-grace, so the kill path hits a
+    zombie's group — the chain that once surfaced as
+    'termination_in_progress' with no call terminal. With signal errors
+    contained the verdict stays 'terminated' and the call still ends."""
+    pidfile = tmp_path / "sleeper.pid"
+    with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        rt.recv(timeout=_HANG_S)
+        rt.send(
+            call(
+                1,
+                "warm_immune_then_crash",
+                task=1,
+                input={"die_after": 1.0, "pidfile": str(pidfile)},
+            )
+        )
+        _wait_pidfile(pidfile)  # member is inside the call
+        rt.send(cancel(9, 1))
+        ack = rt.recv_until(lambda m: m.get("id") == 9, timeout=_HANG_S)
+        assert ack["result"] == {"cancelled": True, "status": "terminated"}, (
+            f"cancel verdict degraded under EPERM: {ack!r}"
+        )
+        # The member self-crashed mid-cancel — WORKER_DIED is the honest
+        # terminal; what matters is that a terminal ARRIVES (the wedge
+        # was its absence).
+        term = rt.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
+        assert term["error"]["code"] == proto.WORKER_DIED
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="posix process groups")
 def test_warm_worker_reaped_on_hard_runtime_death(runtime, tmp_path):
     """A warm member is a long-lived child — when the runtime is SIGKILLed

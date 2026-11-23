@@ -8,6 +8,15 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Fix**: a warm worker crash on macOS could leave the call without a
+  response. A member that exits to a zombie makes `killpg` on its group
+  raise `PermissionError` (EPERM), not `ProcessLookupError` — it escaped
+  `_kill_proc`, the exception handler's cleanup and the task itself, so
+  `WORKER_DIED` (or the cancel's `terminated` verdict, seen as
+  `termination_in_progress`) never reached the caller. `_kill_proc`
+  now tolerates both errors on every signal and still awaits the reap,
+  and every call path runs its cleanup so the terminal frame is
+  unconditional — a task never ends without answering.
 - Warm-worker test determinism: the crash/death/respawn waits in
   `test_warm.py` keep their event waits (WORKER_DIED, pidfiles,
   respawn results) under one generous hang-guard bound instead of the
