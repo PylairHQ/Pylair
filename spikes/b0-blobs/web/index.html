@@ -48,7 +48,6 @@ async function audioSeek(url) {
   a.preload = "auto";
   document.body.appendChild(a);
   await timeout(new Promise((res, rej) => { a.onloadedmetadata = res; a.onerror = () => rej(new Error("audio onerror")); }), 15000);
-  const before = (await invoke("b0_scheme_log")).filter((l) => l.includes("audio_main")).length;
   await timeout(new Promise((res, rej) => { a.onseeked = res; a.onerror = () => rej(new Error("seek error")); a.currentTime = 90.0; }), 12000);
   const lines = (await invoke("b0_scheme_log")).filter((l) => l.includes("audio_main"));
   return { seeked: true, duration: a.duration, audioReqs: lines.length, ranged: lines.filter((l) => l.includes("-> 206") || l.includes("range=bytes")).length, lines };
@@ -88,8 +87,23 @@ async function audioSeek(url) {
   try { const r = await fetchStatus(`${BASE}/../etc`); rec("bad path rejected", r.status === 400, "status " + r.status); }
   catch (e) { rec("bad path rejected", false, e.message); }
 
-  try { const a = await audioSeek(B("audio_main")); rec("audio seek", a.seeked && a.duration > 119 && a.ranged >= 1, `dur=${a.duration} audioReqs=${a.audioReqs} ranged=${a.ranged}`); }
-  catch (e) { rec("audio seek", false, e.message); }
+  // Bounded bodies: a full-body GET of the 21 MiB WAV exceeds the
+  // 1 MiB cap → 416 + Accept-Ranges; an open Range gets a SHORT 206
+  // (4 MiB slice, not the requested 21 MiB) — media stacks re-request.
+  try { const r = await fetchStatus(B("audio_main")); rec("full-body over cap refused", r.status === 416, JSON.stringify(r)); }
+  catch (e) { rec("full-body over cap refused", false, e.message); }
+
+  try { const r = await fetchStatus(B("audio_main"), { Range: "bytes=0-" }); rec("open range → short 206", r.status === 206 && r.len === 4194304, JSON.stringify(r)); }
+  catch (e) { rec("open range → short 206", false, e.message); }
+
+  try { const r = await fetchStatus(B("mut_main")); const ok1 = r.status === 200 && r.len === 4096;
+    await invoke("b0_mutate");
+    const r2 = await fetchStatus(B("mut_main"));
+    rec("mutated source → 410", ok1 && r2.status === 410, `before=${r.status}/${r.len} after=${r2.status}`); }
+  catch (e) { rec("mutated source → 410", false, e.message); }
+
+  try { const a = await audioSeek(B("audio_main")); rec("audio seek (capped ranges)", a.seeked && a.duration > 119 && a.ranged >= 1, `dur=${a.duration} audioReqs=${a.audioReqs} ranged=${a.ranged}`); }
+  catch (e) { rec("audio seek (capped ranges)", false, e.message); }
 
   const schemeLog = await invoke("b0_scheme_log");
   rec("labels seen", schemeLog.every((l) => l.includes("label=main") || l.includes("label=other")), JSON.stringify(schemeLog));
