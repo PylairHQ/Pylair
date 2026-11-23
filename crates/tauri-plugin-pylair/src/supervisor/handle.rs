@@ -481,9 +481,7 @@ impl Handle {
     /// the invoking window's label, never a JS parameter. Idempotent: an
     /// unknown id is Ok(false), a foreign-owned id is PERMISSION_DENIED.
     pub async fn release_blob(&self, id: &str, caller: &str) -> Result<bool, ErrorObj> {
-        self.blobs
-            .lock()
-            .unwrap()
+        crate::blobs::lock_blobs(&self.blobs)
             .release_owned(id, caller)
             .map_err(|_| ErrorObj {
                 code: proto::PERMISSION_DENIED,

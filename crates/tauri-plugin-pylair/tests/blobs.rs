@@ -354,6 +354,92 @@ fn head_serves_headers_only() {
 }
 
 #[test]
+fn zero_byte_blob_no_panic_right_statuses() {
+    let (r, dir) = fixture(small_limits());
+    reg_blob(&r, &dir, "empty", "main", b"");
+    // Any Range on an empty blob is 416 with the object's extent —
+    // bytes=-5 once underflowed `total - 1` and panicked under the lock.
+    for range in ["bytes=0-", "bytes=-5", "bytes=0-0"] {
+        let res = serve(
+            &r,
+            "main",
+            &req("/b/empty", &[("Origin", APP_ORIGIN), ("Range", range)]),
+        );
+        assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(hdr(res.headers(), "content-range"), "bytes */0");
+        assert_base_headers(res.headers());
+    }
+    // No Range → a normal empty 200.
+    let res = serve(&r, "main", &req("/b/empty", &[("Origin", APP_ORIGIN)]));
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.body().is_empty());
+    // The registry still works — the panic would have poisoned its mutex.
+    reg_blob(&r, &dir, "after", "main", b"1");
+    let res = serve(&r, "main", &req("/b/after", &[("Origin", APP_ORIGIN)]));
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[test]
+fn range_on_oversized_blob_serves_exactly_the_cap() {
+    let mut l = small_limits();
+    l.max_range_bytes = 32;
+    let (r, dir) = fixture(l);
+    // 100 bytes > the 8-byte full-body cap: unreadable whole, readable in
+    // capped pieces — and the 206 must carry ONLY the capped window, not
+    // a whole-file read (bounded IO is the point of the two-phase serve).
+    let data: Vec<u8> = (0..100u8).collect();
+    reg_blob(&r, &dir, "big", "main", &data);
+    let res = serve(
+        &r,
+        "main",
+        &req("/b/big", &[("Origin", APP_ORIGIN), ("Range", "bytes=10-")]),
+    );
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.body().len(), 32);
+    assert_eq!(hdr(res.headers(), "content-range"), "bytes 10-41/100");
+    assert_eq!(res.body(), &data[10..42]);
+}
+
+#[test]
+fn register_from_another_thread_while_a_read_is_in_progress() {
+    let (r, dir) = fixture(small_limits());
+    // A blob read large enough to span the concurrent register below.
+    let data = vec![0xABu8; 8 * 1024 * 1024];
+    reg_blob(&r, &dir, "big", "main", &data);
+    // Phase 1 under the lock — the guard is dropped before phase 2 IO.
+    let plan = {
+        let reg = r.lock().unwrap();
+        reg.prepare_serve(
+            "main",
+            &[APP_ORIGIN.to_string()],
+            &req("/b/big", &[("Origin", APP_ORIGIN), ("Range", "bytes=0-")]),
+        )
+    };
+    let r2 = r.clone();
+    let dir2 = dir.clone();
+    let writer = std::thread::spawn(move || {
+        // If the scheme handler still held the lock across its disk IO,
+        // this lock() would sit behind the whole multi-MiB read.
+        for i in 0..50 {
+            let p = dir2.join(format!("t{i}.bin"));
+            std::fs::write(&p, b"x").unwrap();
+            let res = r2.lock().unwrap().register(
+                &serde_json::json!({"id": format!("t{i}"), "path": p.to_string_lossy()}),
+                "main",
+            );
+            assert!(res.is_ok(), "register {i} failed: {res:?}");
+        }
+    });
+    let res = tauri_plugin_pylair::blobs::BlobRegistry::finish_serve(plan);
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    // 8-byte full-body cap doesn't apply to ranges; range cap is 4 →
+    // exactly 4 bytes served, from a bounded read of a bounded window.
+    assert_eq!(res.body().len(), 4);
+    writer.join().unwrap();
+    assert_eq!(r.lock().unwrap().len(), 51);
+}
+
+#[test]
 fn generation_lifecycle_sweep_and_end() {
     // Stale gen dirs are swept at startup; the live one ends empty.
     let root = tmp("root");
