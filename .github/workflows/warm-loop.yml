@@ -35,13 +35,14 @@ jobs:
         working-directory: python/pylair
         shell: bash
         run: |
-          set -o pipefail
           pass=0; fail=0
           for i in $(seq 1 20); do
             echo "=== iteration $i/20 ==="
-            if uv run pytest tests/test_warm.py -q --tb=line 2>&1 | tail -2; then
+            if out=$(uv run pytest tests/test_warm.py -q --tb=line -rf 2>&1); then
+              echo "$out" | tail -3
               pass=$((pass + 1))
             else
+              echo "$out" | tail -60
               fail=$((fail + 1))
             fi
           done
