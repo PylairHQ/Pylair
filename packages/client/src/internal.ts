@@ -16,6 +16,7 @@ export const CMD = {
   callStream: "plugin:pylair|python_call_stream",
   grantCredit: "plugin:pylair|python_grant_credit",
   cancel: "plugin:pylair|python_cancel",
+  releaseBlob: "plugin:pylair|python_release_blob",
   retry: "plugin:pylair|python_retry",
   state: "plugin:pylair|python_state",
   health: "plugin:pylair|python_health",
