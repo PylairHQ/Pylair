@@ -37,10 +37,13 @@ MAX_ISOLATED_WORKERS = int(os.environ.get("PYLAIR_MAX_ISOLATED_WORKERS", "8"))
 # this large ends the stream with a typed error instead (RC.8A).
 from pylair._transport import MAX_DEPTH, MAX_FRAME
 
-# Test fault hook (spawned-runtime env): "eperm" makes _killpg raise
-# PermissionError — the macOS zombie-group EPERM that once escaped
-# _kill_proc and left a warm call without a terminal response.
-_KILLPG_FAULT = os.environ.get("PYLAIR_KILLPG_FAULT", "")
+# Test-only fault hook (spawned-runtime env): the exact value "eperm"
+# makes _killpg raise PermissionError — the macOS zombie-group EPERM
+# that once escaped _kill_proc and left a warm call without a terminal
+# response. POSIX-only: _killpg is never reached on Windows.
+_KILLPG_FAULT = (
+    os.environ.get("PYLAIR_KILLPG_FAULT", "") if sys.platform != "win32" else ""
+)
 
 # The private worker channel uses the same 4-byte big-endian prefix as
 # the host<->runtime framing (_transport._LEN) — internal protocol.

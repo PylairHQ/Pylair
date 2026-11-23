@@ -380,7 +380,9 @@ Merged since rc.17 (d7daaaf):
   `termination_in_progress`). Signal errors are now contained at every
   `_killpg`/`proc.kill` site and the cleanup awaits before `_finish`
   are guarded — a task can never end without a terminal.
-  `PYLAIR_KILLPG_FAULT=eperm` reproduces it anywhere.
+  `PYLAIR_KILLPG_FAULT=eperm` reproduces it anywhere — a test-only
+  fault hook, honoured only for that exact value, POSIX-only
+  (`_killpg` is never reached on Windows).
 - PR 148: #142 — the runtime entered drain but never exited on
   Windows + newest CPython: the tp-writer thread sits inside a
   synchronous `write()` on a pipe the host never drains, and
