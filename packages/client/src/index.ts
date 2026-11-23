@@ -168,6 +168,7 @@ const EVT = {
 // Uint8Array back.
 
 const B64_TAG = "$b64";
+const BLOB_TAG = "$blob";
 
 function b64encode(u8: Uint8Array): string {
   let s = "";
@@ -181,6 +182,164 @@ function b64decode(b64: string): Uint8Array {
   const u8 = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i);
   return u8;
+}
+
+// ---- blob handles (docs/decisions/0010-blob-urls.md) -----------------------
+//
+// The runtime encodes a pylair.Blob result or stream chunk as
+// {"$blob": {"id","mime","size"}}; the bytes live host-side and ride back
+// through the `pylair-blob:` URI scheme, owner-bound to the webview whose
+// task produced them. This handle is the JS face of that file.
+
+const BLOB_SCHEME = "pylair-blob";
+/** mediaUrl() materializes a copy inside the webview — bounded (§6). */
+const MEDIA_URL_CAP = 256 * 1024 * 1024;
+
+/**
+ * The scheme's URL base for this platform — mirrors `convertFileSrc`'s
+ * rule (tauri `protocol::origin`): Windows/Android get
+ * `http://<scheme>.localhost`, everything else `<scheme>://localhost`.
+ */
+function blobUrlBase(): string {
+  const ua =
+    (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent ?? "";
+  return ua.includes("Windows") || ua.includes("Android")
+    ? `http://${BLOB_SCHEME}.localhost`
+    : `${BLOB_SCHEME}://localhost`;
+}
+
+/**
+ * A file held in the host's blob registry, produced by a `pylair.Blob`
+ * result or stream chunk. `.url` hands it to `<img>`, media and fetch;
+ * `.stream()` reads it as ranged chunks; `.release()` frees it early.
+ *
+ * Blob URLs die with their generation: a dev reload, runtime restart or
+ * window close invalidates every outstanding handle (reads then 404).
+ */
+export class BlobHandle {
+  /** Registry id — 128-bit unguessable, owner-bound. */
+  readonly id: string;
+  /** Content-Type the scheme serves. */
+  readonly mime: string;
+  /** Byte length registered at encode time. */
+  readonly size: number;
+
+  private _released = false;
+  private _objectUrl: string | null = null;
+
+  /** @internal Built by the `$blob` wire decoder — not for app code. */
+  constructor(id: string, mime: string, size: number) {
+    this.id = id;
+    this.mime = mime;
+    this.size = size;
+  }
+
+  private _assertLive(what: string): void {
+    if (this._released)
+      throw new Error(`blob ${this.id} was released — ${what} can no longer be used`);
+  }
+
+  /** The `pylair-blob:` URL — element loads, media (Win/macOS), fetch. */
+  get url(): string {
+    this._assertLive(".url");
+    return `${blobUrlBase()}/b/${this.id}`;
+  }
+
+  /**
+   * Read the blob as a ReadableStream of ranged chunks. Advances by the
+   * bytes actually received (`Range: bytes=pos-`), so a server that
+   * truncates 206s just means another request — scripted readers never
+   * depend on the full-body cap. Stops at `size`; a non-2xx answer
+   * (403/404/410/416) errors the stream naming the status.
+   */
+  stream(): ReadableStream<Uint8Array> {
+    this._assertLive("stream()");
+    const { id, size } = this;
+    const url = `${blobUrlBase()}/b/${id}`;
+    let pos = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (pos >= size) {
+          controller.close();
+          return;
+        }
+        const res = await fetch(url, { headers: { Range: `bytes=${pos}-` } });
+        if (!res.ok) {
+          controller.error(
+            new Error(`blob read failed at byte ${pos}: HTTP ${res.status}`),
+          );
+          return;
+        }
+        const chunk = new Uint8Array(await res.arrayBuffer());
+        if (chunk.length === 0) {
+          // A 0-byte 206 would spin pull() forever — treat as a dead read.
+          controller.error(
+            new Error(
+              `blob read stalled at byte ${pos} of ${size}: empty range response`,
+            ),
+          );
+          return;
+        }
+        pos += chunk.length;
+        controller.enqueue(chunk);
+        if (pos >= size) controller.close();
+      },
+    });
+  }
+
+  /**
+   * `Promise<string>` for a `blob:` object URL — the blob copied once
+   * into the webview, then the NATIVE media pipeline owns it (instant
+   * seek, works on WebKitGTK where the custom-scheme pipeline is broken;
+   * §6). Capped at 256 MiB — a larger blob's mediaUrl() throws naming
+   * `.url`/`stream()` instead of silently buffering a huge copy.
+   * `release()` revokes the URL.
+   */
+  async mediaUrl(): Promise<string> {
+    this._assertLive("mediaUrl()");
+    if (this.size > MEDIA_URL_CAP)
+      throw new Error(
+        `blob ${this.id} is too large for mediaUrl() (${this.size} bytes > 256 MiB) — use .url or stream()`,
+      );
+    if (this._objectUrl === null) {
+      const blob = new Blob([await this.arrayBuffer()], { type: this.mime });
+      this._objectUrl = URL.createObjectURL(blob);
+    }
+    return this._objectUrl;
+  }
+
+  /** The whole blob as an ArrayBuffer (via stream()). */
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    return new Response(this.stream()).arrayBuffer();
+  }
+
+  /** The whole blob as a typed Blob (via stream()). */
+  async blob(): Promise<Blob> {
+    return new Blob([await this.arrayBuffer()], { type: this.mime });
+  }
+
+  /** The whole blob decoded as UTF-8 text (via stream()). */
+  async text(): Promise<string> {
+    return new Response(this.stream()).text();
+  }
+
+  /**
+   * Free the blob early — `python_release_blob`, owner-checked host-side.
+   * Idempotent (a second call is a no-op); afterwards `.url`, `.stream()`
+   * and friends throw a clear error, and a mediaUrl() object URL is
+   * revoked. Window close / generation end already reap every blob —
+   * this is for "done with it NOW".
+   */
+  async release(): Promise<void> {
+    if (this._released) return;
+    this._released = true;
+    if (this._objectUrl !== null) {
+      URL.revokeObjectURL(this._objectUrl);
+      this._objectUrl = null;
+    }
+    const b = await ipc();
+    await b.invoke(CMD.releaseBlob, { id: this.id });
+  }
 }
 
 /**
@@ -265,6 +424,15 @@ function fromWire(v: unknown): unknown {
     const ks = Object.keys(v);
     if (ks.length === 1 && ks[0] === B64_TAG)
       return b64decode((v as Record<string, string>)[B64_TAG]);
+    if (ks.length === 1 && ks[0] === BLOB_TAG) {
+      const t = (v as Record<string, Record<string, unknown>>)[BLOB_TAG];
+      // Anywhere a value is valid — results, stream chunks, nested.
+      return new BlobHandle(
+        typeof t.id === "string" ? t.id : "",
+        typeof t.mime === "string" ? t.mime : "application/octet-stream",
+        typeof t.size === "number" ? t.size : 0,
+      );
+    }
     if (Array.isArray(v)) return v.map(fromWire);
     return Object.fromEntries(
       Object.entries(v as Record<string, unknown>).map(([k, x]) => [

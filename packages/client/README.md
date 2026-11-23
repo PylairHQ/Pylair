@@ -88,6 +88,43 @@ than app readiness; code should treat both as "no app state". The
 event fires on phase changes only — `progress` and `detail` are
 poll-only, so a progress bar reads `health().app` on its own cadence.
 
+## Blobs
+
+A Python function that returns `pylair.Blob` — generated media, model
+output, anything too big for a JSON frame — arrives as a `BlobHandle`;
+the bytes never leave the host's filesystem:
+
+```ts
+import { call, BlobHandle } from "@pylair/client";
+
+const img = await call<BlobHandle>("render_chart", { query });
+imageEl.src = img.url;            // a pylair-blob: URL the host serves
+await img.release();              // done with it early — frees the file
+```
+
+- `handle.url` — the `pylair-blob:` URL for `<img>`, media (Windows/macOS),
+  `fetch`, `showSaveFilePicker` sources. The webview can only ever name an
+  id; the host serves it to the owning window only.
+- `handle.stream()` — a `ReadableStream<Uint8Array>` of sequential ranged
+  reads; it advances by bytes received, so it stays correct however small
+  the host's range cap is. A released/dead blob errors the stream with
+  the HTTP status (403/404/410).
+- `handle.mediaUrl()` — a `blob:` object URL built from `stream()`:
+  one copy into the webview, then the *native* media pipeline (instant
+  seek — and the path for Linux WebKitGTK, whose custom-scheme media
+  pipeline is broken). Capped at 256 MiB; larger throws naming
+  `.url`/`stream()`.
+- `handle.arrayBuffer()` / `handle.blob()` / `handle.text()` — the whole
+  payload through `stream()`.
+- `handle.release()` — frees the blob early (`id`, `mime`, `size` stay
+  readable). Idempotent; afterwards readers throw a clear "released"
+  error and a `mediaUrl()` URL is revoked.
+
+A `pylair.Blob` returned on a host without blob support arrives as
+`Uint8Array` (the `$b64` fallback) instead of a handle — the documented
+downgrade. Blobs die with their generation: a dev reload or window close
+invalidates outstanding handles, which then read as 404s.
+
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
 `npm i @pylair/client@0.1.0-rc.28`.

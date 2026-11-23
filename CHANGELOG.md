@@ -8,6 +8,19 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Blob URLs, client side.** `@pylair/client` decodes
+  `{"$blob": {"id","mime","size"}}` anywhere a value is valid — results,
+  stream chunks, nested containers — into the exported `BlobHandle`:
+  `.url` (the `pylair-blob:` scheme URL, platform form chosen like
+  `convertFileSrc`), `.stream()` (a `ReadableStream` of sequential
+  ranged fetches that advances by bytes received and stops exactly at
+  `size`), `.mediaUrl()` (a `blob:` object URL via `stream()`, capped
+  at 256 MiB — the Linux media path), `.arrayBuffer()`/`.blob()`/
+  `.text()` conveniences, and `.release()` → `python_release_blob`
+  (idempotent; readers on a released handle throw a clear error and a
+  mediaUrl() object URL is revoked). `$b64` keeps decoding to
+  `Uint8Array` — the documented downgrade on hosts without a blob dir.
+
 - **Blob URLs, Python side.** `pylair.Blob` lands: `Blob(data, mime=...)`
   and `Blob.from_path(path, mime=..., copy=...)` write (atomic rename) or
   hardlink the payload into the host-provided `PYLAIR_BLOB_DIR` and
