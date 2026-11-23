@@ -30,6 +30,12 @@ Identical shapes on every layer, provided by `bench_*` fixtures
 | `call_nested` | `bench_nested(shape)` - `BenchShape(name, origin: BenchPoint, points: list[BenchPoint], meta: dict[str, int])` | dataclass coercion |
 | `stream_first_chunk` | `count(n=3)` / `counter(n=3)` - time to the first yielded item, then stop | stream setup, not iteration |
 
+Bulk binary payloads are deliberately out of these cases: they should
+never cross the JSON frame at all. Return `pylair.Blob` and read it
+through the client's `BlobHandle` (`docs/blobs.md`) — the bridge cost is
+a small tag regardless of payload size, and reads stream over HTTP
+ranges instead of inflating a frame by a third in base64.
+
 ## Method
 
 - 50 warm-up iterations, then 500 measured iterations per case, in one

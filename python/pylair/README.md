@@ -25,6 +25,13 @@ async def chat(prompt: str):
 side (`@pylair/client`). Streaming is a `yield`-producing function;
 cancellation is cooperative.
 
+`pylair.Blob` returns large binary payloads (generated media, model
+output, file contents) as a host-served `pylair-blob` URL instead of
+base64 in the frame — `Blob(data, mime=…)` for bytes,
+`Blob.from_path(path, mime=…)` for a zero-copy file. The TypeScript side
+receives a `BlobHandle` with `.url`, ranged `stream()` and `release()`.
+See `docs/blobs.md` in the Pylair repo.
+
 - Scaffolding: `npx create-pylair my-app`
 - Dev: `pylair dev` — supervised runtime, hot reload
 - Build: `pylair build` — bundles CPython + your deps into a native

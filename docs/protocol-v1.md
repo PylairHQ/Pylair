@@ -49,10 +49,10 @@ hang or OOM the host.
 - `MAX_FRAME` defaults to **16 MiB**, configurable via
   `PYLAIR_MAX_FRAME` (bytes). A length prefix above the cap →
   protocol violation → runtime killed and restarted (it is either buggy
-  or hostile). The cap is not meant for data throughput — large binary
-  payloads (images, audio) currently travel base64-in-JSON (+33% size);
-  a temp-file-handle transport for bulk data is the documented future
-  escape hatch (`docs/ideas.md`).
+  or hostile). The cap is not meant for data throughput — `bytes` still
+  travels base64-in-JSON (+33% size); large binary payloads (images,
+  audio) ride `pylair.Blob` handles over host-served `pylair-blob` URLs
+  instead (`docs/blobs.md`, decision 0010).
 - `MAX_DEPTH` defaults to **100** JSON nesting levels, configurable via
   `PYLAIR_MAX_DEPTH`. The host parses with serde_json, which refuses
   input nested deeper than ~128 — a response or `stream.chunk` value
@@ -650,8 +650,9 @@ Clients surface it as `PermissionDeniedError` with `.fn`/`.window`.
 
 - Type/schema details of `exposes[].signature` — docs/codegen.md.
 - Cancellation *guarantees* per execution mode — `docs/cancellation.md`.
-- Bulk binary transport (temp-file handles) — `docs/ideas.md`; base64
-  in JSON is the v1 answer.
+- Bulk binary transport — shipped as `pylair.Blob` handles and
+  `pylair-blob` URLs (`docs/blobs.md`, decision 0010); `bytes` still
+  base64 in JSON.
 - Warm/model-persistent isolated workers — the `worker` option on
   `@expose` is reserved now (see `docs/cancellation.md`); v1 isolated
   workers are per-call.

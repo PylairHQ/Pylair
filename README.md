@@ -73,6 +73,10 @@ limitations: [docs/wrap.md](docs/wrap.md).
   https into the app data dir — sha256-verified, resumable,
   readiness-gated — with no Python or downloader for the user to
   install ([docs/models.md](docs/models.md)).
+- **Blob payloads.** `pylair.Blob` returns large binaries as host-served
+  URLs — no base64 in the frame, HTTP range streaming on the way out,
+  per-window ownership enforced by the host
+  ([docs/blobs.md](docs/blobs.md)).
 - **Bundled CPython, native installers.** End users install nothing
   Python-related; `pylair build` produces Windows, macOS and Linux
   installers on clean machines.
