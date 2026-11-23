@@ -24,6 +24,7 @@ use super::{
     classify_pong, drain_exited_inbox, fail_all, kill_and_reap, ChildIo, ChildReadErr, ExitCause,
     PendingKind, PongVerdict, Supervisor, TaskMeta,
 };
+use crate::blobs::Reject;
 use crate::protocol::{self as proto, ErrorObj, InMsg};
 
 /// The steady-state bookkeeping of one runtime generation (everything
@@ -52,6 +53,13 @@ pub(super) struct Session<'a> {
     /// the dir could not be resolved — blobs are then disabled for the
     /// generation (decision 0010 §3: env absence is the capability bit).
     pub(super) blob_dir: Option<(PathBuf, PathBuf)>,
+    /// `blob.register` rejections keyed by task id. A register lands on
+    /// the FIFO ahead of the frame carrying its `$blob` tag, so the tag
+    /// would arrive unresolvable — the task's own terminal (or the next
+    /// `stream.chunk`) delivers the rejection as a typed error instead
+    /// (decision 0010 §6: caps are LIMIT_EXCEEDED + data.limit, anything
+    /// else INTERNAL).
+    pub(super) blob_rejects: HashMap<u64, Reject>,
 }
 
 impl<'a> Session<'a> {
@@ -74,6 +82,83 @@ impl<'a> Session<'a> {
             pongs_received: 0,
             ping_seq: 0,
             blob_dir,
+            blob_rejects: HashMap::new(),
+        }
+    }
+
+    /// A rejected `blob.register` becomes the task's own error
+    /// (decision 0010 §6): a registry cap is `LIMIT_EXCEEDED` with the
+    /// doc's `data.limit` name and a message naming the env knob;
+    /// anything malformed is `INTERNAL`. The alternative — shipping the
+    /// response with its `$blob` tag intact — fetches as a 404 with no
+    /// hint that `release()` would have freed the slot.
+    fn blob_reject_err(&self, rej: Reject) -> ErrorObj {
+        let limits = &crate::blobs::lock_blobs(&self.sup.blobs).limits;
+        match rej {
+            Reject::Limit(name) => {
+                let (knob, max) = match name {
+                    "blob_bytes" => ("PYLAIR_MAX_BLOB_BYTES", Some(limits.max_blob_bytes)),
+                    "blob_total" => ("PYLAIR_MAX_BLOB_TOTAL", Some(limits.max_blob_total)),
+                    "blob_handles" => (
+                        "PYLAIR_MAX_BLOBS_PER_WINDOW",
+                        Some(limits.max_blobs_per_window as u64),
+                    ),
+                    _ => ("per-window share of PYLAIR_MAX_BLOB_TOTAL", None),
+                };
+                let hint = if name == "blob_bytes" {
+                    "the blob itself is over the cap — releasing other handles cannot help"
+                } else {
+                    "call release() on BlobHandles the page is done with"
+                };
+                ErrorObj {
+                    code: proto::LIMIT_EXCEEDED,
+                    message: format!("blob.register refused on the {name} cap ({knob}) — {hint}"),
+                    data: Some(match max {
+                        Some(max) => serde_json::json!({"limit": name, "max": max}),
+                        None => serde_json::json!({"limit": name}),
+                    }),
+                }
+            }
+            Reject::Bad(why) => ErrorObj {
+                code: proto::INTERNAL,
+                message: format!("blob.register rejected: {why}"),
+                data: None,
+            },
+            Reject::Foreign => ErrorObj {
+                code: proto::INTERNAL,
+                message: "blob.register rejected: handle owned by another window".into(),
+                data: None,
+            },
+        }
+    }
+
+    /// Tombstone a task the host ended early — the same treatment a
+    /// client cancel gives it: drop the accounting, then send the
+    /// runtime a `cancel` request so the producer stops instead of
+    /// running on unobserved.
+    fn finish_task(&mut self, call_id: u64, task: u64) {
+        self.task_of_call.remove(&call_id);
+        if let Some(meta) = self.tasks.remove(&task) {
+            self.sup.fair.lock().unwrap().note_finished(
+                &meta.owner,
+                meta.is_stream,
+                meta.is_isolated,
+            );
+        }
+        self.blob_rejects.remove(&task);
+        if self.done_tasks.len() >= 1024 {
+            self.done_tasks.clear();
+        }
+        self.done_tasks.insert(task);
+        let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
+        let (ack, _) = oneshot::channel();
+        if send_ctrl(
+            &self.io,
+            &proto::request(cid, "cancel", serde_json::json!({"task": task})),
+            self.sup.config.max_frame,
+        ) {
+            self.pending
+                .insert(cid, PendingKind::Cancel { respond: ack });
         }
     }
 }
@@ -248,10 +333,19 @@ impl Session<'_> {
     ) -> ControlFlow<ExitCause> {
         match msg {
             Some(Ok(InMsg::Response { id, result, error })) => {
-                let out = match (result, error) {
+                let mut out = match (result, error) {
                     (_, Some(e)) => Err(e),
                     (r, None) => Ok(r.unwrap_or(Value::Null)),
                 };
+                // A blob.register rejection arrived ahead of this
+                // terminal on the FIFO — the result's $blob tag would
+                // 404. Deliver the rejection as the call's error
+                // instead (decision 0010 §6).
+                if let Some(task) = self.task_of_call.get(&id) {
+                    if let Some(rej) = self.blob_rejects.remove(task) {
+                        out = Err(self.blob_reject_err(rej));
+                    }
+                }
                 if let Some(kind) = self.pending.remove(&id) {
                     match kind {
                         PendingKind::Call(tx) => {
@@ -271,6 +365,7 @@ impl Session<'_> {
                             meta.is_isolated,
                         );
                     }
+                    self.blob_rejects.remove(&task);
                     if self.done_tasks.len() >= 1024 {
                         self.done_tasks.clear();
                     }
@@ -354,6 +449,25 @@ impl Session<'_> {
                                 "protocol violation: task {task} sent an uncredited stream.chunk"
                             )));
                         }
+                        // A blob.register rejection for this task
+                        // already landed — the chunk's $blob would be
+                        // unresolvable. End the stream with the reason
+                        // and cancel the producer the way a client
+                        // cancel would.
+                        if let Some(rej) = self.blob_rejects.remove(&task) {
+                            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                                "task {task}: blob.register rejected — ending the stream"
+                            )));
+                            if let Some(call_id) = self.tasks.get(&task).map(|m| m.call_id) {
+                                if let Some(PendingKind::Stream(sink)) =
+                                    self.pending.remove(&call_id)
+                                {
+                                    sink.finish(Err(self.blob_reject_err(rej)));
+                                }
+                                self.finish_task(call_id, task);
+                            }
+                            return ControlFlow::Continue(());
+                        }
                         let mut abandoned = None;
                         if let Some(meta) = self.tasks.get_mut(&task) {
                             // Each delivered chunk consumed one
@@ -412,32 +526,11 @@ impl Session<'_> {
                             if let Some(PendingKind::Stream(sink)) = self.pending.remove(&call_id) {
                                 sink.finish(Err(err));
                             }
-                            self.task_of_call.remove(&call_id);
-                            if let Some(meta) = self.tasks.remove(&task) {
-                                self.sup.fair.lock().unwrap().note_finished(
-                                    &meta.owner,
-                                    meta.is_stream,
-                                    meta.is_isolated,
-                                );
-                            }
                             // The stream is over (its terminal was just
                             // delivered): tombstone it like a finished task,
                             // so a later cancel says `completed` and a credit
                             // grant says "already finished", not `not_found`.
-                            if self.done_tasks.len() >= 1024 {
-                                self.done_tasks.clear();
-                            }
-                            self.done_tasks.insert(task);
-                            let cid = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
-                            let (ack, _) = oneshot::channel();
-                            if send_ctrl(
-                                &self.io,
-                                &proto::request(cid, "cancel", serde_json::json!({"task": task})),
-                                self.sup.config.max_frame,
-                            ) {
-                                self.pending
-                                    .insert(cid, PendingKind::Cancel { respond: ack });
-                            }
+                            self.finish_task(call_id, task);
                         }
                     }
                     "app.component" => {
@@ -492,6 +585,14 @@ impl Session<'_> {
                                             "pylair: blob.register {} rejected: {why:?}",
                                             p["id"].as_str().unwrap_or("?")
                                         )));
+                                    // The rejection is the task's
+                                    // problem: its carrying frame is
+                                    // next on this FIFO, and that
+                                    // frame's terminal (or next chunk)
+                                    // delivers it as the error.
+                                    if let Some(t) = task {
+                                        self.blob_rejects.insert(t, why);
+                                    }
                                 }
                             }
                             None => {

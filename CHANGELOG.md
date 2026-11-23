@@ -8,6 +8,27 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Blob limit rejections reach the caller.** A refused `blob.register`
+  (per-blob/per-generation/per-window caps — `LIMIT_EXCEEDED` with
+  `data.limit` `"blob_bytes"`, `"blob_total"`, `"blob_handles"`,
+  `"blob_bytes_share"` — or a malformed register, `INTERNAL`) no longer
+  ships a `$blob` that fetches 404: the session records it per task and
+  the task's terminal response becomes the error, naming the
+  `PYLAIR_MAX_BLOB_*` knob and telling the developer to `release()`. In a
+  stream the offending chunk ends it with the same error and the
+  producer is cancelled the way a client cancel would. The share bound
+  now uses the real decision-0005 formula (pool minus peers' unclaimed
+  reserves) — the old one could never fire — and
+  `SupervisorConfig.blob_limits` can override the env knobs.
+- **Stream cap check no longer double-writes blobs.** `_pump_stream`
+  probes frame size with a placeholder `$blob` tag of the real length,
+  so one Blob chunk writes exactly one file.
+- **CSP: `media-src` keeps `'self'`.** The blob directives added in the
+  templates/reference app had replaced the `default-src` fallback —
+  bundled audio/video was blocked. `'self'` is restored alongside the
+  blob sources in `csp` and `devCsp` of both `create-pylair` templates
+  and the reference app.
+
 - **Blob URLs, templates and docs.** The scaffolded and reference-app
   CSPs now allow the `pylair-blob` scheme in `connect-src`, `img-src`
   and `media-src` (both platform spellings: `pylair-blob:` and

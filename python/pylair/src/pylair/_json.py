@@ -201,6 +201,24 @@ def dumps_collect(
         raise
 
 
+def dumps_probe(obj: Any, depth_limit: int | None = None) -> str:
+    """The size-check twin of `dumps_collect`: byte-identical output,
+    except a Blob emits a placeholder `$blob`/`$b64` tag of the real
+    length instead of materializing a handle. For cap checks that run
+    before the send's own collecting dump — probing with dumps_collect
+    would write a file the real dump then writes AGAIN (the dry pass's
+    handle is unlinked, never registered).
+    """
+    check_wire(obj, depth_limit)
+
+    def default(o: Any) -> Any:
+        if isinstance(o, Blob):
+            return o._to_wire_dry()
+        return _default(o)
+
+    return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+
+
 def dumps(obj: Any, depth_limit: int | None = None) -> str:
     check_wire(obj, depth_limit)
     # allow_nan=False stays as the hard guarantee: even if a path ever

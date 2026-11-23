@@ -137,8 +137,9 @@ pub struct BlobEntry {
 }
 
 /// Why a `blob.register` was refused. Surfaced on `pylair://stderr` — the
-/// notification has no reply channel, so rejection is observability, not
-/// an error back to Python (the `$blob` it described will 404 at fetch).
+/// notification has no reply channel, so the session records it against
+/// the task and the carrying frame's terminal (or next chunk) delivers it
+/// as the task's error — never a silent `$blob` that 404s (session.rs).
 #[derive(Debug, PartialEq)]
 pub enum Reject {
     /// `data.limit`-style name of the cap that bound (decision 0010 §6).
@@ -240,38 +241,37 @@ impl BlobRegistry {
         {
             return Err(Reject::Limit("blob_handles"));
         }
-        if self.gen_bytes.saturating_add(size) > self.limits.max_blob_total {
-            return Err(Reject::Limit("blob_total"));
+        // Per-window share of the generation pool (decision 0010 §6):
+        // the 0005 admission formula on blob bytes — every live owner
+        // keeps a `total/live` reserve, so the requester's ceiling is
+        // the pool minus the peers' UNCLAIMED reserves. A window already
+        // over its reserve is clipped at the bound even with headroom
+        // left; a small window whose peers all hold their shares is
+        // bounded only by the pool (`ceiling < total` — same gate as
+        // 0005's `ceiling < cap`). Checked before `blob_total`: where
+        // both bound, the fair-share name is the actionable one.
+        let mut owner_bytes = 0u64;
+        let mut peers: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for b in self.blobs.values() {
+            if b.owner == owner {
+                owner_bytes += b.size;
+            } else {
+                *peers.entry(b.owner.as_str()).or_default() += b.size;
+            }
         }
-        // Per-window share of the generation pool (decision 0010 §6): the
-        // fairness formula applied to blob bytes — every live owner keeps a
-        // `total/live` minimum and may borrow the rest, so one window can't
-        // drain the 2 GiB pool. `live` = owners currently holding blobs.
-        let live = self
-            .blobs
-            .values()
-            .map(|b| b.owner.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            .max(1) as u64;
+        // `live` = owners currently holding blobs; a requester with no
+        // live handles keeps its share check at the peers' reserve count.
+        let live = (peers.len() + usize::from(owner_bytes > 0)).max(1) as u64;
         let reserve = (self.limits.max_blob_total / live)
             .max(1)
             .min(self.limits.max_blob_total);
-        let others_bytes: u64 = self
-            .blobs
-            .values()
-            .filter(|b| b.owner != owner)
-            .map(|b| b.size)
-            .sum();
-        let ceiling = reserve.max(self.limits.max_blob_total.saturating_sub(others_bytes));
-        let owner_bytes: u64 = self
-            .blobs
-            .values()
-            .filter(|b| b.owner == owner)
-            .map(|b| b.size)
-            .sum();
-        if owner_bytes.saturating_add(size) > ceiling {
+        let unclaimed: u64 = peers.values().map(|u| reserve.saturating_sub(*u)).sum();
+        let ceiling = self.limits.max_blob_total.saturating_sub(unclaimed);
+        if ceiling < self.limits.max_blob_total && owner_bytes.saturating_add(size) > ceiling {
             return Err(Reject::Limit("blob_bytes_share"));
+        }
+        if self.gen_bytes.saturating_add(size) > self.limits.max_blob_total {
+            return Err(Reject::Limit("blob_total"));
         }
 
         self.gen_bytes += size;

@@ -379,6 +379,10 @@ pub struct SupervisorConfig {
     /// fills this from `app.path().app_cache_dir()`; tests set it to a
     /// temp dir.
     pub blob_root: Option<PathBuf>,
+    /// Blob ceilings (decision 0010 §6). `None` reads the
+    /// `PYLAIR_MAX_BLOB_*` env knobs; `Some` overrides them — embedders
+    /// and tests get a deterministic registry without env races.
+    pub blob_limits: Option<crate::blobs::BlobLimits>,
     /// Concurrency/queue/buffer ceilings (RC.8A). Validated and logged at
     /// supervisor start.
     pub limits: Limits,
@@ -406,6 +410,7 @@ impl Default for SupervisorConfig {
             max_frame: proto::max_frame(),
             restart_trigger: None,
             blob_root: None,
+            blob_limits: None,
             limits: Limits::default(),
         }
     }

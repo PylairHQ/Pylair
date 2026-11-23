@@ -447,9 +447,11 @@ below was skipped for rc.20 only.
   handles, `$b64` fallback, task-less-frame refusal), 160 client
   `BlobHandle` (`url`, ranged `stream()`, `mediaUrl()`, `release()`),
   this one templates/reference-app/docs, and 5 the installed-app
-  acceptance check. A crate follow-up in flight makes the registry's
-  256-handles-per-window limit surface to Python as `LIMIT_EXCEEDED`
-  instead of a dropped registration. No release yet carries any of it —
+  acceptance check. A crate follow-up in flight lands the registry's
+  limit rejections on the caller (`LIMIT_EXCEEDED` + `data.limit` on the
+  terminal, streams end + producer cancel, malformed registers as
+  `INTERNAL`) — and realigns the fair-share bound to the 0005 formula
+  (the shipped one was unreachable). No release yet carries any of it —
   the next train ships all five.
 
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`

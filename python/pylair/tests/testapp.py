@@ -530,6 +530,14 @@ def make_blob() -> "pylair.Blob":
 
 
 @expose
+def sized_blob(n: int) -> "pylair.Blob":
+    """A Blob of exactly n bytes — the crate's limit tests drive the
+    registry caps (per-blob, generation total, per-window share) with
+    sizes they choose instead of make_blob's fixed payload."""
+    return pylair.Blob(b"x" * n, mime="application/octet-stream")
+
+
+@expose
 async def stream_blob() -> AsyncGenerator:
     """One scalar chunk, then a Blob chunk — ordering must hold for
     stream.chunk frames exactly as for responses (§3)."""
