@@ -38,7 +38,7 @@ jobs:
           pass=0; fail=0
           for i in $(seq 1 20); do
             echo "=== iteration $i/20 ==="
-            if out=$(uv run pytest tests/test_warm.py -q --tb=line -rf 2>&1); then
+            if out=$(uv run pytest tests/test_warm.py -q --tb=short -rf 2>&1); then
               echo "$out" | tail -3
               pass=$((pass + 1))
             else
