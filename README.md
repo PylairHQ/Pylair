@@ -69,6 +69,10 @@ limitations: [docs/wrap.md](docs/wrap.md).
   import once, call in microseconds; POSIX cancels interrupt the call
   and keep the worker
   ([docs/cancellation.md](docs/cancellation.md)).
+- **Model downloads.** `pylair.models` fetches multi-GB models over
+  https into the app data dir — sha256-verified, resumable,
+  readiness-gated — with no Python or downloader for the user to
+  install ([docs/models.md](docs/models.md)).
 - **Bundled CPython, native installers.** End users install nothing
   Python-related; `pylair build` produces Windows, macOS and Linux
   installers on clean machines.

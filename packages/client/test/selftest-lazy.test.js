@@ -111,6 +111,19 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // semantics: POSIX interrupts (plain "cancelled" ack, same pid after)
   // and win32 is kill-only ("terminated" ack, a new pid after).
   const { warm = "ok", warmPlatform = "linux" } = opts;
+  // Model manager (0009): "ok" — the fixtures answer (fetch reports
+  // path+root+one hit, the warm worker resolves the same path, cleanup
+  // removes); "missing" — FUNCTION_NOT_FOUND (-32601), the skip path
+  // for pylair < 0.1.0rc14 or a crate without PYLAIR_APP_DATA_DIR;
+  // "two-hits" — the server saw the second fetch too: no fast path.
+  const { models = "ok" } = opts;
+  // CI appends the fixture only when pylair >= rc14 AND the crate >=
+  // rc.22 passes PYLAIR_APP_DATA_DIR — and that crate always carries
+  // python_health + the app block. A runtime whose health/app blocks
+  // are missing is an older crate: the fixture is absent by version,
+  // so -32601 is the honest answer for these combos.
+  const modelsPresent = models !== "missing" && health === "ok" && appReadiness === "ok";
+  const MODEL_PATH = "/data/models/selftest-model";
   const calls = [];
   const listens = [];
   const cancelHooks = new Map();
@@ -178,7 +191,23 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
             isolated: CELL,
           },
           ...(appReadiness === "ok"
-            ? { app: { components: { selftest: { phase: "ready", progress: null, detail: null, ms_ago: 5 } } } }
+            ? {
+                app: {
+                  components: {
+                    selftest: { phase: "ready", progress: null, detail: null, ms_ago: 5 },
+                    ...(modelsPresent
+                      ? {
+                          "selftest-model": {
+                            phase: "ready",
+                            progress: null,
+                            detail: null,
+                            ms_ago: 5,
+                          },
+                        }
+                      : {}),
+                  },
+                },
+              }
             : {}),
         };
       }
@@ -268,6 +297,27 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           // seconds>0: the terminal is scheduled by the cancel hook,
           // registered eagerly at the ack — a cancel can land before
           // this deferred handler ever runs.
+        } else if (fnName === "models_selftest_fetch") {
+          // The model fixture; absent means FUNCTION_NOT_FOUND (a
+          // resolved pylair that predates the model manager, or a
+          // crate too old to pass PYLAIR_APP_DATA_DIR).
+          if (!modelsPresent)
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          else
+            onEvent({
+              task,
+              done: true,
+              result: {
+                path: MODEL_PATH,
+                root: "/data/models",
+                hits: models === "two-hits" ? 2 : 1,
+                insecure_after: models === "env-leak" ? "1" : null,
+              },
+            });
+        } else if (fnName === "models_warm_path") {
+          onEvent({ task, done: true, result: { path: MODEL_PATH, pid: 5150 } });
+        } else if (fnName === "models_selftest_cleanup") {
+          onEvent({ task, done: true, result: { removed: true } });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -331,6 +381,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "health",
     "app-readiness",
     "warm-workers",
+    "models",
     "event-scoping",
     "fn-permission",
   ]);
@@ -340,6 +391,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
   assert.equal(checks["health"], "ok");
   assert.equal(checks["app-readiness"], "ok");
   assert.equal(checks["warm-workers"], "ok");
+  assert.equal(checks["models"], "ok");
   assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
   assert.ok(b.listens.includes("pylair://app"), "onApp subscribed on the app event");
   assert.equal(checks["fn-permission"], "ok");
@@ -377,6 +429,60 @@ test("flag set: Windows kill-only — terminated ack and a new member", { timeou
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, true, JSON.stringify(checks));
   assert.equal(checks["warm-workers"], "ok");
+});
+
+test("flag set: a pylair without the model manager skips models, never fails", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    models: "missing",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.match(checks["models"], /^skipped: /);
+});
+
+test("flag set: a second server hit fails models — the fast path is mandatory", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    models: "two-hits",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["models"], /^FAIL: .*fast path/);
+});
+
+test("flag set: a leaked PYLAIR_MODELS_ALLOW_INSECURE fails models", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    models: "env-leak",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["models"], /^FAIL: .*ALLOW_INSECURE/);
 });
 
 test("flag set: POSIX interrupted with a kill-path ack fails warm-workers", { timeout: 20_000 }, async () => {

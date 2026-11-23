@@ -219,3 +219,122 @@ def warm_selftest(seconds: float = 0.0) -> dict:
     """Sleep `seconds`, then report the serving member's pid + platform."""
     time.sleep(seconds)
     return {"pid": os.getpid(), "platform": sys.platform}
+
+
+# Model-manager self-test (docs/decisions/0009): a loopback-only HTTP
+# server inside the runtime serves a known blob; `models_selftest_fetch`
+# downloads + verifies it and asserts the second fetch took the sidecar
+# fast path (the server counts hits — it must stay 1). The warm-worker
+# fixture resolves the verified file read-only — it can never fetch —
+# and cleanup removes the model from the app data dir afterwards.
+# http:// is loopback-only here; the opt-in is scoped to this app.
+import hashlib as _m_hashlib
+import threading as _m_threading
+from http.server import BaseHTTPRequestHandler as _m_BHRH
+from http.server import ThreadingHTTPServer as _m_THS
+from pathlib import Path as _m_Path
+
+_MODEL_BLOB = _m_hashlib.sha256(b"pylair-selftest-model").digest() * 8192
+_MODEL_SHA = _m_hashlib.sha256(_MODEL_BLOB).hexdigest()
+_model_state: dict = {"server": None, "hits": 0, "url": None}
+
+
+class _ModelHandler(_m_BHRH):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        blob = _MODEL_BLOB
+        _model_state["hits"] += 1
+        start = 0
+        status = 200
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes="):
+            try:
+                start = int(rng[6:].split("-", 1)[0])
+            except ValueError:
+                start = 0
+            if 0 < start < len(blob):
+                status = 206
+            else:
+                start = 0
+        body = blob[start:]
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{len(blob) - 1}/{len(blob)}")
+        self.end_headers()
+        # wfile.write is a single send() and can return short — sendall.
+        self.connection.sendall(body)
+
+
+def _models_server_url() -> str:
+    if _model_state["server"] is None:
+        srv = _m_THS(("127.0.0.1", 0), _ModelHandler)
+        _m_threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _model_state["server"] = srv
+        _model_state["url"] = f"http://127.0.0.1:{srv.server_port}/m"
+    return _model_state["url"]
+
+
+@expose
+def models_selftest_fetch() -> dict:
+    # Loopback http is allowed only around the two fetch calls: the
+    # previous value is saved, then restored in finally (deleted when
+    # it was unset), so plain-http stays refused for the rest of the
+    # process.
+    prev = os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE")
+    os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = "1"
+    try:
+        from pylair import models
+
+        url = _models_server_url()
+        kw = {"url": url, "sha256": _MODEL_SHA, "size": len(_MODEL_BLOB)}
+        models.fetch("selftest-model", **kw)
+        models.fetch("selftest-model", **kw)
+    finally:
+        if prev is None:
+            os.environ.pop("PYLAIR_MODELS_ALLOW_INSECURE", None)
+        else:
+            os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = prev
+    if _model_state["hits"] != 1:
+        raise RuntimeError(
+            f"second fetch was not the sidecar fast path (hits={_model_state['hits']})"
+        )
+    root = models.dir("selftest-model")
+    app_data = os.environ.get("PYLAIR_APP_DATA_DIR", "")
+    if not app_data or root != _m_Path(app_data) / "models":
+        raise RuntimeError(f"model root {root} is not <app-data>/models ({app_data!r})")
+    p = models.path("selftest-model")
+    if p.parent != root:
+        raise RuntimeError(f"models.path {p} is not under {root}")
+    return {
+        "path": str(p),
+        "root": str(root),
+        "hits": _model_state["hits"],
+        "insecure_after": os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE"),
+    }
+
+
+@expose(worker={"mode": "warm"})
+def models_warm_path() -> dict:
+    # Resolve-only inside a warm worker — it can never download, so a
+    # returned path proves the verified file is shared across processes.
+    from pylair import models
+
+    return {"path": str(models.path("selftest-model")), "pid": os.getpid()}
+
+
+@expose
+def models_selftest_cleanup() -> dict:
+    from pylair import models
+
+    root = models.dir("selftest-model")
+    if root.is_dir():
+        for f in root.glob("selftest-model*"):
+            f.unlink(missing_ok=True)
+    srv = _model_state.get("server")
+    if srv is not None:
+        srv.shutdown()
+        _model_state["server"] = None
+    return {"removed": True}
