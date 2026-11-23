@@ -8,6 +8,18 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Blob URLs, templates and docs.** The scaffolded and reference-app
+  CSPs now allow the `pylair-blob` scheme in `connect-src`, `img-src`
+  and `media-src` (both platform spellings: `pylair-blob:` and
+  `http://pylair-blob.localhost`), plus `blob:` in `img-src`/`media-src`
+  for `mediaUrl()` object URLs. The reference app calls `make_blob`
+  and renders the handle in `#blob-img` (outcome in
+  `data-blob-status`), releasing it on load. New `docs/blobs.md` covers
+  `Blob` vs `Blob.from_path`, the client handle API, limits and
+  lifetime, the `$b64` downgrade and the security model; READMEs and
+  `docs/performance.md` point at it. `python_release_blob` already rides
+  inside `pylair:default`, so no capability file changed.
+
 - **Blob URLs, client side.** `@pylair/client` decodes
   `{"$blob": {"id","mime","size"}}` anywhere a value is valid — results,
   stream chunks, nested containers — into the exported `BlobHandle`:

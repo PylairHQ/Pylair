@@ -125,6 +125,10 @@ A `pylair.Blob` returned on a host without blob support arrives as
 downgrade. Blobs die with their generation: a dev reload or window close
 invalidates outstanding handles, which then read as 404s.
 
+The full guide — `Blob.from_path`, lifetime and limits, `.url` vs
+`mediaUrl()`, the security model — is
+[docs/blobs.md](https://github.com/PylairHQ/Pylair/blob/main/docs/blobs.md).
+
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
 `npm i @pylair/client@0.1.0-rc.28`.

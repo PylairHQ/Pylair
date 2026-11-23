@@ -440,6 +440,17 @@ Merged since rc.17 (d7daaaf):
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
 below was skipped for rc.20 only.
+- PRs 157-160, plus two more in flight: blob URLs (`docs/decisions/
+  0010`), the bulk-binary transport. Five PRs total: 157+158 crate
+  (`pylair-blob` scheme handler, per-generation dirs, owner binding,
+  `python_release_blob`, bounded reads), 159 `pylair.Blob` (per-send
+  handles, `$b64` fallback, task-less-frame refusal), 160 client
+  `BlobHandle` (`url`, ranged `stream()`, `mediaUrl()`, `release()`),
+  this one templates/reference-app/docs, and 5 the installed-app
+  acceptance check. A crate follow-up in flight makes the registry's
+  256-handles-per-window limit surface to Python as `LIMIT_EXCEEDED`
+  instead of a dropped registration. No release yet carries any of it —
+  the next train ships all five.
 
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 

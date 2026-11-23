@@ -5,6 +5,7 @@ import {
   state,
   onState,
   PythonError,
+  type BlobHandle,
   type RuntimeState,
   type StateChange,
 } from "@pylair/client";
@@ -35,6 +36,9 @@ export default function App() {
   const [output, setOutput] = useState("");
   const [busy, setBusy] = useState<"chat" | "demo" | null>(null);
   const [note, setNote] = useState("");
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [blobStatus, setBlobStatus] = useState("fetching");
+  const blobHandle = useRef<BlobHandle | null>(null);
   const abort = useRef<AbortController | null>(null);
 
   const refreshStatus = () =>
@@ -53,7 +57,24 @@ export default function App() {
     }).then((u) => (unlisten = u));
     // Under the webview self-test every task id must belong to the
     // self-test itself — a UI-driven call here would race it for ids.
-    if (!(globalThis as { __PYLAIR_SELF_TEST__?: boolean }).__PYLAIR_SELF_TEST__) refreshStatus();
+    if (!(globalThis as { __PYLAIR_SELF_TEST__?: boolean }).__PYLAIR_SELF_TEST__) {
+      refreshStatus();
+      // Decision-0010 demo: make_blob returns a BlobHandle; <img> loads
+      // through the pylair-blob scheme, then release() frees the host file.
+      // The load outcome lands in data-blob-status on #blob-img so the
+      // webview self-test can assert on it. Skipped under the self-test flag
+      // like refreshStatus — every task id there belongs to the self-test.
+      void (async () => {
+        try {
+          const h = await call<BlobHandle>("make_blob");
+          blobHandle.current = h;
+          setBlobStatus("loading");
+          setBlobUrl(h.url);
+        } catch (e) {
+          setBlobStatus(`error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
+    }
     return () => unlisten?.();
   }, []);
 
@@ -159,6 +180,25 @@ export default function App() {
           crash python
         </button>
         <small>kills the runtime — watch the state badge recover</small>
+      </section>
+
+      <section style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
+        <small style={{ color: "#777" }}>backend blob:</small>
+        <img
+          id="blob-img"
+          data-blob-status={blobStatus}
+          src={blobUrl ?? undefined}
+          alt=""
+          width={24}
+          height={24}
+          style={{ visibility: blobStatus === "loaded" ? "visible" : "hidden" }}
+          onLoad={() => {
+            setBlobStatus("loaded");
+            void blobHandle.current?.release();
+          }}
+          onError={() => setBlobStatus("error: image failed to load")}
+        />
+        <small style={{ color: "#777" }}>{blobStatus}</small>
       </section>
 
       <section style={{ marginTop: 12 }}>
