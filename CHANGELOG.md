@@ -8,6 +8,22 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.29 (unreleased)
+
+Crate `0.1.0-rc.23`, `pylair 0.1.0rc15` on PyPI, npm `0.1.0-rc.29`.
+
+- **Blob URLs** (decision 0010, PRs #156–#164): a `pylair-blob` URI
+  scheme with an owner-bound registry serves Python `Blob` payloads to
+  the owning webview only — ranged reads, hardened headers, per-blob /
+  per-generation / per-window limits — with `pylair.Blob` values
+  serializing as `{"$blob": {"id","mime","size"}}` and decoding to a
+  client `BlobHandle` (`url`, `stream()`, `mediaUrl()`, `release()`),
+  `$b64` downgrade on older hosts, template/reference-app CSP and
+  `docs/blobs.md`, and an installed-webview `"blob"` self-test that
+  gates pack/registry legs on the resolved versions.
+- CI only: container self-tests pull apt packages from the Azure
+  mirror with retries and explicit timeouts (#161).
+
 - **Blob limit rejections reach the caller.** A refused `blob.register`
   (per-blob/per-generation/per-window caps — `LIMIT_EXCEEDED` with
   `data.limit` `"blob_bytes"`, `"blob_total"`, `"blob_handles"`,
@@ -37,8 +53,9 @@ what the GitHub releases page publishes.
 - **Blob URLs, templates and docs.** The scaffolded and reference-app
   CSPs now allow the `pylair-blob` scheme in `connect-src`, `img-src`
   and `media-src` (both platform spellings: `pylair-blob:` and
-  `http://pylair-blob.localhost`), plus `blob:` in `img-src`/`media-src`
-  for `mediaUrl()` object URLs. The reference app calls `make_blob`
+  `http://pylair-blob.localhost`), plus `blob:` in `connect-src`/
+  `img-src`/`media-src` for `mediaUrl()` object URLs — without it a
+  `fetch` on the object URL is refused. The reference app calls `make_blob`
   and renders the handle in `#blob-img` (outcome in
   `data-blob-status`), releasing it on load. New `docs/blobs.md` covers
   `Blob` vs `Blob.from_path`, the client handle API, limits and
@@ -96,11 +113,37 @@ what the GitHub releases page publishes.
   Range/206, `PYLAIR_BLOB_MAX_FULL_BODY` (64 MiB) and
   `PYLAIR_BLOB_MAX_RANGE_BYTES` (8 MiB) response caps, registered
   size+mtime verification (`410` on in-place source rewrites), exact-origin
-  ACAO + `Vary: Origin` + `nosniff` on every response, the
+  ACAO + `Access-Control-Expose-Headers` (a JS range client can read
+  `Content-Range`) + `Vary: Origin` + `nosniff` on every response, the
   512 MiB/2 GiB/256-handle limits, and window-close + generation-end +
   startup-sweep cleanup. A new `python_release_blob` command backs client
-  `release()`. The Python `Blob` API, the `$blob` wire tag and the client
-  handle land in the follow-up PRs — nothing emits blobs yet.
+  `release()`.
+
+## npm-v0.1.0-rc.28 (2026-11-22)
+
+Crate `0.1.0-rc.22`, `pylair 0.1.0rc14` on PyPI, npm `0.1.0-rc.28`.
+
+- **Model download manager `pylair.models`** (decision 0009):
+  `models.model()` declares a model at import — its download
+  auto-starts after hello beside `@on_startup` hooks and reports a
+  readiness component; `models.fetch()` is the idempotent manual form;
+  `models.path()` resolves a verified file or raises `ModelNotReady`.
+  Storage lives under `PYLAIR_APP_DATA_DIR` (the host now hands it down
+  at spawn) as the verified file plus `.part`/`.json`/`.lock`
+  companions — stdlib-only streaming, sha256 verify, atomic rename,
+  cross-process lock. Ships with a `models` installed-webview self-test
+  and `docs/models.md`; `PYLAIR_MODELS_ALLOW_INSECURE` is scoped to the
+  self-test fetches.
+- **Fix:** the runtime exits past a dead channel instead of hanging in
+  `close_write` (#148, fixing #142).
+- **Fix:** the warm worker's "interrupt outside the raise window"
+  diagnostic now uses raw `os.write` — repeated SIGINT could re-enter
+  the buffered stderr writer and kill the worker or surface a bogus
+  call error (#153).
+
+New projects pin `tauri-plugin-pylair = "=0.1.0-rc.22"` and
+`pylair==0.1.0rc14`. Design: `docs/decisions/0009-model-manager.md`,
+`docs/models.md`. PRs: #148, #149, #150, #151, #152, #153, #154, #155.
 
 ## npm-v0.1.0-rc.27 (2026-11-22)
 
