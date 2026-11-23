@@ -1,7 +1,7 @@
 # 0010: Binary blobs by URL (`pylair.Blob` + a `pylair-blob` URI scheme)
 
-Status: proposed (spike: `spikes/b0-blobs` + `.github/workflows/b0-spike.yml`
-on the `blob-spike` branch; draft PR on the same branch)
+Status: accepted (spike: `spikes/b0-blobs` on the `blob-spike` branch;
+CI evidence in §Evidence index)
 
 ## Question
 
@@ -45,11 +45,35 @@ event *topics*, and a distinct scheme keeps CSP readable).
 response is materialized in the host process. Design consequence: the
 handler reads the file per request, so memory per request equals
 response size. That is still strictly better than `$b64` (no +33%
-expansion, no JSON parse, no copy into the frame channel) and Range
-support means media requests are naturally bounded; a plain full-body
-fetch of a 200 MB blob still buffers 200 MB once, host-side — so
-per-blob size caps (§6) matter. The alternative that truly streams is a
-127.0.0.1 token-guarded HTTP server (rejected for v1 — §1's end).
+expansion, no JSON parse, no copy into the frame channel), but it makes
+host memory a function of *request* size, not just blob size — so the
+handler bounds both kinds of response (below). The alternative that
+truly streams is a 127.0.0.1 token-guarded HTTP server (rejected for
+v1 — §Alternatives).
+
+**Host memory is bounded per request.** Buffered bodies mean a plain
+full-body fetch of a 512 MiB blob would hold 512 MiB in the host, and
+concurrent requests multiply it. Two caps fix that:
+
+| cap | default | what happens over it |
+|---|---|---|
+| full-body response | 64 MiB (`PYLAIR_BLOB_MAX_FULL_BODY`) | `416` + `Accept-Ranges: bytes` + a body telling the caller to issue Range requests |
+| bytes per range response | 8 MiB (`PYLAIR_BLOB_MAX_RANGE_BYTES`) | the handler returns a **shorter 206** (`Content-Range` names the truncated extent) — legal HTTP; media stacks and readers re-request |
+
+Worst case is now `max(full_cap, range_cap)` per in-flight request —
+64 MiB, not blob-size. **Proven on all three engines** (the spike serves
+the 21 MiB WAV under a 4 MiB range cap): a full-body `GET` → `416`; an
+open `bytes=0-` → `206` carrying exactly the cap; WebView2 and
+WKWebView media issued follow-on ranges against the truncated
+`Content-Range` and `seeked` fired — short 206s are accepted by both
+the media pipelines and `fetch`. WebKitGTK's media failure is
+unchanged (its pipeline errors *after* a correctly-served probe — it
+never even reaches the second range).
+
+Client consequence: `blob.stream()` (§6) reads a blob as a
+`ReadableStream` of ranged chunks, so scripted readers never depend on
+full-body responses at all; `.url` stays for element loads and small
+fetches.
 
 **Range/206 is not automatic** — custom schemes must parse `Range`
 themselves (the built-in `asset://` protocol does the same internally).
@@ -137,9 +161,41 @@ ahead of the response; the host resolves `task_id → owner` from
 ids (128-bit random) are defense-in-depth — owner binding is the actual
 guard; a leaked id is useless to another window either way.
 
+**Origin gate — labels are necessary, not sufficient.** A webview keeps
+its label if it navigates off the app origin, so owner-by-label alone
+would let a foreign page loaded in `main` read `main`'s blobs — and a
+blind `Access-Control-Allow-Origin: *` would let it read them over
+scripted `fetch` too. The handler therefore checks, in order:
+
+1. `Origin` present → it must equal the app's origin for this platform
+   (`tauri://localhost` / `http://tauri.localhost`) — else `403`,
+   before the blob is even looked up.
+2. `Origin` absent → an element or no-cors load. These carry no
+   scripted readback channel (cross-origin canvas taints; `<audio>`
+   pixels-in only), so the label check below is the guard — they are
+   served, which is also what keeps `<img>`/`<audio>` working.
+3. Label must equal the blob's owner (as before).
+
+CORS response headers echo *exactly the app origin* in
+`Access-Control-Allow-Origin` with `Vary: Origin` — never `*`. A
+foreign-origin fetch therefore fails twice: the handler 403s it, and
+even a hypothetical pass would fail the CORS check since the page's
+origin isn't in the response.
+
+**Proven on all three engines** (run 45121029887): after both windows
+finish, the spike navigates `main` to a page served from
+`http://127.0.0.1:<port>` — the label stays `main`, the origin becomes
+foreign. Every scripted read — `fetch`, ranged `fetch`, XHR, and a
+fetch inside a `127.0.0.1`-origin worker — arrives as
+`label=main origin=http://127.0.0.1:<port>` → `403`. The same page's
+`<img>` load (no `Origin`) is served `200` — expected: pixels only, no
+readback. The scheme log carries `origin=` per request so the gate's
+decisions are directly visible.
+
 Wrap mode: wrapped pages load a remote/local web UI and get no
 `@pylair/client` and no IPC, so they can never learn an id or own a
-task — out of scope, and the same check denies them anyway.
+task — out of scope, and both gates deny them anyway (their origin is
+never the app origin).
 
 ## 3. Wire changes (additive, protocol-v1)
 
@@ -185,6 +241,19 @@ pylair.Blob.from_path(path, mime="audio/wav")  # reference an existing file
   same volume in practice) with a `shutil.copy` fallback. Python is
   trusted app code — it may name real paths; the webview may only ever
   name an `id`, so no path ever crosses the web boundary.
+- **Hardlink aliasing is handled by verify-at-serve, not copy.**
+  Registration records `(size, mtime)` in `blob.register`; the handler
+  re-stats the file per request and answers `410 Gone` on mismatch —
+  an in-place rewrite of the source can never serve silently-stale
+  bytes. Chosen over copying because `from_path`'s whole point is
+  avoiding a per-call copy of possibly-huge generated media, and the
+  failure mode it guards is both rare and *detectable* (rename-style
+  producers — write tmp + rename over — create a new inode, so the
+  hardlinked blob keeps the old bytes and never even trips the check;
+  only `open(path,'wb')`-style in-place writes do, and the 410 names
+  exactly that). The spike proves it: `mut_main` serves `200`, the
+  source is rewritten, the next read is `410`. A `copy=True` escape
+  hatch remains an additive option if apps prove to need it.
 - Isolated and warm workers: workers inherit `os.environ`
   (`PYLAIR_BLOB_DIR` rides with it, like `PYLAIR_APP_DATA_DIR`), and a
   worker's `blob.register` travels its own channel — the host binds it
@@ -238,21 +307,34 @@ slots in without rework.
 - Per-window fairness: live blob bytes join `TaskMeta.owner`'s window —
   the admission formula (0005) gains a `blob_bytes` in_use term so one
   window can't drain the 2 GiB generation pool.
-- Media fallback (Linux): the client exposes `handle.url` (scheme URL —
-  `<img>`, `fetch`, media on Win/macOS) and `await handle.mediaUrl()`
-  (fetches bytes through the scheme — fetch+ACAO works on WebKitGTK —
-  and returns a `blob:` object URL, which uses the *native* media
-  pipeline: instant seek, works on WebKitGTK). Documented, not magic:
-  mediaUrl costs a full in-webview copy.
+- Client handle API: `handle.url` (scheme URL — `<img>`, `fetch`,
+  media on Win/macOS), `handle.stream()`, `handle.mediaUrl()`,
+  `handle.release()`.
+  - `stream(): ReadableStream<Uint8Array>` — sequential ranged
+    `fetch`es (`Range: bytes=pos-end`), advancing by **bytes received**,
+    so it tolerates any server range cap without knowing it (server
+    shortens → client re-requests). Scripted readers get bounded host
+    memory end-to-end regardless of blob size.
+  - `mediaUrl(): Promise<string>` — `URL.createObjectURL(await new
+    Response(stream()).blob())`: one in-webview copy, then the
+    *native* media pipeline (instant seek, works on WebKitGTK — the
+    Linux fallback). Its own cap (256 MiB, over → named error
+    "too large for mediaUrl — use .url or stream()") keeps the webview
+    copy bounded; documented, not magic.
+  - `.url` for a plain `fetch` over `PYLAIR_BLOB_MAX_FULL_BODY` gets
+    the `416` — the error text points at `stream()`.
 
 ## 7. Test plan and PR split
 
-**Rust (crate):** scheme-handler unit tests (200/206/416/404/400/403,
+**Rust (crate):** scheme-handler unit tests (200/206/410/416/404/400/403,
 empty-label denial, `..`/non-id paths, caps); registry + owner binding
 (`task_id → label` via the existing meta map); generation-dir lifecycle
 (create on spawn, delete on end, sweep residue); a `window_fairness`-
 style two-window integration test with real second webview reading the
-other's blob id → 403; release + double-release.
+other's blob id → 403; origin gate (foreign `Origin` denied, absent
+`Origin` element-style served); full-body cap → `416` + Accept-Ranges;
+range cap → short `206` with truncated `Content-Range`; mutated
+`from_path` source → `410`; release + double-release.
 
 **Python (`pylair`):** codec round-trip (`Blob` → `$blob` tag);
 register-before-response ordering asserted on the frame channel;
@@ -261,7 +343,9 @@ register-before-response ordering asserted on the frame channel;
 emission bound to the right task; error-path unlink.
 
 **Client (`@pylair/client`):** `$blob` → handle (`url`, `mime`, `size`,
-`release()`, `mediaUrl()`); UA-scheme form per platform; release →
+`release()`, `stream()`, `mediaUrl()`); UA-scheme form per platform;
+`stream()` resumes correctly on short 206s (mocked truncated
+`Content-Range`); `mediaUrl` over its cap → named error; release →
 command call; old-tag passthrough.
 
 **Selftest + acceptance:** a `"blobs"` selftest check (render an image,
@@ -307,17 +391,24 @@ full train like 0008/0009.
 ## Evidence index
 
 - `spikes/b0-blobs/` — the two-window proof app (`src-tauri`, `web/`),
-  its `out/results.json` (WebView2 run: every check green, owner label
-  on all request types, cross-window 403, second-range seek), and
-  `README.md`.
-- `.github/workflows/b0-spike.yml` — ran the same binary headless on
-  ubuntu (xvfb), Windows and macOS; runs **45116408180** (ubuntu/windows
-  green — ubuntu had no icons yet and macOS lacked `timeout`) and
-  **45117258196** (all three green). Artifacts `b0-{os}` carry
-  `results.json` per OS: WebView2 all-green; WebKitGTK all-green except
-  `audio seek` (`onerror` after a correctly-served ranged probe — the
-  pipeline, not the handler); WKWebView all-green incl. audio seek via
-  a tiny-range cascade.
+  its `out/results.json` (local WebView2 run), and `README.md`. The
+  CI workflow that ran it headless on all three OSes
+  (`.github/workflows/b0-spike.yml`) was removed before merge per the
+  spike convention; the runs below are its evidence.
+- Runs **45116408180** (ubuntu/windows), **45117258196** (all three
+  green, unbounded bodies) and **45121029887** (all three green with
+  the bounded-body + origin-gate revision). Artifacts `b0-{os}` carry
+  `results.json` per OS:
+  - owner label on all request types, cross-window `403` in every form;
+  - full-body GET over cap → `416`; open range → short `206`
+    (`len == range cap`);
+  - media pipelines accept the truncated `Content-Range`: WebView2
+    `audioReqs=5 ranged=4`, WKWebView `audioReqs=15 ranged=14`, both
+    `seeked`; WebKitGTK `onerror` after a correctly-served probe (the
+    pipeline, not the handler — unchanged);
+  - `from_path` source rewritten in place → next read `410`;
+  - owner window navigated to `http://127.0.0.1` — same `main` label,
+    foreign origin — every scripted read `403`.
 - wry internals: `src/webview2/mod.rs` (per-webview filter incl. worker
   source kinds), `src/wkwebview/class/url_scheme_handler.rs`
   (per-webview handler instance carrying the id),

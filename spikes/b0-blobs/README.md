@@ -3,15 +3,20 @@
 Proof code backing `docs/decisions/0010-blob-urls.md`. Not product code —
 the implementation PRs rewrite this as the real handler + test suite.
 
-A minimal Tauri app that registers a `pylair` URI scheme serving three
-on-disk blobs (`img_main`, `audio_main` — owned by window `main`;
-`img_other` — owned by window `other`) with manual Range/206 support and
-owner enforcement on `ctx.webview_label()`. Two windows each run a
+A minimal Tauri app that registers a `pylair` URI scheme serving four
+on-disk blobs (`img_main`, `audio_main`, `mut_main` — owned by window
+`main`; `img_other` — owned by window `other`) with manual Range/206,
+bounded response bodies (1 MiB full-body cap → `416`; 4 MiB range cap →
+short `206`), an Origin gate (foreign `Origin` → `403` before lookup;
+absent `Origin` = element load, label-checked only), registered
+`(size, mtime)` verify-at-serve (`410` on in-place rewrite), and owner
+enforcement on `ctx.webview_label()`. Two windows each run a
 browser-side battery (img, audio seek, fetch, XHR, Web Worker fetch,
-cross-window reads, bad paths) and report via `invoke`; the app exits
-once both have reported. Every scheme request logs the attributed
-`webview_label`, so the results show whether attribution survives
-element loads, fetch, and worker fetches.
+cross-window reads, bad paths, caps) and report via `invoke`; after both
+report, `main` is navigated to a foreign `http://127.0.0.1` page — same
+label, foreign origin — whose scripted reads must all `403`. Every
+scheme request logs `label` + `origin`, so the results show whether
+attribution survives element loads, fetch, and worker fetches.
 
 Run it:
 
@@ -44,6 +49,18 @@ the full scheme-request log).
 - **macOS / WKWebView** (CI): `pylair://localhost` URL form; img/fetch/
   XHR/worker-fetch all fine with ACAO; owner attribution + 403s hold;
   audio seek works — the media pipeline issues many tiny ranged probes
-  (`bytes=0-1`, `0-8191`, `12-19`, …) then `bytes=21167916-` on seek.
-- CI runs: `45116408180`, `45117258196` (workflow `b0-spike.yml`);
+  (`bytes=0-1`, `0-8191`, `12-19`, …) then `bytes=21167916-` on seek,
+  and accepts short `206`s under the 4 MiB range cap
+  (`audioReqs=15 ranged=14`, `seeked`).
+- **Bounded bodies + origin gate (run `45121029887`, all three legs
+  green):** full-body GET over the 1 MiB cap → `416` + `Accept-Ranges`;
+  `bytes=0-` on the 21 MiB WAV → `206` carrying exactly 4 MiB
+  (truncated `Content-Range`, re-requested by the media stacks);
+  in-place rewrite of `mut_main`'s source → `200` then `410`;
+  `main` navigated to `http://127.0.0.1:<port>` — `label=main
+  origin=http://127.0.0.1:<port>` → `403` on fetch, ranged fetch, XHR
+  and a `127.0.0.1`-origin worker fetch; the same page's `<img>`
+  (no `Origin`) is served — pixels only, no readback.
+- CI runs: `45116408180`, `45117258196`, `45121029887` (workflow
+  `b0-spike.yml`, removed before merge per the spike convention);
   per-OS `results.json` in the run artifacts.
