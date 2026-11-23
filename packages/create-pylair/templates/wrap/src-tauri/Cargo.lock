@@ -2622,6 +2622,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "__APP_NAME__"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-pylair",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3462,9 +3471,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.21"
+version = "0.1.0-rc.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b949ad3986693f2e0ef75993752497da68d97d841863730809df6c3b809f585"
+checksum = "206da96cb2a2b9f2bfff4d546fd2063ae981662120aa81677d0ed4ad6864cc39"
 dependencies = [
  "async-trait",
  "dunce",
@@ -4599,15 +4608,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "__APP_NAME__"
-version = "0.1.0"
-dependencies = [
- "tauri",
- "tauri-build",
- "tauri-plugin-pylair",
-]
 
 [[package]]
 name = "writeable"
