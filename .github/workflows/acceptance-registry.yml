@@ -32,7 +32,7 @@ on:
         options: [pack, registry]
         default: pack
       expect_version:
-        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.28)"
+        description: "Optional. After install, assert the resolved @pylair/cli, @pylair/client and create-pylair versions equal this (e.g. 0.1.0-rc.29)"
         type: string
         required: false
         default: ""
@@ -610,6 +610,80 @@ jobs:
             else
               echo "model manager not fully resolved (pylair ${PY_VER:-<none>}, crate $CRATE_VER) — a skip stays legitimate"
             fi
+            # Blob URLs (decisions 0010) need THREE resolved sides: the
+            # crate (registry + pylair-blob scheme: 0.1.0-rc.23), the
+            # pylair package (pylair.Blob: 0.1.0rc15) and the client
+            # (BlobHandle decode + the self-test check itself:
+            # 0.1.0-rc.29). Same probe style as the models gate above —
+            # fixture + EXPECTED arm only when all three carry it, so a
+            # skip then hides a real regression.
+            NPM_VER=$(node -p "require('../node_modules/@pylair/client/package.json').version" 2>/dev/null || echo "")
+            BLOB_PY=
+            case "$PY_VER" in
+              0.1.0rc*)
+                RC_N=${PY_VER##0.1.0rc}
+                if [ "$RC_N" -ge 15 ]; then BLOB_PY=1; fi ;;
+              "") ;; # no pylair resolved — nothing to arm
+              *) BLOB_PY=1 ;; # any non-rc release is at/past rc15
+            esac
+            BLOB_CRATE=
+            case "$CRATE_VER" in
+              0.1.0-rc.*)
+                RC_N=${CRATE_VER##0.1.0-rc.}
+                if [ "$RC_N" -ge 23 ]; then BLOB_CRATE=1; fi ;;
+              *) BLOB_CRATE=1 ;; # any non-rc line is at/past rc.23
+            esac
+            BLOB_NPM=
+            case "$NPM_VER" in
+              0.1.0-rc.*)
+                RC_N=${NPM_VER##0.1.0-rc.}
+                if [ "$RC_N" -ge 29 ]; then BLOB_NPM=1; fi ;;
+              "") ;; # no client resolved — nothing to arm
+              *) BLOB_NPM=1 ;; # any non-rc line is at/past rc.29
+            esac
+            if [ -n "$BLOB_PY" ] && [ -n "$BLOB_CRATE" ] && [ -n "$BLOB_NPM" ]; then
+              cat >> ../backend/app.py <<'PYEOF'
+
+          # Blob self-test (decisions 0010 §7): make_blob returns a Blob
+          # whose $blob tag the client decodes; the same bytes the
+          # reference backend ships. The selftest_blob_* pair is the
+          # two-window relay — the id is minted at serialization time
+          # so the owner stores what its handle decoded and win-b reads
+          # it back to fetch a foreign window's blob.
+          @expose
+          def make_blob() -> "pylair.Blob":
+              import pylair
+
+              return pylair.Blob(b"pylair-blob-reference-payload", mime="image/png")
+
+
+          _selftest_blob: dict = {"id": "", "verdict": ""}
+
+
+          @expose
+          def selftest_blob_store(id: str) -> None:
+              _selftest_blob["id"] = id
+
+
+          @expose
+          def selftest_blob_id() -> str:
+              return _selftest_blob["id"]
+
+
+          @expose
+          def selftest_blob_outcome(v: str) -> None:
+              _selftest_blob["verdict"] = v
+
+
+          @expose
+          def selftest_blob_verdict() -> str:
+              return _selftest_blob["verdict"]
+          PYEOF
+              echo "PYLAIR_BLOB_EXPECTED=1" >> "$GITHUB_ENV"
+              echo "blob fixtures appended (pylair $PY_VER + crate $CRATE_VER + client $NPM_VER carry blob URLs) — a skipped check fails the leg"
+            else
+              echo "blob URLs not fully resolved (pylair ${PY_VER:-<none>}, crate $CRATE_VER, client ${NPM_VER:-<none>}) — a skip stays legitimate"
+            fi
           else
             echo "resolved crate predates python_selftest_b_report — two-window self-test skipped"
           fi
@@ -660,7 +734,7 @@ jobs:
           for i in 1 2 3; do docker pull ubuntu:22.04 && break || sleep 15; done
           # Bare ubuntu:22.04 has NO python — --self-test exits before the
           # Tauri loop/GTK init but still needs its linked system libs.
-          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -e PYLAIR_WARM_EXPECTED -e PYLAIR_MODELS_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
+          docker run --rm -e PYLAIR_WINB_CAP -e PYLAIR_HEALTH_EXPECTED -e PYLAIR_APP_READINESS_EXPECTED -e PYLAIR_WARM_EXPECTED -e PYLAIR_MODELS_EXPECTED -e PYLAIR_BLOB_EXPECTED -v /tmp/approot:/r:ro -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" ubuntu:22.04 bash -c '
             set -eo pipefail; export DEBIAN_FRONTEND=noninteractive
             sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g" /etc/apt/sources.list
             for i in 1 2 3; do apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10; done
@@ -701,6 +775,14 @@ jobs:
               # fixture/host regression (exact key, escaped quotes).
               if [ "$PYLAIR_MODELS_EXPECTED" = "1" ] && grep -q "\"models\":\"skipped" /tmp/wst.log; then
                 echo "models skipped but resolved pylair + crate carry the model manager" >&2
+                exit 1
+              fi
+              # Blob URLs: armed only when the resolved pylair (>=
+              # 0.1.0rc15), crate (>= 0.1.0-rc.23) AND client (>=
+              # 0.1.0-rc.29) all carry it — a skip then hides a
+              # fixture/host regression (exact key, escaped quotes).
+              if [ "$PYLAIR_BLOB_EXPECTED" = "1" ] && grep -q "\"blob\":\"skipped" /tmp/wst.log; then
+                echo "blob skipped but resolved pylair + crate + client carry blob URLs" >&2
                 exit 1
               fi
             fi
@@ -769,6 +851,11 @@ jobs:
             if ($env:PYLAIR_MODELS_EXPECTED -eq '1' -and
                 (Select-String -Path $out -Pattern '"models":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
               Write-Error 'models skipped but resolved pylair + crate carry the model manager'
+              exit 1
+            }
+            if ($env:PYLAIR_BLOB_EXPECTED -eq '1' -and
+                (Select-String -Path $out -Pattern '"blob":"skipped' -Quiet -ErrorAction SilentlyContinue)) {
+              Write-Error 'blob skipped but resolved pylair + crate + client carry blob URLs'
               exit 1
             }
             $env:PYLAIR_SELF_TEST_WEBVIEW = $null
@@ -849,6 +936,10 @@ jobs:
             fi
             if [ "$PYLAIR_MODELS_EXPECTED" = "1" ] && grep -q '"models":"skipped' /tmp/wst.log; then
               echo "models skipped but resolved pylair + crate carry the model manager" >&2
+              exit 1
+            fi
+            if [ "$PYLAIR_BLOB_EXPECTED" = "1" ] && grep -q '"blob":"skipped' /tmp/wst.log; then
+              echo "blob skipped but resolved pylair + crate + client carry blob URLs" >&2
               exit 1
             fi
           fi

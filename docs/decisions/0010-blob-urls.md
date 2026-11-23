@@ -359,12 +359,17 @@ emission bound to the right task; error-path unlink.
 `Content-Range`); `mediaUrl` over its cap → named error; release →
 command call; old-tag passthrough.
 
-**Selftest + acceptance:** a `"blobs"` selftest check (render an image,
-fetch a range, seek audio in the real webview, read a second window's
-blob → denied) alongside `"models"`/`"warm-workers"`; armed on
-`--local` legs unconditionally and on registry legs when resolved
-crate + pylair ≥ the versions that ship it (same gate pattern —
-`PYLAIR_BLOBS_EXPECTED`).
+**Selftest + acceptance:** a `"blob"` selftest check (fixed-payload
+`make_blob` decodes to a `BlobHandle`; the real webview fetches the URL
+for 200 + exact bytes, a `Range` request for 206 + `Content-Range`,
+`stream()` reassembly, an `<img>` load and a `mediaUrl()` `blob:` URL;
+`release()` then refuses the URL and a second window's fetch is refused
+by owner binding — the id relays through `selftest_blob_*` Python-state
+fixtures) alongside `"models"`/`"warm-workers"`; armed on `--local`
+legs unconditionally and on registry legs when resolved crate + pylair
++ client ≥ the versions that ship it (same gate pattern —
+`PYLAIR_BLOB_EXPECTED`). No media-playback assertion: `mediaUrl()` is
+the WebKitGTK coverage.
 
 **PR split:** 1) crate: scheme, registry, `PYLAIR_BLOB_DIR`, notify
 handling, caps, cleanup; 2) `pylair`: `Blob`, codec tag, register,

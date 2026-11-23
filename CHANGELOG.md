@@ -46,6 +46,19 @@ what the GitHub releases page publishes.
   `docs/performance.md` point at it. `python_release_blob` already rides
   inside `pylair:default`, so no capability file changed.
 
+- **Blob URLs, installed-app acceptance.** The installed-webview
+  self-test gains a `"blob"` check (decision 0010 §7): the fixed-payload
+  `make_blob` fixture decodes to a `BlobHandle`, then the real webview
+  fetches the handle URL (200 + exact bytes), a `Range` request (206 +
+  `Content-Range`), `stream()` reassembly, an `<img>` load, and a
+  `mediaUrl()` `blob:` URL; `release()` then refuses the same URL, and
+  the second window's fetch of it is refused by owner binding — relayed
+  through new `selftest_blob_*` Python-state fixtures so neither
+  window's timing couples to the other. `--local` legs fail on a
+  `"blob":"skipped"` verdict; pack/registry legs arm
+  `PYLAIR_BLOB_EXPECTED` only when the resolved crate is ≥ `0.1.0-rc.23`,
+  pylair ≥ `0.1.0rc15` and `@pylair/client` ≥ `0.1.0-rc.29`.
+
 - **Blob URLs, client side.** `@pylair/client` decodes
   `{"$blob": {"id","mime","size"}}` anywhere a value is valid — results,
   stream chunks, nested containers — into the exported `BlobHandle`:

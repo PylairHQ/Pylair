@@ -656,6 +656,44 @@ jobs:
                   srv.shutdown()
                   _model_state["server"] = None
               return {"removed": True}
+
+
+          # Blob self-test (decisions 0010 §7): make_blob returns a Blob
+          # whose $blob tag the client decodes; the same bytes the
+          # reference backend ships. The selftest_blob_* pair is the
+          # two-window relay — the id is minted at serialization time
+          # so the owner stores what its handle decoded and win-b reads
+          # it back to fetch a foreign window's blob. --local resolves
+          # pylair + crate with blobs, so the fixture is unconditional —
+          # a "skipped" blob verdict fails these legs.
+          @expose
+          def make_blob() -> "pylair.Blob":
+              import pylair
+
+              return pylair.Blob(b"pylair-blob-reference-payload", mime="image/png")
+
+
+          _selftest_blob: dict = {"id": "", "verdict": ""}
+
+
+          @expose
+          def selftest_blob_store(id: str) -> None:
+              _selftest_blob["id"] = id
+
+
+          @expose
+          def selftest_blob_id() -> str:
+              return _selftest_blob["id"]
+
+
+          @expose
+          def selftest_blob_outcome(v: str) -> None:
+              _selftest_blob["verdict"] = v
+
+
+          @expose
+          def selftest_blob_verdict() -> str:
+              return _selftest_blob["verdict"]
           PYEOF
       # After scaffolding: restoring the cache earlier creates
       # src-tauri/target, and the scaffolder rightly refuses a
@@ -776,6 +814,10 @@ jobs:
                 echo "models skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
+              if grep -q "\"blob\":\"skipped" "$f"; then
+                echo "blob skipped on a --local leg — probe must run here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -814,6 +856,10 @@ jobs:
           fi
           if grep -q '"models":"skipped' /tmp/wst.log; then
             echo "models skipped on a --local leg — probe must run here" >&2
+            exit 1
+          fi
+          if grep -q '"blob":"skipped' /tmp/wst.log; then
+            echo "blob skipped on a --local leg — probe must run here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -871,6 +917,10 @@ jobs:
           }
           if (Select-String -Path $out -Pattern '"models":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error 'models skipped on a --local leg — probe must run here'
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"blob":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error 'blob skipped on a --local leg — probe must run here'
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic

@@ -2,7 +2,7 @@
 // PYLAIR_SELF_TEST_WEBVIEW flag nothing may load dist/selftest.js; under
 // the flag a missing chunk must end in a failing verdict, not a hang; and
 // with the chunk present the call still reaches the real owner logic.
-import { test, after } from "node:test";
+import { test, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,6 +80,54 @@ test("flag set, chunk missing: reports a failing verdict and rejects", { timeout
   assert.deepEqual(Object.keys(result), ["ok", "checks"], "same payload shape as the owner role");
 });
 
+// --- webview stubs for the owner role's "blob" check -------------------
+// The check exercises the real webview surface — fetch on the
+// pylair-blob URL (full + ranged + post-release), an <img> element load
+// and mediaUrl()'s blob: URL. Node has fetch/Response/Blob but no Image
+// and no scheme server, so these stand in per test. `webviewState` is
+// the shared flag the bridge mock flips when python_release_blob lands.
+const BLOB_BYTES = new TextEncoder().encode("pylair-blob-reference-payload");
+const webviewState = { released: false };
+let savedFetch, savedImage;
+
+beforeEach(() => {
+  webviewState.released = false;
+  savedFetch = globalThis.fetch;
+  savedImage = globalThis.Image;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.startsWith("blob:")) return new Response(BLOB_BYTES.slice(), { status: 200 });
+    if (!u.includes("pylair-blob")) throw new TypeError(`unexpected fetch ${u}`);
+    if (webviewState.released) return new Response("gone", { status: 404 });
+    const range = init?.headers?.Range ?? init?.headers?.range;
+    if (range) {
+      const m = /^bytes=(\d+)-(\d*)$/.exec(String(range));
+      const s = Number(m[1]);
+      const e = m[2] ? Number(m[2]) : BLOB_BYTES.length - 1;
+      return new Response(BLOB_BYTES.slice(s, e + 1), {
+        status: 206,
+        headers: { "content-range": `bytes ${s}-${e}/${BLOB_BYTES.length}` },
+      });
+    }
+    return new Response(BLOB_BYTES.slice(), { status: 200 });
+  };
+  globalThis.Image = class {
+    set src(v) {
+      this._src = v;
+      setTimeout(() => this.onload?.(), 0);
+    }
+    get src() {
+      return this._src;
+    }
+  };
+});
+
+afterEach(() => {
+  globalThis.fetch = savedFetch;
+  if (savedImage === undefined) delete globalThis.Image;
+  else globalThis.Image = savedImage;
+});
+
 /**
  * A bridge that plays the runtime for the owner role: log_stderr is
  * missing (the probe skips), count streams 0..n-1 and ends in
@@ -117,6 +165,13 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // for pylair < 0.1.0rc14 or a crate without PYLAIR_APP_DATA_DIR;
   // "two-hits" — the server saw the second fetch too: no fast path.
   const { models = "ok" } = opts;
+  // Blob URLs (0010): "ok" — make_blob answers a $blob tag and the
+  // relay fixtures answer; "missing" — FUNCTION_NOT_FOUND (-32601),
+  // the skip path for pylair < 0.1.0rc15; "b64" — the fixture answers
+  // but an older crate's $b64 downgrade arrives as plain bytes, the
+  // second skip path. blobVerdict is what win-b recorded through
+  // selftest_blob_outcome/selftest_blob_verdict.
+  const { blob = "ok", blobVerdict = "refused:403" } = opts;
   // CI appends the fixture only when pylair >= rc14 AND the crate >=
   // rc.22 passes PYLAIR_APP_DATA_DIR — and that crate always carries
   // python_health + the app block. A runtime whose health/app blocks
@@ -148,6 +203,10 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
         return warmSleeps.has(args.task) && warmPlatform === "win32"
           ? "terminated"
           : "cancelled";
+      }
+      if (cmd === "plugin:pylair|python_release_blob") {
+        webviewState.released = true;
+        return null;
       }
       if (cmd === "plugin:pylair|python_health") {
         if (health === "missing")
@@ -318,6 +377,30 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           onEvent({ task, done: true, result: { path: MODEL_PATH, pid: 5150 } });
         } else if (fnName === "models_selftest_cleanup") {
           onEvent({ task, done: true, result: { removed: true } });
+        } else if (fnName === "make_blob") {
+          // The blob fixture; absent means FUNCTION_NOT_FOUND (a
+          // resolved pylair that predates pylair.Blob). "b64" answers
+          // the bytes-tag downgrade — an older crate with no registry.
+          if (blob === "missing")
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          else if (blob === "b64")
+            onEvent({ task, done: true, result: { $b64: Buffer.from(BLOB_BYTES).toString("base64") } });
+          else
+            onEvent({
+              task,
+              done: true,
+              result: {
+                $blob: { id: "selftestblobid0000000a", mime: "image/png", size: BLOB_BYTES.length },
+              },
+            });
+        } else if (
+          fnName === "selftest_blob_store" ||
+          fnName === "selftest_blob_id" ||
+          fnName === "selftest_blob_outcome"
+        ) {
+          onEvent({ task, done: true, result: null });
+        } else if (fnName === "selftest_blob_verdict") {
+          onEvent({ task, done: true, result: blobVerdict });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -382,6 +465,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "app-readiness",
     "warm-workers",
     "models",
+    "blob",
     "event-scoping",
     "fn-permission",
   ]);
@@ -392,6 +476,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
   assert.equal(checks["app-readiness"], "ok");
   assert.equal(checks["warm-workers"], "ok");
   assert.equal(checks["models"], "ok");
+  assert.equal(checks["blob"], "ok");
   assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
   assert.ok(b.listens.includes("pylair://app"), "onApp subscribed on the app event");
   assert.equal(checks["fn-permission"], "ok");
@@ -736,4 +821,54 @@ test("flag set: a host without the app block skips app-readiness", { timeout: 20
     JSON.stringify(checks),
   );
   assert.equal(ok, true, JSON.stringify(checks));
+});
+
+test("flag set: a backend without blob fixtures skips blob, never fails", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { blob: "missing" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.match(checks["blob"], /^skipped: /);
+});
+
+test("flag set: a $b64 downgrade (resolved host predates blob URLs) skips blob", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, { blob: "b64" });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.match(checks["blob"], /^skipped: /);
+});
+
+test("flag set: win-b served the owner's blob fails the check", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    blobVerdict: "served:200",
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["blob"], /^FAIL: cross-window/);
 });

@@ -440,19 +440,32 @@ Merged since rc.17 (d7daaaf):
 `python/` and `integrations/` had not changed since rc.16 until app
 readiness (PR 129) — the next train's PyPI step is back on; step 2
 below was skipped for rc.20 only.
-- PRs 157-160, plus two more in flight: blob URLs (`docs/decisions/
-  0010`), the bulk-binary transport. Five PRs total: 157+158 crate
-  (`pylair-blob` scheme handler, per-generation dirs, owner binding,
+- PRs 157-163: blob URLs (`docs/decisions/0010`), the bulk-binary
+  transport. Five-plus-one PRs total: 157+158 crate (`pylair-blob`
+  scheme handler, per-generation dirs, owner binding,
   `python_release_blob`, bounded reads), 159 `pylair.Blob` (per-send
   handles, `$b64` fallback, task-less-frame refusal), 160 client
   `BlobHandle` (`url`, ranged `stream()`, `mediaUrl()`, `release()`),
-  this one templates/reference-app/docs, and 5 the installed-app
-  acceptance check. A crate follow-up in flight lands the registry's
-  limit rejections on the caller (`LIMIT_EXCEEDED` + `data.limit` on the
+  162 templates/reference-app/docs, 163 the crate follow-up (limit
+  rejections reach the caller — `LIMIT_EXCEEDED` + `data.limit` on the
   terminal, streams end + producer cancel, malformed registers as
-  `INTERNAL`) — and realigns the fair-share bound to the 0005 formula
-  (the shipped one was unreachable). No release yet carries any of it —
-  the next train ships all five.
+  `INTERNAL`; the fair-share bound realigned to the 0005 formula — the
+  shipped one was unreachable; orphaned handles released with the
+  replaced frame; rejected payloads unlinked post-containment), and
+  the last one the installed-app acceptance check. The `blob`
+  self-test check fetches a fixed-payload `make_blob` through the real
+  webview (full 200, ranged 206 + Content-Range, `stream()`
+  reassembly, `<img>` load, `mediaUrl()` blob: URL, `release()` →
+  refused) and proves owner binding: win-b reads the id through the
+  `selftest_blob_*` Python-state relay (same pattern as
+  `b_seen`/`holds_active` — it keeps win-b's report timing independent
+  of the owner's progress) and its fetch must refuse. `--local` legs
+  always carry the fixture and grep-fail on a `"blob":"skipped"`
+  verdict; pack/registry legs append it and arm
+  `PYLAIR_BLOB_EXPECTED=1` only when the resolved crate is ≥
+  `0.1.0-rc.23` AND pylair ≥ `0.1.0rc15` AND `@pylair/client` ≥
+  `0.1.0-rc.29`. No release yet carries any of it — the next train
+  ships the series.
 
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 

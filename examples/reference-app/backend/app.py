@@ -348,3 +348,35 @@ def make_blob() -> "pylair.Blob":
     import pylair
 
     return pylair.Blob(b"pylair-blob-reference-payload", mime="image/png")
+
+
+# Blob self-test relay (decision 0010 §7): the wire id is minted at
+# serialization time, so neither Python side can see it — the owner
+# stores the id its BlobHandle decoded (selftest_blob_store) and win-b
+# reads it back (selftest_blob_id), fetches that URL, and records the
+# refusal through selftest_blob_outcome for the owner to poll
+# (selftest_blob_verdict). Same Python-state rendezvous pattern as
+# b_seen/holds_active: it keeps the win-b report's timing independent of
+# the owner check's progress (CI appends the same functions to
+# scaffolded apps).
+_selftest_blob: dict = {"id": "", "verdict": ""}
+
+
+@expose
+def selftest_blob_store(id: str) -> None:
+    _selftest_blob["id"] = id
+
+
+@expose
+def selftest_blob_id() -> str:
+    return _selftest_blob["id"]
+
+
+@expose
+def selftest_blob_outcome(v: str) -> None:
+    _selftest_blob["verdict"] = v
+
+
+@expose
+def selftest_blob_verdict() -> str:
+    return _selftest_blob["verdict"]
