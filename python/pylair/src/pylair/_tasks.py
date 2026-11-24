@@ -101,14 +101,27 @@ class Task:
 class _WarmMember:
     """One live worker process in a warm pool (decision 0008)."""
 
-    __slots__ = ("busy", "killed", "proc", "stderr_tail", "stderr_task")
+    __slots__ = (
+        "busy",
+        "idle_timer",
+        "killed",
+        "proc",
+        "reaping",
+        "stderr_tail",
+        "stderr_task",
+    )
 
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
         self.proc = proc
         self.busy = False
-        # Killed by us (cancel/drain), not a crash — a deliberate kill
-        # must not count toward the pool's crash-loop limit.
+        # Killed by us (cancel/drain/idle reap), not a crash — a
+        # deliberate kill must not count toward the crash-loop limit.
         self.killed = False
+        # idle_ttl_s (0008 §4): armed on the runtime loop while the
+        # member sits idle; `reaping` marks a member whose TTL already
+        # fired — out of the idle set, never leased again, drop pending.
+        self.idle_timer: asyncio.TimerHandle | None = None
+        self.reaping = False
         # Bounded tail of the member's stderr — a crash's last lines
         # ride the next WORKER_DIED (the #140 review fix).
         self.stderr_tail = b""
@@ -121,6 +134,7 @@ class _WarmPool:
     __slots__ = (
         "deaths",
         "fn_name",
+        "idle_ttl_s",
         "members",
         "prewarm",
         "queue",
@@ -129,7 +143,13 @@ class _WarmPool:
         "stopped",
     )
 
-    def __init__(self, fn_name: str, size: int, prewarm: bool = False) -> None:
+    def __init__(
+        self,
+        fn_name: str,
+        size: int,
+        prewarm: bool = False,
+        idle_ttl_s: float | None = None,
+    ) -> None:
         self.fn_name = fn_name
         self.size = size
         self.members: list[_WarmMember] = []
@@ -142,6 +162,9 @@ class _WarmPool:
         # every fresh member handshakes so ready/failed always means a
         # live member passed import+resolve (0008 §6).
         self.prewarm = prewarm
+        # Per-member idle reap in seconds; None = live until shutdown
+        # or dev restart (0008 §4).
+        self.idle_ttl_s = idle_ttl_s
 
 
 class _PoolStopped(Exception):
@@ -190,6 +213,9 @@ class TaskRegistry:
         self._isolated = 0
         self._warm_live = 0
         self._pools: dict[str, _WarmPool] = {}
+        # Live idle-TTL reap tasks — held so a reap can't be collected
+        # mid-flight (an orphaned member would leak its cap slot).
+        self._reap_tasks: set[asyncio.Task] = set()
         # Set by the server on `shutdown`: worker kills then draw their
         # wait from the shared grace budget, never a fresh ISOLATED_GRACE_S.
         self.deadline: float | None = None
@@ -567,7 +593,10 @@ class TaskRegistry:
         pool = self._pools.get(fn_name)
         if pool is None:
             pool = _WarmPool(
-                fn_name, worker.get("pool", 1), prewarm=worker.get("prewarm", False)
+                fn_name,
+                worker.get("pool", 1),
+                prewarm=worker.get("prewarm", False),
+                idle_ttl_s=worker.get("idle_ttl_s"),
             )
             self._pools[fn_name] = pool
         member: _WarmMember | None = None
@@ -702,6 +731,9 @@ class TaskRegistry:
                 task.worker = None
                 if member in pool.members:
                     member.busy = False
+                    # The member is idle again — its TTL clock starts at
+                    # release, not at the response (0008 §4).
+                    self._arm_idle_timer(pool, member)
                 self._wake_next(pool)
         if "error" in payload:
             self._finish(
@@ -747,8 +779,15 @@ class TaskRegistry:
                     continue
                 if entry is None or (pool.queue and pool.queue[0] is entry):
                     for m in pool.members:
-                        if not m.busy:
+                        # `reaping` members are already condemned: the
+                        # TTL callback marked them on this same loop
+                        # before the kill started, so they can never be
+                        # handed to a call (0008 §4 reap/acquire race).
+                        if not m.busy and not m.reaping:
                             m.busy = True
+                            # Lease cancels the idle clock — it runs
+                            # only while the member is idle.
+                            self._disarm_idle(m)
                             return m
                     if len(pool.members) + pool.spawning < pool.size:
                         if self._isolated + self._warm_live >= MAX_ISOLATED_WORKERS:
@@ -769,6 +808,11 @@ class TaskRegistry:
                         m.stderr_task = asyncio.create_task(
                             self._drain_member_stderr(m)
                         )
+                        # Busy from birth: the member stays in the pool
+                        # through its handshake (so the sweep still owns
+                        # it) but must never be leased to a second call
+                        # while it is still proving itself.
+                        m.busy = True
                         pool.members.append(m)
                         if pool.prewarm:
                             # A fresh member on a prewarmed pool proves
@@ -787,7 +831,6 @@ class TaskRegistry:
                                 await self._drop_warm_member(pool, m)
                                 continue
                             self._report_warm_ready(pool, payload)
-                        m.busy = True
                         return m
                 # No claim — wait for a wake.
                 if entry is None:
@@ -894,12 +937,77 @@ class TaskRegistry:
         except (OSError, ValueError):
             return
 
+    # ---- idle TTL reap (0008 §4) -------------------------------------------
+    #
+    # A member's clock runs only while it sits idle in the pool: armed on
+    # release after a call (or after a prewarmed member's handshake),
+    # cancelled on lease. The timer callback marks the member `reaping`
+    # synchronously on this loop — the atomic half of the reap/acquire
+    # race: a lease either landed first (timer already cancelled) or can
+    # never land (the idle scan skips reaping members). The kill itself
+    # goes through the same _drop_warm_member path as every other reap.
+
+    def _arm_idle_timer(self, pool: _WarmPool, m: _WarmMember) -> None:
+        """Start the member's idle clock for pool.idle_ttl_s seconds."""
+        if (
+            pool.idle_ttl_s is None
+            or m.reaping
+            or m.busy
+            or m not in pool.members
+            or m.idle_timer is not None
+        ):
+            return
+        m.idle_timer = asyncio.get_running_loop().call_later(
+            pool.idle_ttl_s, self._idle_expired, pool, m
+        )
+
+    def _disarm_idle(self, m: _WarmMember) -> None:
+        """Cancel the member's idle clock — on lease or on drop."""
+        if m.idle_timer is not None:
+            m.idle_timer.cancel()
+            m.idle_timer = None
+
+    def _idle_expired(self, pool: _WarmPool, m: _WarmMember) -> None:
+        """TTL fired: mark the member reaping atomically, then drop it.
+
+        The marker decides the accounting: a member still alive is an
+        intentional reap (`killed` — the drop counts no death and emits
+        nothing, exactly like cancel/drain); a member that already died
+        on its own is a real death the drop counts like the dead-scan.
+        """
+        m.idle_timer = None
+        if m.reaping or m.busy or m not in pool.members:
+            return
+        m.reaping = True
+        m.killed = m.proc.returncode is None
+        # Its cap slot frees NOW, not when the kill finishes — a call
+        # landing mid-reap must see the headroom and spawn/wait per the
+        # normal rules, never fail on a member already dead to it. The
+        # membership itself is removed by _drop_warm_member, which skips
+        # this decrement for members already marked reaping.
+        self._warm_live -= 1
+        t = asyncio.create_task(self._reap_idle(pool, m))
+        self._reap_tasks.add(t)
+        t.add_done_callback(self._reap_tasks.discard)
+
+    async def _reap_idle(self, pool: _WarmPool, m: _WarmMember) -> None:
+        """Drop the condemned member — no call is waiting on this reap,
+        so a failure is logged, never raised."""
+        try:
+            await self._drop_warm_member(pool, m)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001
+            _log(f"warm member {m.proc.pid} idle reap failed: {e!r}")
+
     async def _drop_warm_member(self, pool: _WarmPool, m: _WarmMember) -> None:
         """Remove a member from the pool: count a crash death unless we
         killed it, reap the process, wake the queue to respawn lazily."""
+        self._disarm_idle(m)
         if m in pool.members:
             pool.members.remove(m)
-            self._warm_live -= 1
+            if not m.reaping:
+                self._warm_live -= 1
             if not m.killed:
                 pool.deaths += 1
                 if pool.deaths >= WARM_CRASH_LIMIT:
@@ -990,10 +1098,16 @@ class TaskRegistry:
         comp = f"worker:{fn_name}"
         pool = self._pools.get(fn_name)
         if pool is None:
-            pool = _WarmPool(fn_name, worker.get("pool", 1), prewarm=True)
+            pool = _WarmPool(
+                fn_name,
+                worker.get("pool", 1),
+                prewarm=True,
+                idle_ttl_s=worker.get("idle_ttl_s"),
+            )
             self._pools[fn_name] = pool
         else:
             pool.prewarm = True
+            pool.idle_ttl_s = worker.get("idle_ttl_s")
         if pool.stopped:
             # Lazy calls already crashed the pool out — keep the
             # crash-loop reason, never spawn into a stopped pool.
@@ -1003,11 +1117,15 @@ class TaskRegistry:
             # A racing call already spawned (or is spawning) a member —
             # the lazy path's own post-spawn handshake reports the
             # component; a second spawn would overshoot pool.size.
+            self._wake_next(pool)  # a live member may be leasable now
             return
         if self._isolated + self._warm_live >= MAX_ISOLATED_WORKERS:
             _readiness.failed(
                 comp, detail=f"isolated worker cap {MAX_ISOLATED_WORKERS} reached"
             )
+            # Wake queued calls so they re-scan and hit _WarmCap instead
+            # of parking on a prewarm that will never spawn.
+            self._wake_next(pool)
             return
         # Reserve size and cap slots across the spawn await —
         # a call arriving mid-prewarm must not overshoot either.
@@ -1024,19 +1142,28 @@ class TaskRegistry:
         except BaseException as e:  # noqa: BLE001 - spawn failure is app state
             self._warm_live -= 1
             _readiness.failed(comp, detail=f"{type(e).__name__}: {e}")
+            # Queued calls must not park on a prewarm that will never
+            # finish — wake them to spawn (or cap-fail) themselves.
+            self._wake_next(pool)
             return
         m = _WarmMember(proc)
         m.stderr_task = asyncio.create_task(self._drain_member_stderr(m))
         # In the pool before the handshake — a mid-handshake cancel or
-        # drain still reaps the member like any other live member.
-        # (_warm_live was already reserved across the spawn.)
+        # drain still reaps the member like any other live member — but
+        # busy, so a scanning call cannot lease it and interleave its
+        # frames with the handshake (0008 §6). (_warm_live was already
+        # reserved across the spawn.)
+        m.busy = True
         pool.members.append(m)
         try:
             payload = await self._warm_handshake(proc)
         except asyncio.CancelledError:
+            m.busy = False  # leasable again if the pool survives the cancel
             raise
         except BaseException as e:  # noqa: BLE001 - report, never raise
             _readiness.failed(comp, detail=f"handshake failed: {type(e).__name__}: {e}")
+            m.busy = False  # same disposition as before: leasable, suspect
+            self._wake_next(pool)
             return
         if payload is None:
             await self._drop_warm_member(pool, m)
@@ -1052,7 +1179,15 @@ class TaskRegistry:
                 ),
             )
         else:
+            # Proven and leasable — report ready, then start the idle
+            # clock: handshake completion is the same idle start as a
+            # post-call release (§4).
+            m.busy = False
             self._report_warm_ready(pool, payload)
+            self._arm_idle_timer(pool, m)
+        # The member is claimable now (or was just dropped — wake is a
+        # no-op then): a call that queued mid-prewarm must not park.
+        self._wake_next(pool)
 
     def _interrupt_warm(self, task: Task) -> None:
         """Interrupt the serving member's call, worker-side (0008 §2):

@@ -113,7 +113,18 @@ at `@expose` time, not at cancel time.
 > for `prewarm: True` functions — gating on `worker:<fn>` for a
 > function that is not prewarmed (or does not exist) fails at the
 > end-of-startup sweep with a detail that names the fix.
-> `idle_ttl_s` is reserved and rejected at decoration until it lands.
+> `idle_ttl_s` (default `None`) bounds how long a member may sit
+> **idle**: a member unused that long is reaped through the same kill
+> path as shutdown — not a crash, so it never counts toward the
+> crash-loop limit and emits nothing. The pool may shrink to zero
+> members; the next call respawns lazily exactly like a first call.
+> The clock is per member: it starts when the member is released after
+> a call (or when a prewarmed member finishes its ready handshake) and
+> is cancelled when it is leased, so a member busy on a call is never
+> reaped however long the call runs. `prewarm: True` is allowed with a
+> ttl — the member prewarms once at startup and is NOT re-prewarmed
+> after a reap; `worker:<fn>` stays `ready` throughout (the app is
+> still ready — the next call just pays a cold start).
 > On the wire, `exposes[].kind` reports `"isolated"` either way;
 > worker config rides inside `signature.meta`.
 

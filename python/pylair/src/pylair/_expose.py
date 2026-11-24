@@ -4,14 +4,15 @@ Kinds reported in the handshake (protocol §4): sync | async | generator |
 isolated. `worker` selects how an isolated call runs (decision 0008):
 {"mode": "process"} is today's per-call worker; {"mode": "warm"} is a
 long-lived per-function pool (prewarm spawns the first member at
-startup and reports the worker:<fn> readiness component). `idle_ttl_s`
-is reserved and rejected at decoration until it lands.
+startup and reports the worker:<fn> readiness component; idle_ttl_s
+reaps a member idle that long — the pool respawns lazily).
 """
 
 from __future__ import annotations
 
 import functools
 import inspect
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, overload
@@ -44,8 +45,9 @@ def _normalize_worker(worker: dict) -> dict:
     """Validate a `worker=` mapping at decoration and fill defaults.
 
     `mode` selects the execution mode; every other key must be known.
-    `idle_ttl_s` is reserved by the design but not implemented in v1 —
-    it is rejected here rather than silently ignored (0008 §4).
+    `idle_ttl_s` (0008 §4) is a per-member idle lifetime: None (the
+    default) means members live until shutdown or dev restart; a finite
+    number > 0 reaps a member that has been idle that long.
     """
     mode = worker.get("mode")
     if mode not in ("process", "warm"):
@@ -61,10 +63,15 @@ def _normalize_worker(worker: dict) -> dict:
     prewarm = worker.get("prewarm", False)
     if not isinstance(prewarm, bool):
         raise TypeError(f"worker['prewarm'] must be a bool, got {prewarm!r}")
-    if worker.get("idle_ttl_s") is not None:
+    ttl = worker.get("idle_ttl_s")
+    if ttl is not None and (
+        not isinstance(ttl, (int, float))
+        or isinstance(ttl, bool)
+        or not math.isfinite(ttl)
+        or ttl <= 0
+    ):
         raise ValueError(
-            "worker['idle_ttl_s'] is not implemented in v1 (0008 §4); "
-            "warm workers live until shutdown or dev restart"
+            f"worker['idle_ttl_s'] must be a finite number > 0, got {ttl!r}"
         )
     pool = worker.get("pool", 1)
     if not isinstance(pool, int) or isinstance(pool, bool) or pool < 1:
@@ -82,6 +89,8 @@ def _normalize_worker(worker: dict) -> dict:
     cfg = {"mode": "warm", "pool": pool, "cancel_grace_ms": grace_ms}
     if prewarm:
         cfg["prewarm"] = True
+    if ttl is not None:
+        cfg["idle_ttl_s"] = ttl
     return cfg
 
 
@@ -164,8 +173,9 @@ def expose(
     calls from a long-lived per-function pool — `cancel_grace_ms`
     (0..3000, default 3000) is the interrupt grace before the kill
     fallback, and `prewarm: True` spawns the first member at startup and
-    reports readiness on the `worker:<fn>` component.
-    `idle_ttl_s` is rejected until implemented.
+    reports readiness on the `worker:<fn>` component. `idle_ttl_s`
+    (default None) reaps a member that has been idle that many seconds —
+    the next call respawns lazily.
 
     `requires` names readiness components the call waits on before
     running (decision 0007 §2): each name is declared in phase

@@ -355,6 +355,35 @@ def warm_gated_result(marker: str, size: int) -> dict:
     return {"pid": os.getpid(), "items": ["x"] * size}
 
 
+# idle_ttl_s fixtures (0008 §4): a 0.3 s idle lifetime — long enough that
+# a call always fits inside it, short enough that "wait for the reap" is
+# a fast poll instead of a stall.
+
+
+@expose(worker={"mode": "warm", "idle_ttl_s": 0.3})
+def warm_ttl_pid() -> int:
+    """Identity witness for the idle reap: same pid = member survived."""
+    return os.getpid()
+
+
+@expose(worker={"mode": "warm", "idle_ttl_s": 0.3})
+def warm_ttl_sleep(seconds: float) -> int:
+    """A call longer than the TTL — the member must not be reaped while
+    busy; returning the serving pid doubles as the reuse witness."""
+    time.sleep(seconds)
+    return os.getpid()
+
+
+@expose(worker={"mode": "warm", "idle_ttl_s": 0.3})
+def warm_ttl_maybe_crash(crash: bool = True) -> int:
+    """Hard-die on demand inside a TTL pool — proves an idle reap burns
+    no crash-loop token: two real deaths after a reap must NOT stop the
+    pool (it would if the reap had counted)."""
+    if crash:
+        os._exit(3)
+    return os.getpid()
+
+
 @expose
 def move(p: Point, dx: float = 0.0) -> Point:
     """Translate a point; dataclass in, dataclass out."""
