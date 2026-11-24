@@ -31,8 +31,8 @@
 //! relaunches, and records the reason for `health().update.lastRollback`.
 
 use super::{
-    is_skipped, read_pending, PendingFile, APPROVAL_FILE, PENDING_FILE, PROGRESS_FILE,
-    ROLLBACK_REASON_FILE, SKIPPED_FILE, UPDATE_OK_FILE,
+    effective_install_mode, is_skipped, read_pending, PendingFile, APPROVAL_FILE, PENDING_FILE,
+    PROGRESS_FILE, ROLLBACK_REASON_FILE, SKIPPED_FILE, UPDATE_OK_FILE,
 };
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -679,9 +679,14 @@ pub fn run(args: &WatchArgs, pubkey_b64: &str, hooks: &Hooks) -> Verdict {
 
     // §2: per-machine installs can't silently elevate for the
     // rollback — record the approval state; the next interactive
-    // launch offers the restore.
+    // launch offers the restore. The scope is resolved from the
+    // declared mode AND the argv install path: the conf's installMode
+    // never reaches `app.config()` (codegen prunes bundle.windows.nsis)
+    // so a Program Files location is what actually proves per-machine.
     let mode = p.install_mode.as_deref().unwrap_or("current-user");
-    if hooks.platform == Platform::Windows && mode != "current-user" {
+    if hooks.platform == Platform::Windows
+        && effective_install_mode(mode, &args.install_path) == "per-machine"
+    {
         write_skip_entry(dir, &p);
         write_approval(dir, &p, &reason);
         write_reason(dir, &p, &reason, "rollback-pending-approval");

@@ -267,6 +267,13 @@ Two edge cases:
   would need UAC mid-crash-loop): the watchdog records
   `rollback-pending-approval` and the next interactive launch surfaces
   the approval-needed state instead of attempting a restore (0011 §2).
+  The scope is inferred from the install *location*, never the conf —
+  `generate_context!` prunes `bundle.windows.nsis` out of the embedded
+  `Config` (its `ToTokens` impl forwards only `webview_install_mode`),
+  so `installMode` never reaches `app.config()`. An install under
+  `%ProgramFiles%` is definitionally per-machine: a per-user install
+  cannot write there, and a `both`-mode install resolved per-user is
+  correctly treated as per-user.
 - **Single instance per pending window**: a lock file in the state dir
   means a duplicate watchdog exits immediately; logging is bounded to
   `updater-state/upwatch.log`.

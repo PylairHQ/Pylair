@@ -129,7 +129,15 @@ the series is released until all PRs land._
   decode matched `tauri-plugin-updater`'s two-step. The rollback
   manifest lookup ran the *update* comparator (`release > current`)
   against the current version's own manifest — restore lookups now use
-  an exact-version comparator.
+  an exact-version comparator. `install_mode` read
+  `bundle.windows.nsis.installMode` out of `app.config()`, but
+  `generate_context!` prunes `bundle.windows.nsis` from the embedded
+  `Config` (its `ToTokens` impl forwards only `webview_install_mode`),
+  so the runtime never sees it and a per-machine install silently
+  restored instead of recording `rollback-pending-approval`. Install
+  scope is now inferred from the install *location*: under
+  `%ProgramFiles%` is definitionally per-machine, and a `both`-mode
+  install resolved per-user is correctly treated as per-user.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
