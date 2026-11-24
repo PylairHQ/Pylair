@@ -1,6 +1,6 @@
 # 0008: Warm isolated workers
 
-Status: accepted, implemented (PRs #139-#143, #144)
+Status: accepted, implemented (PRs #139-#143, #144; `idle_ttl_s` later)
 
 ## Question
 
@@ -187,14 +187,28 @@ new outcome value.
 Each pool member is a full interpreter plus whatever the function's
 globals hold — with torch-class models, N members = N model copies
 (CPU or VRAM). Defaults: `pool: 1`, `prewarm: False` (lazy spawn),
-`idle_ttl_s: None`, and `cancel_grace_ms: 3000` per §2. **TTL is not
-in v1**: reap/respawn-on-idle machinery can come later without an API
-change — but a non-`None` `idle_ttl_s` is *rejected at decoration* for
-now, the same treatment `mode: "warm"` itself had
-(`_expose.py:112-115`), rather than accepted and silently ignored.
-Docs guidance to write when it ships: one model copy per worker,
-prefer `pool: 1` and let the queue absorb bursts, raise `pool` only
-when throughput demands and memory allows.
+`idle_ttl_s: None`, and `cancel_grace_ms: 3000` per §2. **TTL**
+(implemented after v1, same kill paths): `idle_ttl_s` is a per-member
+idle lifetime — a member not leased for that many seconds is reaped
+through `_kill_proc`, deliberately (`killed`), so it is not a crash:
+no `WORKER_DIED`, no `pool.deaths` increment, nothing emitted. The
+timer is a `loop.call_later` armed when the member goes idle (release
+after a call, or a prewarmed member's completed handshake) and
+cancelled on lease, so busy members are never reaped and the reap/
+acquire race is decided atomically on the runtime loop: the expiry
+callback marks the member `reaping` (and frees its
+`max_isolated_workers` slot) before the kill starts — a call either
+leased it first or can never receive it, and simply spawns or queues
+per the normal rules. The pool may shrink to zero members; the next
+call respawns lazily. `prewarm` composes: the member prewarms once, is
+reaped after its idle ttl, and the pool does NOT re-prewarm — the
+`worker:<fn>` component stays `ready` (the app is still ready; the
+next call pays a cold start). Shutdown/dev-restart cancel pending
+timers through the same `_drop_warm_member`/`_reap_warm_pools` sweep.
+Guidance: one model copy per worker, prefer `pool: 1` and let the
+queue absorb bursts, raise `pool` only when throughput demands and
+memory allows; set `idle_ttl_s` when the resident model's memory
+matters more than an occasional cold start.
 
 ## 5. Semantics change: state survives calls
 

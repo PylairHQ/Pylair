@@ -270,17 +270,30 @@ def _diagnose(runtime, pid: int | None = None, deaths: list | None = None) -> st
 
 
 def _pid_dead(pid: int, timeout: float = _HANG_S) -> None:
-    """Poll until the pid is gone (POSIX kill-0; Windows skips per the
-    suite's existing convention — its kill path is proven elsewhere)."""
-    if sys.platform == "win32":
-        return
+    """Poll until the pid is gone. POSIX uses kill-0; Windows polls
+    tasklist — os.kill(pid, 0) is NOT a probe there (signal 0 maps to
+    TerminateProcess and would kill the member itself)."""
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.05)
+    if sys.platform == "win32":
+        while time.time() < deadline:
+            # /FI filters server-side: a live pid emits one CSV row
+            # starting with a quote; a dead pid only an INFO line.
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if not out.startswith('"'):
+                return
+            time.sleep(0.1)
+    else:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
     raise AssertionError(
         f"pid {pid} still alive after {timeout}s\n{_hang_dump(_ACTIVE_RT)}"
     )
@@ -320,12 +333,48 @@ def test_warm_option_implies_isolated_kind():
     _with_clean_registry(go)
 
 
-def test_warm_option_rejects_unimplemented_keys():
+def test_warm_option_rejects_bad_prewarm_type():
     def go():
         with pytest.raises(TypeError, match="prewarm"):
             expose(worker={"mode": "warm", "prewarm": "yes"})(lambda: 1)
-        with pytest.raises(ValueError, match="idle_ttl_s"):
-            expose(worker={"mode": "warm", "idle_ttl_s": 60})(lambda: 1)
+
+    _with_clean_registry(go)
+
+
+def test_warm_option_idle_ttl_s_validation():
+    """0008 §4: idle_ttl_s is None (default — absent from the normalized
+    config) or a finite number > 0; bool, 0, negatives, NaN/inf and
+    non-numbers are rejected at decoration like every other worker key."""
+
+    def go():
+        @expose(worker={"mode": "warm", "idle_ttl_s": 60})
+        def probe() -> int:
+            return 1
+
+        assert exposed_functions()["probe"].worker == {
+            "mode": "warm",
+            "pool": 1,
+            "cancel_grace_ms": 3000,
+            "idle_ttl_s": 60,
+        }
+
+        @expose(worker={"mode": "warm", "idle_ttl_s": 0.5})
+        def probe_float() -> int:
+            return 1
+
+        assert exposed_functions()["probe_float"].worker["idle_ttl_s"] == 0.5
+
+        # Default stays absent — a normalized config carries no
+        # idle_ttl_s key at all.
+        @expose(worker={"mode": "warm"})
+        def probe_default() -> int:
+            return 1
+
+        assert "idle_ttl_s" not in exposed_functions()["probe_default"].worker
+
+        for bad in (True, 0, 0.0, -1, -0.5, float("nan"), float("inf"), "30"):
+            with pytest.raises(ValueError, match="idle_ttl_s"):
+                expose(worker={"mode": "warm", "idle_ttl_s": bad})(lambda: 1)
 
     _with_clean_registry(go)
 
@@ -1308,3 +1357,172 @@ def test_prewarm_false_stays_lazy(tmp_path):
         rt.send(call(1, "lazy_pid", task=1))
         assert rt.recv()["result"] > 0
         assert _wait_pidfile(pf) > 0
+
+
+# ---- idle_ttl_s (0008 §4) -------------------------------------------------------
+# Fixture ttl is 0.3 s: long enough that a call or a sub-ttl gap always fits,
+# short enough that "wait for the reap" is a fast poll. Reap witnesses are the
+# member's own pid (gone on _pid_dead, changed on the next call) — no fixed
+# sleeps as assertions; sleeps only place a call relative to the boundary.
+
+
+def test_ttl_idle_member_reaped(runtime):
+    """A member idle past idle_ttl_s is reaped through the kill path: the
+    pid is gone (no orphan — the member's group, reaper child included,
+    dies with it), and the quiet reap emits no frame at all."""
+    runtime.recv()
+    runtime.send(call(1, "warm_ttl_pid", task=1))
+    resp = runtime.recv()
+    assert "result" in resp, f"setup call failed: {resp!r}"
+    pid = resp["result"]
+    kids = _children(pid) if sys.platform != "win32" else []
+    _pid_dead(pid)
+    for k in kids:
+        _pid_dead(k)
+    # The reap is not a death: nothing may be emitted for it. A stray
+    # frame would sit in the queue and surface here.
+    assert runtime._q.empty(), f"idle reap emitted frames: {list(runtime._q.queue)}"
+    assert not any("WORKER_DIED" in line for line in runtime.stderr_lines)
+
+
+def test_ttl_call_within_ttl_reuses_and_resets(runtime):
+    """Calls spaced under the ttl reuse the member, and each release
+    restarts the clock: five calls over ~0.5 s (> ttl in total, < ttl
+    per gap) all land on one pid — then the idle reap takes it."""
+    runtime.recv()
+    pids = []
+    for i in range(5):
+        if i:
+            time.sleep(0.1)
+        runtime.send(call(i + 1, "warm_ttl_pid", task=i + 1))
+        pids.append(runtime.recv()["result"])
+    assert len(set(pids)) == 1, (
+        f"member reaped mid-sequence — idle clock did not reset: {pids}"
+    )
+    _pid_dead(pids[0])
+
+
+def test_ttl_busy_member_is_not_reaped(runtime):
+    """A call longer than the ttl runs to completion — the timer only
+    runs while idle — and the member is reaped only after it idles."""
+    runtime.recv()
+    runtime.send(call(1, "warm_ttl_sleep", task=1, input={"seconds": 1.0}))
+    t0 = time.monotonic()
+    resp = runtime.recv()
+    assert "result" in resp, f"long call did not complete: {resp!r}"
+    assert time.monotonic() - t0 >= 0.9, "call returned early — was it cut?"
+    _pid_dead(resp["result"])
+
+
+def test_ttl_reap_then_respawn_deaths_unchanged(runtime):
+    """A reap is not a death: after one, two REAL crashes leave the pool
+    serving — had the reap counted, deaths would hit the limit early.
+    The post-reap call also proves the pool shrank to zero and respawned
+    lazily on a new pid."""
+    runtime.recv()
+    runtime.send(call(1, "warm_ttl_maybe_crash", task=1, input={"crash": False}))
+    pid1 = runtime.recv()["result"]
+    _pid_dead(pid1)  # the reap ran — and counted for nothing
+    runtime.send(call(2, "warm_ttl_maybe_crash", task=2, input={"crash": True}))
+    assert runtime.recv()["error"]["code"] == proto.WORKER_DIED
+    runtime.send(call(3, "warm_ttl_maybe_crash", task=3, input={"crash": True}))
+    assert runtime.recv()["error"]["code"] == proto.WORKER_DIED
+    # deaths == 2, not 3 — the pool is still alive.
+    runtime.send(call(4, "warm_ttl_maybe_crash", task=4, input={"crash": False}))
+    resp = runtime.recv()
+    assert "result" in resp, f"pool stopped — an idle reap counted as a death: {resp!r}"
+    assert resp["result"] != pid1, "respawn after the reap reused a dead pid"
+
+
+def test_ttl_reap_race_calls_succeed(runtime):
+    """Drive calls around the reap moment: before it (reuse), at it
+    (acquire races the mark), just after (kill in flight or pool already
+    empty -> lazy spawn). The atomic mark means a member mid-reap is
+    never handed out, so every call simply succeeds — 50 sweeps plus a
+    queued pair every seventh to cover the wait path."""
+    runtime.recv()
+    rid = 100
+    for i in range(50):
+        time.sleep((0.15, 0.3, 0.3, 0.38, 0.45)[i % 5])
+        n_calls = 2 if i % 7 == 6 else 1
+        for _ in range(n_calls):
+            runtime.send(call(rid, "warm_ttl_pid", task=rid))
+            rid += 1
+        want = set(range(rid - n_calls, rid))
+        got = _collect(runtime, want)
+        for r in sorted(got):
+            assert "result" in got[r], (
+                f"iteration {i}: call {r} failed mid-reap: {got[r]!r}"
+            )
+
+
+def test_prewarm_pool_still_reaps_and_stays_ready(tmp_path):
+    """prewarm + ttl (0008 §4/§6): the startup member completes its
+    handshake (component ready), idles, and is reaped — no re-prewarm.
+    The worker:<fn> component stays ready throughout (the app is still
+    ready; the next call just pays a cold start on a fresh member, whose
+    own handshake re-reports ready)."""
+    pf = tmp_path / "ttl.pid"
+    with Runtime(
+        "testapp_prewarm_ttl", env={"PYLAIR_PREWARM_TTL_PIDFILE": str(pf)}
+    ) as rt:
+        _guard(rt)
+        rt.recv()
+        _components_until(rt, "worker:prewarm_ttl_pid", ["loading", "ready"])
+        prewarmed = _wait_pidfile(pf)
+        _pid_dead(prewarmed)
+        rt.send(call(1, "prewarm_ttl_pid", task=1))
+        # Collect the cold-start response AND the component frames: the
+        # respawned member's handshake re-reports ready (same phase, so
+        # it rides the next flush interval); a failed phase would land
+        # in `phases` here — after the reap nothing should ever report
+        # one.
+        resp = None
+        phases: list[str] = []
+        deadline = time.time() + _HANG_S
+        while resp is None or not phases:
+            assert time.time() < deadline, (
+                f"cold-start respawn or re-reported ready never arrived: {phases}"
+            )
+            m = rt.recv(timeout=max(0.1, deadline - time.time()))
+            if m.get("id") == 1:
+                resp = m
+            elif (
+                m.get("method") == "app.component"
+                and m["params"].get("name") == "worker:prewarm_ttl_pid"
+            ):
+                phases.append(m["params"]["phase"])
+        assert resp["result"] > 0
+        assert resp["result"] != prewarmed, (
+            "post-reap call landed on the reaped member — not a cold start"
+        )
+        assert phases == ["ready"], f"component report across the reap: {phases}"
+
+
+def test_ttl_reap_frees_cap_slot():
+    """The reaped member releases its max_isolated_workers slot: with
+    cap=1 a process-mode call is refused while the member lives and fits
+    once the idle reap has run."""
+    with Runtime(env={"PYLAIR_MAX_ISOLATED_WORKERS": "1"}) as rt:
+        _guard(rt)
+        rt.recv()
+        rt.send(call(1, "warm_ttl_pid", task=1))
+        pid = rt.recv()["result"]
+        rt.send(call(2, "isolated_add", task=2, input={"a": 1, "b": 2}))
+        resp = rt.recv()
+        assert resp["error"]["code"] == proto.LIMIT_EXCEEDED
+        # On POSIX _pid_dead is the reap event; on Windows it's a real
+        # tasklist poll now, so this is the same witness on both.
+        _pid_dead(pid)
+        deadline = time.time() + _HANG_S
+        for i in range(3, 200):
+            rt.send(call(i, "isolated_add", task=i, input={"a": 1, "b": 2}))
+            resp = rt.recv()
+            if "result" in resp:
+                assert resp["result"] == 3
+                return
+            assert resp["error"]["data"]["limit"] == "max_isolated_workers", (
+                f"unexpected refusal after reap: {resp!r}"
+            )
+            assert time.time() < deadline, "cap slot never freed after idle reap"
+            time.sleep(0.1)

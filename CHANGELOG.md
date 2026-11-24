@@ -72,6 +72,12 @@ the series is released until all PRs land._
   own `latest.json`. Unset or unfetchable ⇒ install refuses — no
   rollback path, no install. `create-pylair --with-updater` injects a
   placeholder.
+- `worker={"mode": "warm", "idle_ttl_s": N}`: a warm pool member left
+  idle N seconds is reaped through the normal kill path — deliberately,
+  so no `WORKER_DIED` and no crash-loop count — and the pool respawns
+  lazily on the next call (no re-prewarm; `worker:<fn>` stays `ready`).
+  The clock runs only while the member is idle: a call in flight is
+  never interrupted by it (decision 0008 §4).
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
