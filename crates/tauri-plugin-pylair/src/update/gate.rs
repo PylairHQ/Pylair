@@ -143,7 +143,7 @@ impl UpdateGate {
                     .map(|rt| rt.0.health(None))
                     .and_then(|s| s.app)
                     .and_then(|a| a.components.values().map(|c| c.ms_ago).min());
-                g.progress_tick(newest_ms_ago);
+                let _ = g.progress_tick(newest_ms_ago);
             });
         }
         gate.note_boot();
@@ -296,30 +296,38 @@ impl UpdateGate {
     /// `newest_ms_ago` is the smallest `ms_ago` across
     /// `health().app.components` — `None` when no component has ever
     /// reported.
+    ///
+    /// Returns whether the file was written — the testable fact of
+    /// the matter (byte equality is not: two writes inside one
+    /// millisecond produce identical `at_ms`).
     #[doc(hidden)]
-    pub fn progress_tick(&self, newest_ms_ago: Option<u64>) {
+    pub fn progress_tick(&self, newest_ms_ago: Option<u64>) -> bool {
         let Some(p) = read_pending(&self.dir) else {
-            return;
+            return false;
         };
         if p.to != self.version {
-            return;
+            return false;
         }
         let Some(ago) = newest_ms_ago else {
-            return;
+            return false;
         };
         let newest = std::time::Instant::now()
             .checked_sub(Duration::from_millis(ago))
             .unwrap_or_else(std::time::Instant::now);
         {
-            let mut last = self.last_report_seen.lock().unwrap();
+            let last = self.last_report_seen.lock().unwrap();
             if last.is_some_and(|t| newest <= t) {
-                return;
+                return false;
             }
-            *last = Some(newest);
         }
         if let Err(e) = write_progress(&self.dir, &p, ago) {
             eprintln!("[pylair] update: progress write failed: {e}");
+            return false;
         }
+        // Record only on success: a failed write never moved the
+        // file's mtime, so the same evidence deserves a retry.
+        *self.last_report_seen.lock().unwrap() = Some(newest);
+        true
     }
 
     /// Write `ready-<version>` if a pending update targets the running

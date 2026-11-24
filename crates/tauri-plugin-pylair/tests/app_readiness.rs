@@ -432,7 +432,7 @@ async fn a_component_burst_during_pending_still_delivers_every_transition() {
         .as_ref()
         .and_then(|a| a.components.values().map(|c| c.ms_ago).min());
     assert!(ago.is_some());
-    gate.progress_tick(ago);
+    assert!(gate.progress_tick(ago));
     let prog: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("progress.json")).unwrap()).unwrap();
     assert_eq!(prog["session_id"], json!("sess-burst"));

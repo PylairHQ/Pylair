@@ -196,29 +196,29 @@ fn progress_ticks_write_the_heartbeat_only_on_new_reports() {
     update::write_pending(&dir, &pending("1.0.0", "1.1.0")).unwrap();
     let g = gate(&dir, "1.1.0");
     // A fresh report (0 ms ago) lands during the pending window.
-    g.progress_tick(Some(0));
+    assert!(g.progress_tick(Some(0)));
     let p: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("progress.json")).unwrap()).unwrap();
     assert_eq!(p["version"], "1.1.0");
     assert_eq!(p["session_id"], "sess-1");
-    // The same report again (or an older one) writes nothing — the
-    // file's mtime only advances on NEW evidence.
-    let before = fs::read(dir.join("progress.json")).unwrap();
-    g.progress_tick(Some(30_000));
-    assert_eq!(fs::read(dir.join("progress.json")).unwrap(), before);
-    // A NEWER report writes again.
-    g.progress_tick(Some(0));
-    assert_ne!(fs::read(dir.join("progress.json")).unwrap(), before);
+    // Stale evidence writes nothing — the file's mtime only advances
+    // on NEW reports.
+    assert!(!g.progress_tick(Some(30_000)));
+    // A newer report writes again; the bool is the assertion (two
+    // writes in one millisecond would be byte-identical). The sleep
+    // guarantees a strictly-later Instant even on coarse clocks.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(g.progress_tick(Some(0)));
     let _ = fs::remove_dir_all(&dir);
 
     // No pending window: nothing is written.
     let dir = tmp();
     let g = gate(&dir, "1.1.0");
-    g.progress_tick(Some(0));
+    assert!(!g.progress_tick(Some(0)));
     assert!(!dir.join("progress.json").exists());
     // Pending for a DIFFERENT version: also nothing.
     update::write_pending(&dir, &pending("1.0.0", "9.9.9")).unwrap();
-    g.progress_tick(Some(0));
+    assert!(!g.progress_tick(Some(0)));
     assert!(!dir.join("progress.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
