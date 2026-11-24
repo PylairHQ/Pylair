@@ -112,6 +112,7 @@ jobs:
           {
             echo 'TAURI_SIGNING_PRIVATE_KEY<<PYLAIR_KEY_EOF'
             cat "$RUNNER_TEMP/upd.key"
+            echo # key files end without a newline -- the delimiter needs its own line
             echo 'PYLAIR_KEY_EOF'
           } >> "$GITHUB_ENV"
           echo "UPD_KEY_PATH=$RUNNER_TEMP/upd.key" >> "$GITHUB_ENV"
@@ -198,6 +199,7 @@ jobs:
           {
             echo 'TAURI_SIGNING_PRIVATE_KEY<<PYLAIR_KEY_EOF'
             cat "$RUNNER_TEMP/upd.key"
+            echo # key files end without a newline -- the delimiter needs its own line
             echo 'PYLAIR_KEY_EOF'
           } >> "$GITHUB_ENV"
           echo "UPD_KEY_PATH=$RUNNER_TEMP/upd.key" >> "$GITHUB_ENV"
@@ -280,6 +282,7 @@ jobs:
           {
             echo 'TAURI_SIGNING_PRIVATE_KEY<<PYLAIR_KEY_EOF'
             cat "$RUNNER_TEMP/upd.key"
+            echo # key files end without a newline -- the delimiter needs its own line
             echo 'PYLAIR_KEY_EOF'
           } >> "$GITHUB_ENV"
           echo "UPD_KEY_PATH=$RUNNER_TEMP/upd.key" >> "$GITHUB_ENV"
