@@ -1,0 +1,6 @@
+dist/
+out/
+target/
+app/src-tauri/target/
+*.key
+*.key.pub
