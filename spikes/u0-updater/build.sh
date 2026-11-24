@@ -21,6 +21,13 @@ conf = json.load(open("app/src-tauri/tauri.conf.json"))
 conf["version"] = ver
 json.dump(conf, open("app/src-tauri/tauri.conf.json", "w"), indent=2)
 
+# env!("CARGO_PKG_VERSION") reads Cargo.toml — keep it in sync with the
+# conf version or the spike's own markers lie (learned the hard way:
+# the updater saw 0.2.0 via the conf while markers said 0.1.0).
+ct = open("app/src-tauri/Cargo.toml").read()
+ct = re.sub(r'(?m)^(version = )".*"', rf'\g<1>"{ver}"', ct, count=1)
+open("app/src-tauri/Cargo.toml", "w").write(ct)
+
 app = open("app/backend/app.py").read()
 app = re.sub(r'VERSION = ".*"', f'VERSION = "{ver}"', app)
 app = re.sub(r'BROKEN = \w+', f'BROKEN = {"True" if broken else "False"}', app)

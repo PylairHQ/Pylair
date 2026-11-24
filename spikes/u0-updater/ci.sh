@@ -15,7 +15,7 @@ export PYLAIR_STATE_DIR=$STATE
 export PYLAIR_UPDATE_TEST=1
 export PYLAIR_READY_DELAY_MS=1500
 export PYLAIR_EXIT_AFTER_READY_MS=5000
-export PYLAIR_ROLLBACK_DEADLINE_MS=25000
+export PYLAIR_ROLLBACK_DEADLINE_MS=45000
 export PYLAIR_MAX_BOOTS=3
 export PYTHONUTF8=1
 
@@ -72,7 +72,7 @@ case "$OS" in
   Linux)
     cp dist/0.1.0/*.AppImage "$STATE/app.AppImage"; chmod +x "$STATE/app.AppImage"
     APP="$STATE/app.AppImage"
-    launch() { APPIMAGE_EXTRACT_AND_RUN=1 "$APP" & }
+    launch() { APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "$APP" & }
     ;;
   Darwin)
     mkdir -p "$STATE/appdir"
