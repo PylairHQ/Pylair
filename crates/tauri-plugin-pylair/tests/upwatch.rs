@@ -349,31 +349,42 @@ fn silence_past_heartbeat_rolls_back() {
 #[test]
 fn live_progress_keeps_the_window_open() {
     let f = fixture(knobs(120, 3, 60_000));
-    // A background writer keeps progress.json fresh past several
-    // heartbeat windows — silence only counts once it stops (§2: a
-    // long honest load is alive, not dead).
+    // run() blocks until a verdict, so the writer owns the clock: it
+    // keeps progress.json fresh for ~3 heartbeat windows WHILE the
+    // watchdog watches, then goes silent and stamps its stop instant.
+    // Both bounds are relative to that instant — silence counts from
+    // the last live write, never from run()'s start.
     let dir = f.dir.clone();
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = stop.clone();
+    let stopped = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let stopped_w = stopped.clone();
     let writer = std::thread::spawn(move || {
-        while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+        let end = Instant::now() + Duration::from_millis(350);
+        while Instant::now() < end {
             let _ = fs::write(dir.join(PROGRESS_FILE), "{\"tick\":1}");
             std::thread::sleep(Duration::from_millis(25));
         }
+        *stopped_w.lock().unwrap() = Instant::now();
     });
     let h = test_hooks();
-    let t = Instant::now();
-    // Let progress tick ~3 heartbeat windows, then cut it — rollback
-    // must fire ~heartbeat after the LAST write, not the first.
-    std::thread::sleep(Duration::from_millis(350));
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
+    let verdict_at = Instant::now();
     writer.join().unwrap();
+    let stop_at = *stopped.lock().unwrap();
     match v {
         Verdict::RolledBack { reason } => assert_eq!(reason, "no_sign_of_life"),
         other => panic!("expected rollback, got {other:?}"),
-    }
-    assert!(t.elapsed() >= Duration::from_millis(450));
+    };
+    // (b) never fired while progress was still live…
+    assert!(
+        verdict_at >= stop_at,
+        "rollback fired at {verdict_at:?} — before the writer went silent at {stop_at:?}"
+    );
+    // (c) …and fired within ~one heartbeat of real silence (slack for
+    // poll granularity and loaded runners).
+    assert!(
+        verdict_at < stop_at + Duration::from_millis(120 + 1_000),
+        "rollback at {verdict_at:?} is >1s past heartbeat after silence began ({stop_at:?})"
+    );
     let _ = fs::remove_dir_all(&f.dir);
 }
 
