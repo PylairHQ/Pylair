@@ -342,7 +342,10 @@ pub fn python_health_impl<R: Runtime>(
             if !v["app"].is_object() {
                 v["app"] = json!({"components": {}});
             }
-            v["app"]["components"]["updating"] = json!({"phase": state});
+            // Host-injected, so no last-report timestamp exists —
+            // ms_ago is 0, matching the "just observed" truth.
+            v["app"]["components"]["updating"] =
+                json!({"phase": state, "progress": null, "detail": null, "ms_ago": 0});
         }
     }
     Ok(v)
