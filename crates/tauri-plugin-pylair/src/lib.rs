@@ -17,6 +17,7 @@ mod fn_scope;
 mod registry;
 mod selftest;
 mod spec;
+pub mod update;
 mod util;
 pub mod wrap;
 

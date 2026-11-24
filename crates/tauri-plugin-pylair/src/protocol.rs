@@ -38,6 +38,10 @@ pub const LIMIT_EXCEEDED: i64 = -32040;
 /// supervisor is touched; `data` carries `fn` and `window`.
 pub const PERMISSION_DENIED: i64 = -32050;
 
+/// Update machinery failure (decision 0011): the stable machine code
+/// travels in `data.code` ("NotUpdatable", "NeedsApproval", ...).
+pub const UPDATE_FAILED: i64 = -32060;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorObj {
     pub code: i64,
