@@ -54,10 +54,19 @@ describe("create-pylair --with-updater", () => {
 
     const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf-8");
     assert.match(cargo, /tauri-plugin-updater = "2"/);
-    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.23"/); // pylair pin untouched
+    // pylair pin kept, now carrying the `updater` cargo feature so the
+    // host compiles its update machinery (decision 0011 §8 PR 2).
+    assert.match(cargo, /tauri-plugin-pylair = \{ version = "=0\.1\.0-rc\.23", features = \["updater"\] \}/);
 
     const cap = JSON.parse(readFileSync(join(app, "src-tauri/capabilities/default.json"), "utf-8"));
     assert.ok(cap.permissions.includes("updater:default"));
+    for (const p of [
+      "pylair:allow-python-update-check",
+      "pylair:allow-python-update-download",
+      "pylair:allow-python-update-install",
+      "pylair:allow-python-update-relaunch",
+    ])
+      assert.ok(cap.permissions.includes(p), `capability missing ${p}`);
 
     const ignore = readFileSync(join(app, ".gitignore"), "utf-8");
     assert.match(ignore, /\*\.key/);
@@ -79,7 +88,9 @@ describe("create-pylair --with-updater", () => {
     assert.equal(res.status, 0, res.stderr);
     const conf = JSON.parse(readFileSync(join(cwd, "wrap-up/src-tauri/tauri.conf.json"), "utf-8"));
     assert.ok(conf.plugins?.updater?.pubkey);
-    assert.match(readFileSync(join(cwd, "wrap-up/src-tauri/Cargo.toml"), "utf-8"), /tauri-plugin-updater/);
+    const cargo = readFileSync(join(cwd, "wrap-up/src-tauri/Cargo.toml"), "utf-8");
+    assert.match(cargo, /tauri-plugin-updater/);
+    assert.match(cargo, /tauri-plugin-pylair = \{ .+features = \["updater"\] \}/);
   });
 
   test("default scaffold output is byte-identical to the golden", () => {
