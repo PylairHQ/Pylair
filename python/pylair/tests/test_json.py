@@ -319,3 +319,81 @@ def test_coerce_bigint_param():
     for bad in (True, "5", 3.5, None, {"$bigint": "5"}, [1]):
         with pytest.raises(_json.InvalidParams, match="expected BigInt"):
             _json.coerce(BigInt, bad)
+
+
+# The "returns" schema — what callable_schema emits and what tasks carry.
+_B = {"type": "bigint"}
+_ANY = {"type": "any"}
+
+
+def test_coerce_result_bigint_leaf_widens_ints_only():
+    cr = _json.coerce_result
+    out = cr(_B, 5)
+    assert isinstance(out, BigInt) and out == 5
+    out = cr(_B, BigInt(9))  # already BigInt — idempotent
+    assert isinstance(out, BigInt) and out == 9
+    # bool is never an int here; non-ints keep their own encoding —
+    # no silent str/float conversion.
+    assert cr(_B, True) is True
+    assert cr(_B, "5") == "5"
+    assert cr(_B, 3.5) == 3.5
+    assert cr(_B, None) is None
+
+
+def test_coerce_result_union_optional():
+    opt_big = {"type": "union", "opts": [_B, {"type": "none"}]}
+    assert isinstance(_json.coerce_result(opt_big, 7), BigInt)
+    assert _json.coerce_result(opt_big, None) is None
+    # Order doesn't matter: int | BigInt still tags.
+    alt = {"type": "union", "opts": [{"type": "int"}, _B]}
+    assert isinstance(_json.coerce_result(alt, 7), BigInt)
+    # No arm applies -> the value's own encoding survives.
+    assert _json.coerce_result(opt_big, "x") == "x"
+
+
+def test_coerce_result_containers():
+    cr = _json.coerce_result
+    list_big = {"type": "list", "items": _B}
+    assert [type(v) for v in cr(list_big, [1, 2])] == [BigInt, BigInt]
+    assert isinstance(cr(list_big, (1,))[0], BigInt)  # tuple stays tuple
+    assert isinstance(cr(list_big, (1,)), tuple)
+    assert {type(v) for v in cr(list_big, {1, 2})} == {BigInt}  # set too
+    dict_big = {"type": "dict", "keys": _ANY, "values": _B}
+    assert isinstance(cr(dict_big, {"k": 4})["k"], BigInt)
+    tup = {"type": "tuple", "items": [_B, {"type": "str"}]}
+    out = cr(tup, [3, "x"])
+    assert isinstance(out[0], BigInt) and out[1] == "x"
+    # Nested: list[Optional[BigInt]].
+    deep = {
+        "type": "list",
+        "items": {"type": "union", "opts": [_B, {"type": "none"}]},
+    }
+    out = cr(deep, [1, None])
+    assert isinstance(out[0], BigInt) and out[1] is None
+    # Wrong container / unmapped schema -> untouched.
+    assert cr(dict_big, [1]) == [1]
+    assert cr(_ANY, 5) == 5
+    assert cr(None, 5) == 5
+
+
+def test_coerce_result_dataclass_field():
+    @dataclasses.dataclass
+    class Stats:
+        total: BigInt
+        name: str
+
+    schema = {
+        "type": "dataclass",
+        "fields": [
+            {"name": "total", "schema": _B},
+            {"name": "name", "schema": {"type": "str"}},
+        ],
+    }
+    out = _json.coerce_result(schema, Stats(total=5, name="s"))
+    assert isinstance(out.total, BigInt) and out.name == "s"
+    # A plain dict result gets the same field-wise widening.
+    out = _json.coerce_result(schema, {"total": 5, "name": "s", "extra": 1})
+    assert isinstance(out["total"], BigInt) and out["extra"] == 1
+    # Already-BigInt fields rebuild nothing.
+    s = Stats(total=BigInt(2), name="s")
+    assert _json.coerce_result(schema, s) is s

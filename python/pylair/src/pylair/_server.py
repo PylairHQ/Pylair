@@ -561,6 +561,7 @@ class Server:
             input,
             requires=ex.requires,
             worker=ex.worker,
+            ret_schema=ex.signature.get("returns"),
         )
         # Handlers emit the response: value calls on completion, stream
         # calls at the terminal message (protocol §3.1).

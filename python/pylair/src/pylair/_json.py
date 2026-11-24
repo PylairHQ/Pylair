@@ -568,3 +568,71 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
             # where the function expects an object (docs/codegen.md).
             raise InvalidParams(f"param '{name}': {e}") from e
     return out
+
+
+# ---- result coercion: the declared return type decides (docs/codegen.md) ----
+
+
+def coerce_result(schema: dict[str, Any] | None, value: Any) -> Any:
+    """Return-side mirror of coerce(): where the signature's "returns"
+    schema says bigint, a plain int becomes BigInt before encoding — the
+    declared type decides, not the value's class (int arithmetic always
+    drops the subclass, so `a + b` on two BigInts is a plain int).
+
+    Best-effort widening only: a non-int under a bigint leaf, a bool
+    anywhere, and every unmapped shape keep the value's own encoding —
+    no silent str/float conversion and no new error. `schema` is the
+    callable_schema() "returns" dict; for a generator that is the YIELD
+    schema, so the same walk covers stream chunks.
+    """
+    t = schema.get("type") if isinstance(schema, dict) else None
+    if t == "bigint":
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value if isinstance(value, BigInt) else BigInt(value)
+        return value
+    if t == "union":
+        for opt in schema.get("opts") or ():
+            out = coerce_result(opt, value)
+            if out is not value:
+                return out
+        return value
+    if t == "list":
+        item = schema.get("items") or {}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return type(value)(coerce_result(item, v) for v in value)
+        return value
+    if t == "tuple":
+        items = schema.get("items") or ()
+        if isinstance(value, (list, tuple)) and len(items) == len(value):
+            return type(value)(
+                coerce_result(s, v) for s, v in zip(items, value, strict=True)
+            )
+        return value
+    if t == "dict":
+        vals = schema.get("values") or {}
+        if isinstance(value, dict):
+            return {k: coerce_result(vals, v) for k, v in value.items()}
+        return value
+    if t == "dataclass":
+        fields = {f["name"]: f.get("schema") for f in schema.get("fields") or ()}
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            changed = {}
+            for f in dataclasses.fields(value):
+                if f.name in fields:
+                    old = getattr(value, f.name)
+                    out = coerce_result(fields[f.name], old)
+                    if out is not old:
+                        changed[f.name] = out
+            if not changed:
+                return value
+            try:
+                return dataclasses.replace(value, **changed)
+            except Exception:  # noqa: BLE001 - replace re-runs __init__;
+                return value  # refuse quietly, keep the value
+        if isinstance(value, dict):
+            return {
+                k: coerce_result(fields[k], v) if k in fields else v
+                for k, v in value.items()
+            }
+        return value
+    return value

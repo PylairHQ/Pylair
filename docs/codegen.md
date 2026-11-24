@@ -78,6 +78,12 @@ wire. The runtime now encodes:
   tag defensively: only `{"$bigint": s}` where `s` matches
   `^-?(0|[1-9][0-9]*)$` becomes a big integer, anything else stays
   plain data, and payloads over 4096 digits are rejected outright.
+  **The declared type decides:** under a `-> pylair.BigInt` annotation
+  (or `Optional`/`list[BigInt]`, or `AsyncGenerator[BigInt, _]` yield
+  schema for streams), plain `int` results and chunks are widened to
+  `BigInt` before encoding — int arithmetic drops the subclass, so
+  `a + b` still tags. A non-int result (str, float, bool) keeps the
+  value's own encoding — the signature only widens ints.
 - `@dataclass` → `dataclasses.asdict` (params reconstruct by annotation)
 - `datetime`/`date`/`time` → ISO 8601 string (params stay strings; Python
   accepts them via annotation coercion where the arg is annotated)
@@ -127,8 +133,11 @@ from inside the function.
   For exact big integers (ids, counts, hashes) opt in by *type*:
   annotate or return `pylair.BigInt` — it crosses as
   `{"$bigint": "<decimal>"}` regardless of magnitude and comes back as
-  a JS `bigint` (codegen emits `bigint`). Note the tag is opt-in:
-  a plain `int` annotation still maps to `number`, and `pylair.BigInt`
+  a JS `bigint` (codegen emits `bigint`). Annotating the return is
+  enough for arithmetic: `-> pylair.BigInt` results are widened from
+  plain ints before encoding, so `return a + b` tags without
+  re-wrapping. Note the tag is opt-in: a plain `int` annotation still
+  maps to `number` (and still errors out of range), and `pylair.BigInt`
   requires matching `pylair` and `@pylair/client` versions — an old
   client receiving a tag sees a plain `{"$bigint": ...}` object.
 - Non-serializable results (numpy values, torch tensors, open objects)

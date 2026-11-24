@@ -217,6 +217,9 @@ def _invoke(
         _raise_active = True
         try:
             result = fn(**_json.coerce_kwargs(fn, input))
+            # The declared return type decides tagging — a BigInt-
+            # declared fn doing int arithmetic returns plain ints.
+            result = _json.coerce_result(entry.signature.get("returns"), result)
         finally:
             _raise_active = False
         try:

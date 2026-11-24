@@ -80,6 +80,13 @@ hang or OOM the host.
   `pylair.BigInt`). In the host→runtime direction the client encodes a
   JS `bigint` argument as the same tag and the runtime decodes it back
   to `pylair.BigInt`, so exact integers round-trip in both directions.
+  The declared type decides for results too: under a `-> pylair.BigInt`
+  signature (`Optional`/`list[BigInt]` recurse; a generator's yield
+  schema does the same for stream chunks), plain `int` results are
+  widened to `BigInt` before encoding — int arithmetic drops the
+  subclass, so `return a + b` still tags. A non-int result keeps the
+  value's own encoding: the signature only widens ints, never str,
+  float or bool.
   Decoding on both sides is defensive and matches the other tags: only
   an object with exactly the one key `"$bigint"` whose value matches
   `^-?(0|[1-9][0-9]*)$` becomes a big integer — anything else (extra

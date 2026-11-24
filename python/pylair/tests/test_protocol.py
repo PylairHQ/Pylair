@@ -822,7 +822,9 @@ def test_bigint_malformed_tag_is_plain_data(runtime):
     assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == {
         "$bigint": "007"
     }
-    runtime.send(call(2, "bigint_echo", task=2, input={"value": {"$bigint": "5", "x": 1}}))
+    runtime.send(
+        call(2, "bigint_echo", task=2, input={"value": {"$bigint": "5", "x": 1}})
+    )
     assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {
         "$bigint": "5",
         "x": 1,
@@ -833,12 +835,86 @@ def test_bigint_over_digit_cap_is_parse_error_and_runtime_survives(runtime):
     """The 4096-digit cap rejects a hostile tag before either side parses
     the number — one call fails typed, the runtime keeps answering."""
     runtime.recv()
-    runtime.send(call(1, "bigint_echo", task=1, input={"value": {"$bigint": "9" * 4097}}))
+    runtime.send(
+        call(1, "bigint_echo", task=1, input={"value": {"$bigint": "9" * 4097}})
+    )
     resp = runtime.recv_until(lambda m: m.get("id") is None or m.get("id") == 1)
     # id is null — the frame died inside json.loads, before request routing.
     assert resp["error"]["code"] == proto.PARSE_ERROR
     runtime.send(call(2, "add", task=2, input={"a": 1, "b": 1}))
     assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == 2
+
+
+def test_bigint_declared_return_coerces_plain_ints(runtime):
+    """bigint_add returns `a + b` — a PLAIN int, since int ops drop the
+    subclass. The declared `-> BigInt` re-tags it: small values and
+    values past 2^63 both cross as the tag, never as a number/error."""
+    runtime.recv()
+    runtime.send(call(1, "bigint_add", task=1, input={"a": 2, "b": 3}))
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == {"$bigint": "5"}
+    big = str(1 << 63)
+    runtime.send(call(2, "bigint_add", task=2, input={"a": {"$bigint": big}, "b": 1}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {
+        "$bigint": str((1 << 63) + 1)
+    }
+
+
+def test_bigint_return_shapes_list_optional_and_stream(runtime):
+    """list[BigInt] tags each element, Optional[BigInt] tags the int and
+    keeps null, and AsyncGenerator[BigInt] tags every chunk."""
+    runtime.recv()
+    runtime.send(
+        call(
+            1,
+            "bigint_list",
+            task=1,
+            input={"xs": [{"$bigint": "5"}, 9, {"$bigint": str(1 << 70)}]},
+        )
+    )
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == [
+        {"$bigint": "6"},
+        {"$bigint": "10"},
+        {"$bigint": str((1 << 70) + 1)},
+    ]
+    runtime.send(call(2, "bigint_maybe", task=2, input={"n": 7}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {"$bigint": "7"}
+    runtime.send(call(3, "bigint_maybe", task=3, input={"n": -1}))
+    assert runtime.recv_until(lambda m: m.get("id") == 3)["result"] is None
+    # Stream: each yielded `base + i` is a plain int — the yield schema
+    # tags it, including past 2^63 where a bare int couldn't cross.
+    base = 1 << 63
+    runtime.send(
+        call(4, "bigint_stream", task=4, input={"n": 3, "base": base}, stream=True)
+    )
+    runtime.send(grant(4))
+    chunks = [
+        runtime.recv_until(lambda m: m.get("method") == "stream.chunk")
+        for _ in range(3)
+    ]
+    assert [c["params"]["value"] for c in chunks] == [
+        {"$bigint": str(base + i)} for i in range(3)
+    ]
+    assert runtime.recv_until(lambda m: m.get("id") == 4)["result"] == {"done": True}
+
+
+def test_bigint_declared_return_non_int_keeps_own_encoding(runtime):
+    """`-> BigInt` returning a str stays a string — the signature only
+    widens ints, it never silently converts str/float (or bool)."""
+    runtime.recv()
+    runtime.send(call(1, "bigint_weird", task=1))
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == "notanint"
+
+
+def test_int_annotated_result_is_unchanged(runtime):
+    """An int-annotated fn keeps plain-number semantics — no tag, and an
+    out-of-range int still fails the call naming pylair.BigInt."""
+    runtime.recv()
+    runtime.send(call(1, "add", task=1, input={"a": 2, "b": 3}))
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == 5
+    runtime.send(call(2, "unbounded_int", task=2))
+    resp = runtime.recv_until(lambda m: m.get("id") == 2)
+    assert resp["error"]["data"]["type"] == "SerializationError"
+    assert "pylair.BigInt" in resp["error"]["message"]
 
 
 # ---- call/stream intent flag (rc.15 PR I) --------------------------------
