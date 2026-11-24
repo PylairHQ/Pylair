@@ -401,6 +401,21 @@ def roundtrip(data: bytes) -> bytes:
 
 
 @expose
+def bigint_echo(value):
+    """Unannotated passthrough: a $bigint param decodes to pylair.BigInt
+    and re-encodes as the tag on the way out."""
+    return value
+
+
+@expose
+def bigint_add(a: pylair.BigInt, b: pylair.BigInt) -> pylair.BigInt:
+    """Exact big-int arithmetic over the tag — codegen maps the
+    annotation to TS bigint. (a + b is a plain int — int ops don't
+    preserve the subclass — so the result is re-wrapped to opt back in.)"""
+    return pylair.BigInt(a + b)
+
+
+@expose
 async def numbers(n: int) -> AsyncGenerator[int, None]:
     for i in range(n):
         yield i

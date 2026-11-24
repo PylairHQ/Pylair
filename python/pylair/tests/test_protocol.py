@@ -779,6 +779,68 @@ def test_none_default_admits_null(runtime):
     )
 
 
+# ---- $bigint tag -------------------------------------------------------------
+
+
+def test_bigint_tag_round_trips_through_the_runtime(runtime):
+    """A $bigint param decodes to pylair.BigInt inside the runtime and
+    re-encodes as the tag on the way out — both directions exact."""
+    runtime.recv()
+    big = str(1 << 80)
+    runtime.send(call(1, "bigint_echo", task=1, input={"value": {"$bigint": big}}))
+    resp = runtime.recv_until(lambda m: m.get("id") == 1)
+    assert resp["result"] == {"$bigint": big}
+    # Small values tag too — opt-in by type, not magnitude.
+    runtime.send(call(2, "bigint_echo", task=2, input={"value": {"$bigint": "-5"}}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {"$bigint": "-5"}
+
+
+def test_bigint_annotated_params_arithmetic(runtime):
+    """Annotated BigInt params accept the tag AND a plain JSON number
+    (promoted); the int-typed result re-encodes as the tag."""
+    runtime.recv()
+    runtime.send(
+        call(
+            1,
+            "bigint_add",
+            task=1,
+            input={"a": {"$bigint": str(1 << 63)}, "b": {"$bigint": "7"}},
+        )
+    )
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == {
+        "$bigint": str((1 << 63) + 7)
+    }
+    runtime.send(call(2, "bigint_add", task=2, input={"a": 2, "b": 3}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {"$bigint": "5"}
+
+
+def test_bigint_malformed_tag_is_plain_data(runtime):
+    """A non-canonical $bigint never decodes — it round-trips as the
+    caller's own dict, like a malformed $b64 stays a dict."""
+    runtime.recv()
+    runtime.send(call(1, "bigint_echo", task=1, input={"value": {"$bigint": "007"}}))
+    assert runtime.recv_until(lambda m: m.get("id") == 1)["result"] == {
+        "$bigint": "007"
+    }
+    runtime.send(call(2, "bigint_echo", task=2, input={"value": {"$bigint": "5", "x": 1}}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == {
+        "$bigint": "5",
+        "x": 1,
+    }
+
+
+def test_bigint_over_digit_cap_is_parse_error_and_runtime_survives(runtime):
+    """The 4096-digit cap rejects a hostile tag before either side parses
+    the number — one call fails typed, the runtime keeps answering."""
+    runtime.recv()
+    runtime.send(call(1, "bigint_echo", task=1, input={"value": {"$bigint": "9" * 4097}}))
+    resp = runtime.recv_until(lambda m: m.get("id") is None or m.get("id") == 1)
+    # id is null — the frame died inside json.loads, before request routing.
+    assert resp["error"]["code"] == proto.PARSE_ERROR
+    runtime.send(call(2, "add", task=2, input={"a": 1, "b": 1}))
+    assert runtime.recv_until(lambda m: m.get("id") == 2)["result"] == 2
+
+
 # ---- call/stream intent flag (rc.15 PR I) --------------------------------
 
 

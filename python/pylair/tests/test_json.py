@@ -5,7 +5,7 @@ import enum
 
 import pytest
 
-from pylair import _json
+from pylair import BigInt, _json
 
 _SAFE = (1 << 53) - 1  # JS Number.MAX_SAFE_INTEGER
 
@@ -45,6 +45,8 @@ def test_dumps_rejects_big_int_inside_dataclass():
 
 def test_dumps_rejection_message_names_workaround():
     with pytest.raises(ValueError, match="as a string"):
+        _json.dumps({"n": 1 << 60})
+    with pytest.raises(ValueError, match="pylair\\.BigInt"):
         _json.dumps({"n": 1 << 60})
 
 
@@ -217,3 +219,103 @@ def test_kwargs_none_default_admits_none_without_optional():
 
     with pytest.raises(_json.InvalidParams, match="expected str, got null"):
         _json.coerce_kwargs(g, {"x": None})
+
+
+# ---- pylair.BigInt tagging --------------------------------------------------
+# Opt-in by type: a BigInt ALWAYS encodes {"$bigint": "<decimal>"} — even a
+# small one — and plain int is untouched (safe range is numbers, outside is
+# the existing clear error, now naming the way out).
+
+
+def test_bigint_encodes_as_tag_regardless_of_size():
+    assert _json.dumps(BigInt(5)) == '{"$bigint":"5"}'
+    assert _json.dumps(BigInt(-42)) == '{"$bigint":"-42"}'
+    assert _json.dumps(BigInt(0)) == '{"$bigint":"0"}'
+    big = 1 << 70  # beyond ±2^63 too — the tag is decimal text
+    assert _json.dumps(BigInt(big)) == f'{{"$bigint":"{big}"}}'
+
+
+def test_bigint_encodes_nested_and_in_containers():
+    out = _json.dumps({"l": [BigInt(3), 2], "d": {"k": BigInt(-1)}, "t": (BigInt(9),)})
+    assert '"l":[{"$bigint":"3"},2]' in out
+    assert '"d":{"k":{"$bigint":"-1"}}' in out
+    assert '"t":[{"$bigint":"9"}]' in out
+
+
+def test_bigint_inside_dataclass_field_is_tagged():
+    @dataclasses.dataclass
+    class R:
+        n: BigInt
+
+    assert _json.dumps(R(BigInt(1 << 62))) == f'{{"n":{{"$bigint":"{1 << 62}"}}}}'
+
+
+def test_bigint_in_set_emits_sorted_tag_list():
+    assert _json.dumps({BigInt(2), BigInt(10)}) == '[{"$bigint":"10"},{"$bigint":"2"}]'
+
+
+def test_plain_int_and_bool_never_tagged():
+    assert _json.dumps(5) == "5"
+    assert _json.dumps(True) == "true"
+    assert _json.dumps({"b": True, "n": 7}) == '{"b":true,"n":7}'
+    # An int that happens to live inside a BigInt-typed world: only the
+    # typed value tags — neighbours stay plain numbers.
+    assert _json.dumps([BigInt(1), 1]) == '[{"$bigint":"1"},1]'
+
+
+def test_bigint_encode_over_digit_cap_rejects():
+    with pytest.raises(ValueError, match="digit wire cap"):
+        _json.dumps(BigInt(10**4096))
+    # At the cap is still fine.
+    assert "$bigint" in _json.dumps(BigInt(10**4095))
+
+
+def test_loads_bigint_tag_decodes():
+    v = _json.loads('{"a": {"$bigint": "12345678901234567890"}, "b": 1}')
+    assert v["a"] == BigInt("12345678901234567890")
+    assert isinstance(v["a"], BigInt)
+    assert v["b"] == 1
+    assert _json.loads('{"$bigint": "-7"}') == BigInt(-7)
+    assert _json.loads('{"$bigint": "0"}') == BigInt(0)
+
+
+def test_loads_bigint_malformed_and_extra_keys_pass_through():
+    # Anything but {exactly "$bigint": canonical-decimal} is plain data —
+    # same defensive rule as $b64/$blob.
+    for raw in [
+        '{"$bigint": "01"}',  # leading zero — not canonical
+        '{"$bigint": "+5"}',
+        '{"$bigint": "5.0"}',
+        '{"$bigint": "abc"}',
+        '{"$bigint": ""}',
+        '{"$bigint": 5}',  # non-string payload
+        '{"$bigint": "5", "x": 1}',  # extra key
+        '{"$bigint": "5 ", "y": 2}',  # whitespace + extra key
+    ]:
+        out = _json.loads(raw)
+        assert isinstance(out, dict), raw
+        assert not isinstance(out["$bigint"], BigInt), raw
+
+
+def test_loads_bigint_over_digit_cap_rejects():
+    with pytest.raises(ValueError, match="digit cap"):
+        _json.loads('{"$bigint": "' + "9" * 4097 + '"}')
+    # Exactly at the cap is still a valid decode.
+    assert _json.loads('{"$bigint": "' + "9" * 4096 + '"}') == BigInt(10**4096 - 1)
+
+
+def test_bigint_round_trip():
+    payload = {"n": BigInt(-(1 << 80)), "list": [BigInt(3), {"deep": BigInt(0)}]}
+    back = _json.loads(_json.dumps(payload))
+    assert back == payload
+    assert isinstance(back["n"], BigInt)
+    assert isinstance(back["list"][1]["deep"], BigInt)
+
+
+def test_coerce_bigint_param():
+    assert _json.coerce(BigInt, 5) == BigInt(5)
+    assert isinstance(_json.coerce(BigInt, 5), BigInt)
+    assert _json.coerce(BigInt, BigInt(9)) == BigInt(9)
+    for bad in (True, "5", 3.5, None, {"$bigint": "5"}, [1]):
+        with pytest.raises(_json.InvalidParams, match="expected BigInt"):
+            _json.coerce(BigInt, bad)

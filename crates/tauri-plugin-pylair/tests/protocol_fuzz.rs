@@ -283,3 +283,62 @@ async fn oversized_declared_length_is_rejected_fast() {
         "untyped failure {e:?}"
     );
 }
+
+/// Cooperative echo: answers `call` with the input it was sent plus a
+/// tagged result of its own — proving tagged payloads pass through the
+/// host untouched in both directions.
+const FAKE_ECHO: &str = r#"
+import sys, struct, json
+
+def w(obj):
+    b = json.dumps(obj).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b)
+    sys.stdout.buffer.flush()
+
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,
+  "exposes":[{"name":"echo","kind":"sync"}]}})
+
+while True:
+    hdr = sys.stdin.buffer.read(4)
+    if len(hdr) < 4: break
+    (n,) = struct.unpack(">I", hdr)
+    msg = json.loads(sys.stdin.buffer.read(n))
+    if msg.get("method") == "call":
+        w({"jsonrpc":"2.0","id": msg["id"],
+           "result": {"echo": (msg.get("params") or {}).get("input"),
+                      "big": {"$bigint": "9" * 500}}})
+    elif msg.get("method") == "shutdown":
+        w({"jsonrpc":"2.0","id": msg["id"], "result": {}})
+        break
+"#;
+
+/// The {"$bigint": "<decimal>"} tag (docs/codegen.md — pylair.BigInt <->
+/// JS bigint) is opaque wire data to the host: it is never inspected,
+/// coerced or validated — serde_json::Value carries it verbatim in both
+/// directions, exactly like $b64/$blob tags.
+#[tokio::test]
+async fn bigint_tag_crosses_the_host_untouched() {
+    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let h = spawn_h(spec(FAKE_ECHO), cfg(), ev);
+    wait_ready(&h).await;
+
+    // Host -> runtime: the tag in call input arrives verbatim.
+    let sent = json!({
+        "n": {"$bigint": "18446744073709551616"},
+        "neg": {"$bigint": "-123456789012345678901234567890"},
+        "plain": 5,
+    });
+    let res = timeout(T, h.call("echo", sent.clone(), None, Some(false)))
+        .await
+        .expect("call hung")
+        .expect("call failed");
+    assert_eq!(res["echo"], sent, "input tag mangled in transit");
+    // Runtime -> host: a 500-digit tag result crosses untouched.
+    assert_eq!(
+        res["big"],
+        json!({"$bigint": "9".repeat(500)}),
+        "result tag mangled in transit"
+    );
+
+    let _ = h.shutdown().await;
+}

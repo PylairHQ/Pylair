@@ -7,11 +7,13 @@ runner, cancellation handling and schema export. See docs/protocol-v1.md.
 from importlib.metadata import PackageNotFoundError, version
 
 from pylair import models, update
+from pylair._bigint import BigInt
 from pylair._blob import Blob
 from pylair._expose import expose
 from pylair._readiness import failed, loading, on_startup, ready
 
 __all__ = [
+    "BigInt",
     "Blob",
     "expose",
     "failed",

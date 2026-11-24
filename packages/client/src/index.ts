@@ -185,13 +185,19 @@ const EVT = {
 
 // ---- wire JSON (protocol §2, docs/codegen.md) -------------------------------
 //
-// The runtime encodes bytes as {"$b64": "<base64>"} — anywhere in the
-// payload. `call`/`stream` apply the transform here so generated stubs
-// and hand-written callers stay wire-agnostic: pass Uint8Array, get
-// Uint8Array back.
+// The runtime encodes bytes as {"$b64": "<base64>"} and pylair.BigInt
+// values as {"$bigint": "<decimal>"} — anywhere in the payload.
+// `call`/`stream` apply the transform here so generated stubs and
+// hand-written callers stay wire-agnostic: pass Uint8Array, get
+// Uint8Array back; pass a JS bigint, get a JS bigint back.
 
 const B64_TAG = "$b64";
 const BLOB_TAG = "$blob";
+const BIGINT_TAG = "$bigint";
+// Both ends reject a digit string longer than this — a hostile peer
+// must not be able to make either side parse a megabyte-long number.
+const BIGINT_MAX_DIGITS = 4096;
+const BIGINT_RE = /^-?(0|[1-9][0-9]*)$/;
 
 function b64encode(u8: Uint8Array): string {
   let s = "";
@@ -422,18 +428,21 @@ const NOT_WIRE_DATA: ReadonlyArray<[abstract new (...a: never[]) => unknown, str
  * undefined, booleans, numbers, strings, arrays, plain objects
  * (including null-prototype), `Uint8Array` (→ `$b64`), and class
  * instances carrying plain data — own enumerable props ARE the intent,
- * same as `{...x}` spread. Rejected: Date/Map/Set/RegExp/Promise/Error/
+ * same as `{...x}` spread. A JS `bigint` becomes `{"$bigint": "<decimal>"}`
+ * (the wire's exact-integer tag — `pylair.BigInt` on the Python side).
+ * Rejected: Date/Map/Set/RegExp/Promise/Error/
  * ArrayBuffer and views other than Uint8Array (own props don't hold the
- * data), functions/symbols/bigint (JSON can't represent them — JSON
- * would drop or throw later, we throw now with a path), non-plain
- * objects with zero own enumerable props (would serialize as {}), and
- * circular structures. `undefined`/`NaN`/`Infinity` keep JSON
+ * data), functions/symbols (JSON can't represent them — JSON would drop
+ * or throw later, we throw now with a path), non-plain objects with
+ * zero own enumerable props (would serialize as {}), and circular
+ * structures. `undefined`/`NaN`/`Infinity` keep JSON
  * semantics (omitted / null).
  */
 function toWire(v: unknown, path = "input", seen = new Set<object>()): unknown {
   if (v === null || v === undefined) return v;
   const t = typeof v;
-  if (t === "function" || t === "symbol" || t === "bigint")
+  if (t === "bigint") return { [BIGINT_TAG]: (v as bigint).toString() };
+  if (t === "function" || t === "symbol")
     throw new TypeError(`${path} is a ${t} — cannot cross the bridge`);
   if (v instanceof Uint8Array) return { [B64_TAG]: b64encode(v) };
   if (t !== "object") return v;
@@ -487,6 +496,19 @@ function fromWire(v: unknown): unknown {
           tag.size,
         );
       }
+    }
+    if (ks.length === 1 && ks[0] === BIGINT_TAG) {
+      const s = (v as Record<string, unknown>)[BIGINT_TAG];
+      if (typeof s === "string" && BIGINT_RE.test(s)) {
+        const digits = s.startsWith("-") ? s.length - 1 : s.length;
+        if (digits > BIGINT_MAX_DIGITS)
+          throw new TypeError(
+            `$bigint payload exceeds the ${BIGINT_MAX_DIGITS}-digit cap`,
+          );
+        return BigInt(s);
+      }
+      // Malformed tag (non-string, non-canonical) is caller data — fall
+      // through to the plain-object branch like any other value.
     }
     if (Array.isArray(v)) return v.map(fromWire);
     return Object.fromEntries(
@@ -675,7 +697,15 @@ export async function call<T = unknown>(
         disarm();
         unwire();
         if (ev.error) reject(mkError(ev.error.code, ev.error.message, ev.error.data));
-        else resolve(fromWire(ev.result) as T);
+        else {
+          // A fromWire throw (e.g. an over-cap $bigint) must reject —
+          // settled is already true, so an uncaught throw hangs the call.
+          try {
+            resolve(fromWire(ev.result) as T);
+          } catch (e) {
+            reject(e instanceof Error ? e : new Error(String(e)));
+          }
+        }
       },
     )
     .catch((e) => {

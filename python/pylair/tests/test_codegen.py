@@ -13,7 +13,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
 import testapp
-from pylair import _json, _schema
+from pylair import BigInt, _json, _schema
 from pylair._expose import exposes_manifest
 
 
@@ -29,6 +29,7 @@ class Nested:
 def test_schema_primitives():
     s = _schema.schema_of
     assert s(int) == {"type": "int"}
+    assert s(BigInt) == {"type": "bigint"}
     assert s(float) == {"type": "float"}
     assert s(str) == {"type": "str"}
     assert s(bool) == {"type": "bool"}
@@ -37,6 +38,15 @@ def test_schema_primitives():
     assert s(bytes) == {"type": "bytes"}
     assert s(datetime.datetime) == {"type": "datetime"}
     assert s(typing.Any) == {"type": "any"}
+
+
+def test_schema_bigint_containers():
+    s = _schema.schema_of
+    assert s(list[BigInt]) == {"type": "list", "items": {"type": "bigint"}}
+    assert s(BigInt | None) == {
+        "type": "union",
+        "opts": [{"type": "bigint"}, {"type": "none"}],
+    }
 
 
 def test_schema_containers():

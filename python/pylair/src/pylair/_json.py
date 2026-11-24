@@ -8,6 +8,7 @@ actually round-trip:
   pylair.Blob     -> {"$blob": {"id","mime","size"}} — bytes live in
                      PYLAIR_BLOB_DIR; registration rides ahead of the
                      carrying frame (decision 0010)
+  pylair.BigInt   -> {"$bigint": "<decimal>"}  (restored by object_hook)
   @dataclass      -> dataclasses.asdict
   datetime/date/time -> ISO 8601 string
   Enum -> its value; set/frozenset -> list
@@ -37,6 +38,7 @@ import typing
 import weakref
 from typing import Any
 
+from pylair._bigint import BIGINT_MAX_DIGITS, BIGINT_RE, BIGINT_TAG, BigInt
 from pylair._blob import Blob, BlobFallbackExceeded  # noqa: F401 — re-export for senders
 
 _B64_TAG = "$b64"
@@ -76,6 +78,15 @@ def _object_hook(d: dict) -> Any:
             return base64.b64decode(d[_B64_TAG], validate=True)
         except Exception:  # noqa: BLE001 - invalid tag stays a plain object
             return d
+    if set(d) == {BIGINT_TAG} and isinstance(d[BIGINT_TAG], str):
+        v = d[BIGINT_TAG]
+        if not BIGINT_RE.fullmatch(v):
+            return d  # not canonical decimal — caller data, pass through
+        if len(v.lstrip("-")) > BIGINT_MAX_DIGITS:
+            raise ValueError(
+                f"$bigint payload exceeds the {BIGINT_MAX_DIGITS}-digit cap"
+            )
+        return BigInt(v)
     return d
 
 
@@ -118,13 +129,17 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             raise DepthExceeded(depth_limit)
         if node is None or isinstance(node, (str, bool)):
             continue
+        if isinstance(node, BigInt):
+            # _tag_bigints -> {"$bigint": str} — a plain object leaf. No
+            # range check: crossing safely is the type's whole point.
+            continue
         if isinstance(node, int):
             # bool was filtered above — it is a JSON literal, never an int.
             if abs(node) > _SAFE_INT:
                 raise ValueError(
                     f"integer {node} exceeds the JSON safe-integer range "
-                    "(±2^53-1); return it as a string — $bigint tagging is "
-                    "tracked in docs/ideas.md"
+                    "(±2^53-1); return it as a string or use pylair.BigInt "
+                    "for exact big integers"
                 )
             continue
         if isinstance(node, float):
@@ -172,6 +187,58 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
         # same error the caller maps today; no pre-check needed.
 
 
+def _tag_bigints(obj: Any) -> Any:
+    """Pre-dump transform: every BigInt leaf -> {"$bigint": "<decimal>"}.
+
+    Why a pass and not a `default` case: json's encoder serializes int
+    subclasses natively, so `default` never fires for BigInt. Containers
+    are rebuilt into a fresh tree (shared/cyclic shapes keep sharing —
+    a cycle rebuilds as a cycle so dumps raises its own circular error);
+    bytes, Blob, datetime and friends are left for _default. A set
+    can't hold the tag dicts, so it emits _default's sorted list
+    directly, each item already tagged.
+    """
+    memo: dict[int, Any] = {}
+
+    def tag(node: Any) -> Any:
+        if isinstance(node, BigInt):
+            digits = str(int(node)).lstrip("-")
+            if len(digits) > BIGINT_MAX_DIGITS:
+                raise ValueError(
+                    f"BigInt exceeds the {BIGINT_MAX_DIGITS}-digit wire cap"
+                )
+            return {BIGINT_TAG: str(int(node))}
+        if node is None or isinstance(node, (bool, int, float, str)):
+            return node
+        hit = memo.get(id(node))
+        if hit is not None:
+            return hit
+        if isinstance(node, dict):
+            out: dict = {}
+            memo[id(node)] = out
+            for k, v in node.items():
+                out[k] = tag(v)
+            return out
+        if isinstance(node, (list, tuple)):
+            out = []
+            memo[id(node)] = out
+            out.extend(tag(v) for v in node)
+            return out
+        if isinstance(node, (set, frozenset)):
+            return [tag(v) for v in sorted(node, key=repr)]
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            out = {}
+            memo[id(node)] = out
+            for f in dataclasses.fields(node):
+                out[f.name] = tag(getattr(node, f.name))
+            return out
+        if isinstance(node, enum.Enum):
+            return tag(node.value)
+        return node  # everything _default owns — leave it alone
+
+    return tag(obj)
+
+
 def dumps_collect(
     obj: Any, regs: dict[str, Blob], depth_limit: int | None = None
 ) -> str:
@@ -194,7 +261,9 @@ def dumps_collect(
         return _default(o)
 
     try:
-        return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+        return json.dumps(
+            _tag_bigints(obj), default=default, separators=(",", ":"), allow_nan=False
+        )
     except BaseException:
         for b in regs.values():
             b._unlink()
@@ -216,7 +285,9 @@ def dumps_probe(obj: Any, depth_limit: int | None = None) -> str:
             return o._to_wire_dry()
         return _default(o)
 
-    return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        _tag_bigints(obj), default=default, separators=(",", ":"), allow_nan=False
+    )
 
 
 def dumps(obj: Any, depth_limit: int | None = None) -> str:
@@ -224,7 +295,9 @@ def dumps(obj: Any, depth_limit: int | None = None) -> str:
     # allow_nan=False stays as the hard guarantee: even if a path ever
     # reached dumps without check_wire, a bare NaN/Infinity token can
     # still never hit the wire (serde_json rejects it as malformed).
-    return json.dumps(obj, default=_default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        _tag_bigints(obj), default=_default, separators=(",", ":"), allow_nan=False
+    )
 
 
 def loads(raw: str | bytes) -> Any:
@@ -291,6 +364,12 @@ def coerce(annotation: Any, value: Any) -> Any:
         if isinstance(value, float) and value.is_integer():
             return int(value)
         raise InvalidParams(f"expected int, got {_short(value)}")
+    if annotation is BigInt:
+        # Decoded tags arrive as BigInt already; a plain JSON number is
+        # promoted so the fn sees the annotated type either way.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return BigInt(value)
+        raise InvalidParams(f"expected BigInt, got {_short(value)}")
     if annotation is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)

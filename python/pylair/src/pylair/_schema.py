@@ -16,6 +16,8 @@ import types
 import typing
 from typing import Any
 
+from pylair._bigint import BigInt
+
 _EMPTY = inspect.Parameter.empty
 
 
@@ -69,6 +71,8 @@ def schema_of(annotation: Any) -> dict[str, Any]:
     # Bare classes
     if annotation is int:
         return {"type": "int"}
+    if annotation is BigInt:
+        return {"type": "bigint"}
     if annotation is float:
         return {"type": "float"}
     if annotation is str:

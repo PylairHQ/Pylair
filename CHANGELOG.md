@@ -78,6 +78,13 @@ the series is released until all PRs land._
   lazily on the next call (no re-prewarm; `worker:<fn>` stays `ready`).
   The clock runs only while the member is idle: a call in flight is
   never interrupted by it (decision 0008 §4).
+- `pylair.BigInt` + `{"$bigint": "<decimal>"}` wire tag: opt-in exact
+  big integers in both directions — annotate a param/return or return
+  `pylair.BigInt(n)` and codegen emits TS `bigint`; a JS `bigint`
+  argument encodes as the same tag and decodes back to `pylair.BigInt`.
+  Plain `int` is unchanged (numbers in range, clear error outside, now
+  naming `pylair.BigInt`). Decode is defensive like the other tags
+  (canonical decimal only, else plain data) with a 4096-digit cap.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
