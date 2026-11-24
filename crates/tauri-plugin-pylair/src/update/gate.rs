@@ -6,7 +6,8 @@
 
 use super::{
     health_update, new_session_id, phase, read_pending, state_dir, write_boot_marker,
-    write_failed_marker, write_ready_marker, Knobs, UpdatePhase, NO_COMPONENTS_GRACE_MS,
+    write_failed_marker, write_progress, write_ready_marker, Knobs, UpdatePhase,
+    NO_COMPONENTS_GRACE_MS,
 };
 use crate::supervisor::{RuntimeEvent, State};
 use serde_json::Value;
@@ -28,9 +29,13 @@ pub struct UpdateGate {
     /// "current-user" | "per-machine" | "both". Windows-only concept;
     /// the install command consults it on Windows only.
     pub install_mode: String,
-    /// `plugins.updater.endpoints` — the rollback manifest is fetched
-    /// from the first endpoint's directory.
+    /// `plugins.updater.endpoints` — where updates are checked.
     pub endpoints: Vec<String>,
+    /// `plugins.updater.rollbackUrl` — the `{{version}}` template
+    /// naming each release's own manifest as its rollback manifest
+    /// (§6): every release's `latest.json` is the signed description
+    /// of that exact build.
+    pub rollback_url: Option<String>,
     installing: AtomicBool,
     /// The `Update` stashed by `python_update_check`, consumed by
     /// download/install — held as the live object since `Update` is
@@ -55,6 +60,8 @@ pub struct UpdateGate {
     pub session_id: String,
     /// Grace window for a first component report (tests shrink it).
     grace_ms: u64,
+    /// Throttle for `progress.json` writes (watchdog heartbeat).
+    last_progress_write: Mutex<std::time::Instant>,
 }
 
 impl UpdateGate {
@@ -96,6 +103,10 @@ impl UpdateGate {
                         .collect()
                 })
                 .unwrap_or_default(),
+            rollback_url: updater
+                .get("rollbackUrl")
+                .and_then(Value::as_str)
+                .map(String::from),
             installing: AtomicBool::new(false),
             #[cfg(feature = "updater")]
             offer: Mutex::new(None),
@@ -107,6 +118,7 @@ impl UpdateGate {
             runtime_ready: AtomicBool::new(false),
             session_id: new_session_id(),
             grace_ms: NO_COMPONENTS_GRACE_MS,
+            last_progress_write: Mutex::new(std::time::Instant::now() - Duration::from_secs(2)),
         };
         gate.note_boot();
         Some(Arc::new(gate))
@@ -122,6 +134,7 @@ impl UpdateGate {
             knobs: opts.knobs,
             install_mode: opts.install_mode,
             endpoints: opts.endpoints,
+            rollback_url: opts.rollback_url,
             installing: AtomicBool::new(false),
             #[cfg(feature = "updater")]
             offer: Mutex::new(None),
@@ -133,6 +146,7 @@ impl UpdateGate {
             runtime_ready: AtomicBool::new(false),
             session_id: opts.session_id.unwrap_or_else(new_session_id),
             grace_ms: opts.grace_ms,
+            last_progress_write: Mutex::new(std::time::Instant::now() - Duration::from_secs(2)),
         };
         gate.note_boot();
         Arc::new(gate)
@@ -168,6 +182,7 @@ impl UpdateGate {
                     self.note_component(n, p);
                 }
             }
+            RuntimeEvent::AppProgress(v) => self.note_progress(v),
             _ => {}
         }
     }
@@ -244,6 +259,27 @@ impl UpdateGate {
         }
     }
 
+    /// Heartbeat evidence for the watchdog (§2): every `app.component`
+    /// report is a sign of life, throttled to one `progress.json` write
+    /// per second — the file's mtime is what the watchdog reads, so a
+    /// chatty app costs a few small writes, not a flush per tick.
+    fn note_progress(&self, payload: &Value) {
+        {
+            let mut last = self.last_progress_write.lock().unwrap();
+            if last.elapsed() < Duration::from_secs(1) {
+                return;
+            }
+            *last = std::time::Instant::now();
+        }
+        if let Some(p) = read_pending(&self.dir) {
+            if p.to == self.version {
+                if let Err(e) = write_progress(&self.dir, &p, payload) {
+                    eprintln!("[pylair] update: progress write failed: {e}");
+                }
+            }
+        }
+    }
+
     /// Write `ready-<version>` if a pending update targets the running
     /// version. Re-reads pending.json at write time — the marker
     /// carries the file's CURRENT session_id, so a pending written by
@@ -290,6 +326,7 @@ pub struct GateOpts {
     pub knobs: Knobs,
     pub install_mode: String,
     pub endpoints: Vec<String>,
+    pub rollback_url: Option<String>,
     pub session_id: Option<String>,
     pub grace_ms: u64,
 }

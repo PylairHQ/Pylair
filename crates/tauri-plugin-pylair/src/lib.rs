@@ -29,6 +29,22 @@ pub use commands::{
 pub use protocol::ErrorObj;
 pub use registry::{PyRuntime, Registry, WindowRegistry};
 pub use selftest::{self_test_gui, self_test_headless, self_test_requested};
+
+/// The app's hidden update-watchdog mode (decision 0011 §2): spawned
+/// detached by `python_update_install` as a state-dir copy of the exe
+/// with `--pylair-upwatch` on argv. Call at the top of the app's
+/// `run()` with the embedded context — `Some(exit_code)` means watchdog
+/// mode ran, exit with it; `None` means a normal boot, continue.
+/// Without the `updater` feature (or the flag) it is a no-op.
+#[cfg(feature = "updater")]
+pub fn update_watchdog_entry<R: tauri::Runtime>(ctx: &tauri::Context<R>) -> Option<i32> {
+    update::upwatch::entry(ctx)
+}
+/// See the `updater` variant — the feature-off stub is a plain `None`.
+#[cfg(not(feature = "updater"))]
+pub fn update_watchdog_entry<R: tauri::Runtime>(_ctx: &tauri::Context<R>) -> Option<i32> {
+    None
+}
 pub use spec::{app_spawn_spec, release_spawn_spec, SpawnSpecError};
 pub use supervisor::{
     spawn as spawn_supervisor, Handle, HealthSnapshot, RuntimeEvent, RuntimeKind, SpawnSpec, State,

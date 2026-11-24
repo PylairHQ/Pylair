@@ -13,13 +13,17 @@ use tauri_plugin_pylair::update::{
 };
 
 fn tmp() -> PathBuf {
+    // Counter + nanos: parallel tests in one process get unique dirs
+    // even where SystemTime granularity is coarse (Windows ~15ms).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "pylair-update-test-{}-{}",
+        "pylair-update-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -48,6 +52,7 @@ fn gate(dir: &Path, version: &str) -> Arc<UpdateGate> {
         knobs: Knobs::default(),
         install_mode: "current-user".into(),
         endpoints: vec!["https://u.example.com/latest.json".into()],
+        rollback_url: Some("https://u.example.com/v{{version}}/latest.json".into()),
         session_id: Some("sess-1".into()),
         grace_ms: 20,
     })
@@ -182,6 +187,46 @@ fn failed_component_writes_failed_marker() {
     assert_eq!(marker["session_id"], "sess-1");
     assert_eq!(marker["component"], "model");
     assert!(!dir.join("ready-1.1.0.json").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn progress_events_write_the_heartbeat_file_during_pending() {
+    use tauri_plugin_pylair::supervisor::RuntimeEvent;
+    let dir = tmp();
+    update::write_pending(&dir, &pending("1.0.0", "1.1.0")).unwrap();
+    let g = gate(&dir, "1.1.0");
+    g.on_event(&RuntimeEvent::AppProgress(
+        json!({"name": "model", "phase": "loading", "progress": 0.4}),
+    ));
+    let p: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("progress.json")).unwrap()).unwrap();
+    assert_eq!(p["version"], "1.1.0");
+    assert_eq!(p["session_id"], "sess-1");
+    // Throttle: a second report inside the window is one write, not two.
+    let first = fs::metadata(dir.join("progress.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    g.on_event(&RuntimeEvent::AppProgress(
+        json!({"name": "model", "phase": "loading", "progress": 0.5}),
+    ));
+    assert_eq!(
+        fs::metadata(dir.join("progress.json"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        first
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    // No pending window: nothing is written.
+    let dir = tmp();
+    let g = gate(&dir, "1.1.0");
+    g.on_event(&RuntimeEvent::AppProgress(
+        json!({"name": "ui", "phase": "loading"}),
+    ));
+    assert!(!dir.join("progress.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
 
