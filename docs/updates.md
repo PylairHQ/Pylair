@@ -264,6 +264,15 @@ Two edge cases:
   means a duplicate watchdog exits immediately; logging is bounded to
   `updater-state/upwatch.log`.
 
+Platform note for the acceptance work (PR 4): on Linux the watchdog is
+spawned from the cached rollback AppImage itself — it bundles its own
+WebKitGTK, where a bare exe copy could not start outside the mount the
+install replaced. On macOS the staged copy runs the app executable
+*outside* its `.app` bundle: proven for unsigned dev builds, but
+unproven for a notarized, hardened-runtime binary (Gatekeeper,
+library validation, entitlements) — acceptance must exercise that case
+explicitly.
+
 ## Security notes
 
 - **Signatures are mandatory.** The updater verifies every artifact
