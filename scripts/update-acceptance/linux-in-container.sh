@@ -15,7 +15,7 @@ set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|g' /etc/apt/sources.list
-for i in 1 2 3; do
+for _ in 1 2 3; do
   apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10
 done
 # xvfb + python3 (http.server) only — deliberately no libwebkit2gtk.
@@ -41,7 +41,7 @@ APPIMAGE=$(find /work/htdocs/installable/v1.0.0 -name '*.AppImage' | head -1)
 if [ -n "$APPIMAGE" ]; then
   echo "── v1 AppImage extract timing"
   timeout 120 /usr/bin/time -v "$APPIMAGE" --appimage-extract >/dev/null 2>/work/extract-time.txt || \
-    { timeout 120 time "$APPIMAGE" --appimage-extract >/dev/null; } 2>>/work/extract-time.txt
+    { time timeout 120 "$APPIMAGE" --appimage-extract >/dev/null; } 2>>/work/extract-time.txt
   rm -rf squashfs-root
 fi
 

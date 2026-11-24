@@ -42,6 +42,12 @@ on:
       - "scripts/update-acceptance/**"
       - ".github/workflows/acceptance-update.yml"
   workflow_dispatch:
+    inputs:
+      legs:
+        description: "Leg(s) to run — PRs always run all three"
+        type: choice
+        default: all
+        options: [all, ubuntu, windows, macos]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -64,6 +70,7 @@ env:
 jobs:
   ubuntu:
     name: ubuntu (AppImage, clean container)
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.legs == 'all' || github.event.inputs.legs == 'ubuntu'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -151,6 +158,7 @@ jobs:
 
   windows:
     name: windows (NSIS currentUser + per-machine)
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.legs == 'all' || github.event.inputs.legs == 'windows'
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -240,6 +248,7 @@ jobs:
   # Capacity rule: ONE macOS job runs every scenario in sequence.
   macos:
     name: macos (.app, hardened runtime)
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.legs == 'all' || github.event.inputs.legs == 'macos'
     runs-on: macos-latest
     timeout-minutes: 90
     env:
