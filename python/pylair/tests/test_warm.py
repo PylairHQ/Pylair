@@ -1142,15 +1142,18 @@ def test_warm_cancel_with_killpg_eperm_reports_terminated(tmp_path):
         )
         _wait_pidfile(pidfile)  # member is inside the call
         rt.send(cancel(9, 1))
-        ack = rt.recv_until(lambda m: m.get("id") == 9, timeout=_HANG_S)
+        # The terminal (id=1) is emitted strictly BEFORE the verdict
+        # (id=9): _finish runs inside the task the reporter shields, so
+        # a recv_until(id==9) scan would eat it. Collect both by id.
+        msgs = _collect(rt, {1, 9})
+        ack = msgs[9]
         assert ack["result"] == {"cancelled": True, "status": "terminated"}, (
             f"cancel verdict degraded under EPERM: {ack!r}"
         )
         # The member self-crashed mid-cancel — WORKER_DIED is the honest
         # terminal; what matters is that a terminal ARRIVES (the wedge
         # was its absence).
-        term = rt.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
-        assert term["error"]["code"] == proto.WORKER_DIED
+        assert msgs[1]["error"]["code"] == proto.WORKER_DIED
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix process groups")

@@ -1,8 +1,6 @@
 name: warm-loop (throwaway flake proof)
 
 on:
-  push:
-    branches: [warm-deterministic]
   workflow_dispatch:
 
 permissions:
