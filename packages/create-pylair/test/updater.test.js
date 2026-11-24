@@ -73,6 +73,15 @@ describe("create-pylair --with-updater", () => {
     const ignore = readFileSync(join(app, ".gitignore"), "utf-8");
     assert.match(ignore, /\*\.key/);
 
+    // The watchdog dispatch is injected at the top of run() — only
+    // updater apps carry it (the default scaffold stays byte-identical
+    // and compiles against the published crate).
+    const lib = readFileSync(join(app, "src-tauri/src/lib.rs"), "utf-8");
+    assert.match(
+      lib,
+      /pub fn run\(\) \{\n    .*\n.*update_watchdog_entry\(&tauri::generate_context!\(\)\)/s,
+    );
+
     // Cargo.lock ships unchanged: it pins the default dep set (incl. the
     // pylair crate); the added plugin resolves on first cargo build. Same
     // app name — the lock records the root package name.
@@ -93,6 +102,8 @@ describe("create-pylair --with-updater", () => {
     const cargo = readFileSync(join(cwd, "wrap-up/src-tauri/Cargo.toml"), "utf-8");
     assert.match(cargo, /tauri-plugin-updater/);
     assert.match(cargo, /tauri-plugin-pylair = \{ .+features = \["updater"\] \}/);
+    const lib = readFileSync(join(cwd, "wrap-up/src-tauri/src/lib.rs"), "utf-8");
+    assert.match(lib, /update_watchdog_entry\(&tauri::generate_context!\(\)\)/);
   });
 
   test("default scaffold output is byte-identical to the golden", () => {

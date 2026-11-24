@@ -19,7 +19,7 @@
   "src-tauri/icons/icon.icns": "dfe34a591c9996bca685c9843d694605afdd8abac1a74fa94ca83f60751305a8",
   "src-tauri/icons/icon.ico": "6ddd04796837b8be5542c98535b9b0439b1525fdf2f05104758913f3a02c0e73",
   "src-tauri/icons/icon.png": "6b066694b862e0102ddc5db59594535e8e7dcb2515c03b441975789f3c244af5",
-  "src-tauri/src/lib.rs": "c248525f34cb62ea1d6052edf7817ec1c39009934b2952de23a59517b2a22097",
+  "src-tauri/src/lib.rs": "505b21ea7e204c07bdf09cacb1628f0cba11e60a28013e5498799e1b04aa582c",
   "src-tauri/src/main.rs": "7c8599c2bfd66e91df95fb368221406c49dd364e42118e928b2730cbf35a3a1c",
   "src-tauri/tauri.conf.json": "5c0f0bee702aefe5add254bdf4b0e7bbd3af0f66128f6df224df275dda70daf3",
   "tsconfig.json": "33c6d14db5c0399310a9009dd05f50d7562f5a62610eeb901eb7e819a722ec46",

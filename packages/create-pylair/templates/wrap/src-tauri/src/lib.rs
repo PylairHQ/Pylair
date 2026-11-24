@@ -11,13 +11,6 @@
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Update watchdog mode (decision 0011): python_update_install spawns
-    // a state-dir copy of this exe with --pylair-upwatch to watch the new
-    // version's first boot. A no-op without the flag (and without the
-    // plugin's `updater` feature).
-    if let Some(code) = tauri_plugin_pylair::update_watchdog_entry(&tauri::generate_context!()) {
-        std::process::exit(code);
-    }
     tauri::Builder::default()
         .plugin(tauri_plugin_pylair::Builder::wrap().build())
         .run(tauri::generate_context!())
