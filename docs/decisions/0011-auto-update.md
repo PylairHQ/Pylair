@@ -1,7 +1,7 @@
 # 0011: Auto-update for Pylair apps (bundle updates + readiness-gated rollback)
 
-Status: proposed (spike: `spikes/u0-updater` on the `u0-updater` branch;
-CI evidence in §Evidence index)
+Status: accepted (spike: `spikes/u0-updater` on the `u0-updater` branch;
+CI evidence in §Evidence index). Implementation lands after 0.1.0.
 
 ## Question
 
@@ -69,11 +69,20 @@ Python payload — was replaced as a unit.
 | windows-latest | `-setup.exe` + `.sig` | **3.2M** | 266s/51s/50s | **10s** | **47s** |
 | macos-latest | `.app.tar.gz` + `.sig` | **5.0M** | 199s/27s/31s | **6s** | **47s** |
 
-Rollback wall time is dominated by the 45s readiness deadline
-(`PYLAIR_ROLLBACK_DEADLINE_MS`, env-tunable) plus restore+relaunch:
-~2s on macOS/Windows, ~31s on Linux (an 80M AppImage re-extracts the
-restored copy before `main` runs). A real app's deadline should cover
-its slowest plausible readiness, e.g. model load.
+**Fidelity caveat — sizes understate a real app.** The spike's `python/`
+is a marker file, not a bundled CPython. Scaling by the 0001 m0 numbers
+(scaffolded app ≈ 69 MiB interpreter + ~28 MiB env inside the bundle):
+
+| leg | spike artifact | real scaffolded-app estimate | torch-class app |
+|---|---|---|---|
+| ubuntu | 80M | **~120-140M** | ~300M+ |
+| windows | 3.2M | **~50-60M** (≈ 0001's 47.8M dmg class) | ~300M |
+| macOS | 5.0M | **~50-60M** | ~300M |
+
+Download time scales linearly with size (negligible on the spike's local
+server; on WAN at ~10MB/s a 60M artifact is ~6s, 300M is ~30s). The
+AppImage restore cost in §2 scales the same way — re-extract of a
+restored ~130M AppImage ≈ 45-60s, not 31s.
 
 **Integration findings the run surfaced** (each cost an iteration):
 
@@ -110,6 +119,14 @@ its slowest plausible readiness, e.g. model load.
   path; `restart()` re-runs the binary inside the new bundle. Unsigned
   dev-built `.app`s work locally (no quarantine attr); shipped builds
   need real signing + notarization regardless.
+- **macOS App Translocation**: a quarantined app launched from a DMG or
+  before being moved to a permanent location runs translocated at
+  `/private/var/folders/…/AppTranslocation/<uuid>/<App>.app` on a
+  read-only mount — an in-place update cannot write there. The update
+  path must detect it (current exe path under `AppTranslocation/`) and
+  refuse with a clear message ("move the app to /Applications (or any
+  owned location) and retry"), surfaced as a distinct
+  `UpdateError::NotUpdatable` on the client API — not a generic failure.
 
 ## 2. Readiness-gated rollback
 
@@ -120,17 +137,74 @@ gone. The spike prototypes the missing half:
 check() ok ──▶ fetch rollback-<from>.json, download current-version
                artifact into a cache dir OUTSIDE the install dir
           ──▶ write pending.json {from, to, to_sha256, artifact,
-               sha256, sig, install_path, deadline}
+               sha256, sig, install_path, session_id, knobs}
           ──▶ spawn watchdog (detached) ──▶ install + restart
-watchdog:  wait for ready-<to> within deadline
-           ├─ ready           → update-ok, clear pending, exit
-           ├─ ≥MAX_BOOTS boots without ready → rollback("crash_loop")
-           └─ deadline        → rollback("deadline")
+watchdog:  wait for ready-<to, session_id> (see "the real signal")
+           ├─ ready              → update-ok, clear pending, exit
+           ├─ readiness failed   → rollback("readiness_failed")
+           ├─ ≥max_boots boots without ready → rollback("crash_loop")
+           ├─ silence > heartbeat_ms with no progress → rollback("no_sign_of_life")
+           └─ past hard_cap_ms   → rollback("hard_cap")
 rollback:  re-verify cached artifact (sha256 + recorded sig; production:
            minisign verify vs embedded pubkey) → add {version,sha256} to
            skipped.json → restore artifact per OS → relaunch → record
            rollback-reason.txt
 ```
+
+**Deadline semantics — never a fixed wall clock.** A fixed deadline
+rolls back healthy updates whose first boot legitimately takes minutes
+(a model download, a big `on_startup` load). The production watchdog
+rolls back on *evidence of failure*, not elapsed time:
+
+| knob | default | meaning |
+|---|---|---|
+| `heartbeat_ms` | 60_000 | max silence: no `ready`, no `failed`, and no readiness-progress event for this long ⇒ dead |
+| `max_boots` | 3 | boot markers for the pending version without a ready ⇒ crash loop |
+| `hard_cap_ms` | 600_000 | absolute ceiling for the pending window, **app-set** in the update config (this is the only wall clock; generous defaults — a model download on a slow link must fit) |
+
+While the app's readiness surface reports *live* component progress
+(`health().app.components` advancing, 0007), the window stays open until
+`hard_cap_ms`. Silence (`heartbeat_ms`) or an explicit `failed` is what
+kills — a stuck load and a dead start are distinguishable states, and
+the watchdog treats only the dead one as fatal.
+
+**The real readiness signal.** The spike app writes `ready-<ver>`
+itself. In production the **host** writes it — the same signal the
+webview already sees: when `health().app` reaches `ready` (0007) the
+host records `ready-<ver>` in the update state dir containing
+`{version, artifact_sha256, session_id}`. `session_id` is a per-pending
+nonce the app generates when arming `pending.json`; the watchdog accepts
+a ready marker only when **version AND session** match — a stale
+`ready-0.2.0` left by an earlier generation can never satisfy a pending
+`0.3.0` window, and the marker's `artifact_sha256` is checked against
+the manifest value the app saw at check time.
+
+**Trust anchor.** The watchdog's verification key is **compiled into
+the watchdog binary** (`include_bytes!`/const — written by the build
+the same way `pubkey` enters `tauri.conf.json`), never read from the
+state dir, which is attacker-influenceable app data. Likewise
+`install_path`: `pending.json` carries it for readability, but the
+watchdog restores to **its own resolved install location** (the path it
+would compute from the running exe/bundle) and *aborts* if the pending
+value disagrees — a state-dir write must never be able to redirect the
+restore to a hostile path. The cached artifact is verified before
+restore (minisign vs the compiled pubkey + recorded sha256).
+
+**Windows per-machine installs.** Per-user installs (the scaffold's
+`nsis.installMode: "currentUser"` default — kept) install and roll back
+silently. Per-machine installs (`allUsers`, Program Files) need
+elevation for both update and rollback: the update install itself
+prompts UAC once (acceptable — the user initiated it), but the
+*unattended* rollback cannot silently reinstall. Behaviour:
+
+- per-user → watchdog restores silently as prototyped;
+- per-machine → the watchdog cannot elevate: it records
+  `rollback-pending-approval` in the state dir and the next interactive
+  launch surfaces **"update failed, restore the previous version?"**
+  (prompted reinstall shows one UAC prompt, or a "download previous
+  installer" fallback). This asymmetry is documented in the scaffold's
+  install-mode choice; `currentUser` remains the recommended default
+  partly for this reason.
 
 Two details the spike enforces that a real implementation must keep:
 
@@ -147,7 +221,9 @@ Two details the spike enforces that a real implementation must keep:
 
 **Proof** (run `45347893012`): v3 carries `BROKEN = True` in
 `backend/app.py`; the app exits(3) before writing `ready-0.3.0`. The
-watchdog's deadline fires, it re-verifies the cached v2 artifact,
+spike watchdog runs a fixed deadline (the stand-in for the evidence
+knobs above — a crashed-before-ready boot is "no sign of life"), fires,
+re-verifies the cached v2 artifact,
 restores it (per-OS path above), writes `restored 0.2.0` into
 `rollback-reason.txt`, and a subsequent check logs
 `skip: 0.3.0 on skip list`. Observed end-to-end on all three legs:
@@ -180,21 +256,48 @@ What a new bundle can change that the old one can't read:
 - **Warm-worker/session state**: transient, low risk, but a mid-update
   generation is killed with its pool.
 
-**Proposed rule**: *migrations run only after the update is confirmed
-ready — and must be backwards-compatible while pending.* Concretely:
+**Proposed rule**: *migrations run only after the update is confirmed —
+and must be backwards-compatible while pending.* "Wait for a ready-ack"
+is circular — readiness requires `on_startup`, which is exactly where
+migrations want to run. The mechanism that breaks the circle is an
+update-state surface the app can read *during* a pending first boot:
 
-1. During `pending` (watchdog armed), the new build may read but must
-   not write any migrated state; `on_startup` migrations wait for a
-   `ready`-ack from the update machinery (or run on second boot after
-   `update-ok`).
-2. A new version that *must* migrate writes to a versioned copy (e.g.
-   `settings.v2.json`), leaving `settings.v1.json` intact for the
-   rollback target.
-3. Pylair surfaces this as: (a) a scaffold rule in docs + template
-   comments ("migrations belong behind `pylair.onReady`, not import
-   time"), and (b) `pylair doctor`/selftest flagging app-data writes
-   that happen before first `ready` under an update marker. Enforcement
-   is advisory for v1 — the mechanical guarantee is §2.
+```python
+pylair.update.state() -> "none" | "pending" | "confirmed"
+# and/or a hook invoked once the watchdog clears pending:
+pylair.update.on_update_confirmed(fn)
+```
+
+- `none` — normal boot, no pending window.
+- `pending` — this boot is being watched: the app must run
+  **read-only** w.r.t. migrated state (`on_startup` loads, serves
+  readiness, does not migrate).
+- `confirmed` — the watchdog saw `ready` and cleared pending; the
+  hook/state flips and migrations may run (this boot or next —
+  `on_update_confirmed` fires either way once confirmation lands).
+
+So the app's startup contract becomes: `on_startup` → report readiness
+components as usual → *if* `state() == "pending"`, defer all state
+writes; migrate on the `confirmed` hook or on the next `none`/`confirmed`
+boot. A migration that can't wait defers the *write*, not the load —
+old-format state keeps reading fine (that's the compatibility rule,
+below).
+
+**Model-store sidecars (0009) stay readable by the previous version.**
+Rule: sidecar schemas are **versioned fields, additive-only, and
+ignore-unknown-keys**. A v2 that needs new sidecar fields adds them
+with defaults; the v1 parser must ignore keys it doesn't know (the same
+rule the protocol already enforces on manifests and frames). The escape
+hatch for a genuinely incompatible schema is a **new file name** —
+`manifest.v2.json` beside `manifest.v1.json` — never an in-place
+rewrite; the rollback target keeps reading its own file. A frozen
+"sidecars can't change" rule is rejected: it would freeze the model
+store at v1 semantics forever; versioned fields + ignore-unknown covers
+the common cases, new-file covers the rest.
+
+Enforcement: advisory for v1 (scaffold docs + a `pylair doctor` check
+flagging app-data writes before `ready` under a pending marker); the
+mechanical guarantee stays §2's rollback.
 
 ## 5. Code-only updates (Python without reinstall) — assessment
 
@@ -256,10 +359,17 @@ Not prototyped. Findings:
   `update.downloadAndInstall({onEvent})` — progress events mirror
   upstream's (`Started {contentLength}`, `Progress {chunkLength}`,
   `Finished`), then `update.relaunch()` / `update.installAndRelaunch()`.
+  Errors surface distinctly: `UpdateError::NotUpdatable` (e.g. macOS
+  App Translocation) carries the user-facing remedy.
+- **Python API** (`pylair` package): `pylair.update.state() ->
+  "none"|"pending"|"confirmed"` and
+  `pylair.update.on_update_confirmed(fn)` — the migration gate of §4,
+  fed from the state dir the watchdog writes.
 - **Health/readiness**: new readiness component `updating`
-  (`pending|installing|ready|rolled-back`) so apps can render "update
-  pending verification"; watchdog verdicts land in `health()` under
-  `update: {state, lastRollback?}`.
+  (`pending|installing|ready|rolled-back|rollback-pending-approval`) so
+  apps can render "update pending verification" — and, for per-machine
+  installs, the "rollback needs approval" prompt of §2. Watchdog
+  verdicts land in `health()` under `update: {state, lastRollback?}`.
 - **Scaffold opt-in**: `create-pylair --with-updater` (or template
   question) injects the plugin dep, `plugins.updater` conf block,
   capability permission, and a generated `latest.json` endpoint TODO.
@@ -293,16 +403,17 @@ PRs, in order:
    update + rollback + skip-list on ubuntu + windows; macOS as a step
    inside an existing macOS job (capacity rule) once proven.
 
-Runtime cost estimate (measured, run `45347893012`): per leg ≈
-`3 × tauri build` + proofs ≈ **~9min ubuntu** (294+114+113s builds,
-167s proofs), **~7min windows** (266+51+50s builds, ~2min proofs),
-**~5min macOS** (199+27+31s builds, ~2min proofs) — dominated by the
-cold first build; warm builds are ~¼ the time because deps compile
-once in a shared `target/`. An acceptance job per OS at these numbers
-is affordable; on macOS it belongs as a step inside an existing macOS
-job (capacity rule). A real Pylair app additionally builds the bundled
-CPython + backend venv, roughly doubling build time but not the
-update/rollback mechanics.
+Runtime cost estimate (measured spike legs, then scaled for a real
+app — the spike carries a marker `python/`, a scaffolded app bundles
+~97 MiB of interpreter + env and builds a backend venv): spike legs ran
+~9min ubuntu / ~7min windows / ~5min macOS, dominated by the cold first
+`tauri build` (~5min) — warm builds are ~¼ of that. A real-app leg adds
+the venv + bundle stages (roughly +50-100% build time per the 0001
+numbers) → **~12-15min ubuntu, ~10-12min windows, ~8-10min macOS** per
+update+rollback leg. Downloads/restore scale with the §1 real-size
+estimates (130-300M artifacts ≈ 45-60s AppImage re-extract on Linux
+rollback; WAN downloads dominate end-user time, not CI time). On macOS
+the leg belongs as a step inside an existing macOS job (capacity rule).
 
 ## Alternatives considered
 
