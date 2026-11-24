@@ -114,6 +114,12 @@ def _hang_dump(runtime) -> str:
         "runtime pipe fds:\n"
         + "\n".join(x for x in lsof.stdout.splitlines() if "PIPE" in x)
     )
+    parts.append(
+        "harness state: "
+        f"stdout_drain_alive={runtime._stdout_t.is_alive()} "
+        f"io_error={runtime.io_error!r} queue_depth~{runtime._q.qsize()} "
+        f"rc={runtime.proc.poll()}"
+    )
     # SIGUSR1: _diag_run's handler prints every asyncio task's coroutine
     # stack — the await that never resolved. SIGABRT after it:
     # faulthandler's thread dump as backup.

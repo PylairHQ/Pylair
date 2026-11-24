@@ -40,8 +40,11 @@ class Runtime:
         )
         self._q: queue.Queue = queue.Queue()
         self.stderr_lines: list[str] = []
-        threading.Thread(target=self._drain_stdout, daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self.io_error: str | None = None
+        self._stdout_t = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stdout_t.start()
+        self._stderr_t = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_t.start()
 
     def _drain_stdout(self) -> None:
         try:
@@ -53,6 +56,9 @@ class Runtime:
                 body = self.proc.stdout.read(n)
                 self._q.put(json.loads(body))
         except (OSError, ValueError) as e:
+            # The reader thread is now dead — every later frame is lost.
+            # Surface it on the next recv instead of starving the wait.
+            self.io_error = str(e)
             self._q.put({"__io_error__": str(e)})
 
     def _drain_stderr(self) -> None:
@@ -69,7 +75,10 @@ class Runtime:
         self.proc.stdin.flush()
 
     def recv(self, timeout: float = 10.0) -> dict:
-        return self._q.get(timeout=timeout)
+        msg = self._q.get(timeout=timeout)
+        if "__io_error__" in msg:
+            raise RuntimeError(f"runtime stdout reader died: {msg['__io_error__']}")
+        return msg
 
     def recv_until(self, pred, timeout: float = 10.0) -> dict:
         import time
