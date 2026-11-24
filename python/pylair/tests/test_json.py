@@ -451,6 +451,31 @@ def test_coerce_result_dataclass_field():
     assert _json.coerce_result(schema, s) is s
 
 
+def test_tag_bigints_runs_only_when_check_wire_saw_one(monkeypatch):
+    """check_wire reports BigInt presence, so a BigInt-free frame does
+    exactly ONE pre-dump walk — _tag_bigints isn't invoked at all."""
+    calls = []
+    real = _json._tag_bigints
+
+    def spy(obj):
+        calls.append(1)
+        return real(obj)
+
+    monkeypatch.setattr(_json, "_tag_bigints", spy)
+
+    big = [{"n": i, "s": "x" * 10} for i in range(5000)]
+    out = _json.dumps(big)
+    assert calls == []  # no BigInt -> no second walk
+    assert _json.loads(out)[4999]["n"] == 4999
+
+    deep = {"a": [1, {"b": [2, BigInt(7)]}]}
+    assert calls == []
+    text = _json.dumps(deep)
+    assert calls == [1]  # one BigInt deep inside -> the pass runs once
+    assert '"$bigint":"7"' in text
+    assert _json.loads(text)["a"][1]["b"][1] == BigInt(7)
+
+
 def test_task_result_untouched_when_no_bigint_declared(monkeypatch):
     """The fast path end to end: a fn whose returns schema has no bigint
     leaf gets ret_schema=None, the result object crosses untouched

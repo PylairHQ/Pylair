@@ -99,7 +99,7 @@ class DepthExceeded(Exception):
     """
 
 
-def check_wire(obj: Any, depth_limit: int | None = None) -> None:
+def check_wire(obj: Any, depth_limit: int | None = None) -> bool:
     """One pre-serialization walk over `obj`: nesting depth, the int
     range and NaN/Infinity — everything the emitted JSON must satisfy,
     checked on the pre-dump object so `_default` conversions (dataclass
@@ -107,7 +107,12 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
     re-parse guard was. Iterative for the same reason exceeds_depth is:
     a recursive walk hits Python's own recursion limit on the payloads
     this exists to catch.
+
+    Returns True iff the walk saw a BigInt — the dumps entry points use
+    it to run `_tag_bigints` only when there's something to tag, so a
+    BigInt-free frame costs exactly this one walk, never a second.
     """
+    saw_bigint = False
     # `seen` is the deepest depth each container id was walked at. The
     # int/NaN guards need each node visited once, but the DEPTH check
     # needs a container re-walked whenever it is reached deeper than
@@ -132,6 +137,7 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
         if isinstance(node, BigInt):
             # _tag_bigints -> {"$bigint": str} — a plain object leaf. No
             # range check: crossing safely is the type's whole point.
+            saw_bigint = True
             continue
         if isinstance(node, int):
             # bool was filtered above — it is a JSON literal, never an int.
@@ -185,6 +191,7 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             continue
         # Anything else: _default raises TypeError at dumps time — the
         # same error the caller maps today; no pre-check needed.
+    return saw_bigint
 
 
 def _tag_bigints(obj: Any) -> Any:
@@ -285,7 +292,7 @@ def dumps_collect(
     handles already wrote files, those files are unlinked: nothing was
     ever registered, so Python still owns them.
     """
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
 
     def default(o: Any) -> Any:
         if isinstance(o, Blob):
@@ -294,7 +301,7 @@ def dumps_collect(
 
     try:
         return json.dumps(
-            _tag_bigints(obj), default=default, separators=(",", ":"), allow_nan=False
+            tagged, default=default, separators=(",", ":"), allow_nan=False
         )
     except BaseException:
         for b in regs.values():
@@ -310,26 +317,22 @@ def dumps_probe(obj: Any, depth_limit: int | None = None) -> str:
     would write a file the real dump then writes AGAIN (the dry pass's
     handle is unlinked, never registered).
     """
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
 
     def default(o: Any) -> Any:
         if isinstance(o, Blob):
             return o._to_wire_dry()
         return _default(o)
 
-    return json.dumps(
-        _tag_bigints(obj), default=default, separators=(",", ":"), allow_nan=False
-    )
+    return json.dumps(tagged, default=default, separators=(",", ":"), allow_nan=False)
 
 
 def dumps(obj: Any, depth_limit: int | None = None) -> str:
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
     # allow_nan=False stays as the hard guarantee: even if a path ever
     # reached dumps without check_wire, a bare NaN/Infinity token can
     # still never hit the wire (serde_json rejects it as malformed).
-    return json.dumps(
-        _tag_bigints(obj), default=_default, separators=(",", ":"), allow_nan=False
-    )
+    return json.dumps(tagged, default=_default, separators=(",", ":"), allow_nan=False)
 
 
 def loads(raw: str | bytes) -> Any:
