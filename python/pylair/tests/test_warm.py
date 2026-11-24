@@ -1340,6 +1340,40 @@ def test_prewarm_requires_gate_waits_then_succeeds(tmp_path):
         assert resp1["result"] == "answered"
 
 
+def test_calls_queued_during_prewarm_served_by_member(tmp_path):
+    """Calls landing while the prewarmed member is still importing wait
+    on the pool queue — never leasing the mid-handshake member and
+    never spawning a second one — then the handshake's wake serves
+    them FIFO on that same member."""
+    gate = tmp_path / "prewarm.gate"
+    pf = tmp_path / "prewarmed.pid"
+    env = {
+        "PYLAIR_PREWARM_GATE": str(gate),
+        "PYLAIR_PREWARM_PIDFILE": str(pf),
+    }
+    with Runtime("testapp_prewarm", env=env) as rt:
+        _guard(rt)
+        rt.recv()
+        _components_until(rt, "worker:prewarm_pid", ["loading"])
+        rt.send(call(1, "prewarm_pid", task=1))
+        rt.send(call(2, "prewarm_pid", task=2))
+        # Dispatch is never blocked by the queued calls — a plain call
+        # answers while the member's import stays gated.
+        rt.send(call(3, "add", task=3, input={"a": 1, "b": 1}))
+        assert rt.recv_until(lambda m: m.get("id") == 3)["result"] == 2
+        gate.write_text("go")
+        prewarmed = _wait_pidfile(pf)
+        got: dict[int, dict] = {}
+        deadline = time.time() + _HANG_S
+        while 1 not in got or 2 not in got:
+            assert time.time() < deadline, "queued calls never answered"
+            m = rt.recv(timeout=max(0.1, deadline - time.time()))
+            if m.get("id") in (1, 2):
+                got[m["id"]] = m
+        assert got[1]["result"] == prewarmed
+        assert got[2]["result"] == prewarmed
+
+
 def test_prewarm_false_stays_lazy(tmp_path):
     """A plain warm pool keeps lazy spawning: no component and no
     member process until the first call — even in an app where another
