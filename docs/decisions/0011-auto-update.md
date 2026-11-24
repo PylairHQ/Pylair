@@ -20,8 +20,16 @@ Eight questions, answered with spike evidence below.
 ## Evidence index
 
 - Throwaway workflow `u0-updater.yml` (removed before merge):
-  - Run `<RUN_ID>` — ubuntu-22.04, windows-latest, macos-latest legs.
-- Artifact sizes / timings: see §1 table (from the run's step output).
+  - **Run `45347893012` — all three legs green** (ubuntu-22.04,
+    windows-latest, macos-latest): v1→v2 update + marker asserts,
+    v2→v3(broken)→v2 readiness-gated rollback, skip-list re-offer
+    suppression — `PASS` on every check.
+    <https://github.com/PylairHQ/Pylair/actions/runs/45347893012>
+  - Iteration runs with instructive failures: `45338629835`
+    (exec bits / endpoint scheme), `45340587621` (conf-vs-Cargo
+    version divergence, headless display), `45344186015` (NSIS passive
+    mode + AppImage re-extract cost).
+- Artifact sizes / timings: §1 table (from the run's step output).
 - Spike tree: `spikes/u0-updater/{app,serve.py,build.sh,ci.sh,README.md}`.
 
 ## 1. Full-bundle updates with tauri-plugin-updater
@@ -53,28 +61,55 @@ Python payload — was replaced as a unit.
   `download_and_install()` → `handle.restart()`. The spike drives it
   from Rust (`PYLAIR_UPDATE_TEST=1`), no JS dependency needed.
 
-**Findings per OS** (from run `<RUN_ID>`):
+**Findings per OS** (run `45347893012`, all legs green):
 
-| leg | artifact | size | build time | update+ready wall |
-|---|---|---|---|---|
-| ubuntu-22.04 | `.AppImage` + `.sig` | _TBD_ | _TBD_ | _TBD_ |
-| windows-latest | `-setup.exe` + `.sig` | _TBD_ | _TBD_ | _TBD_ |
-| macos-latest | `.app.tar.gz` + `.sig` | _TBD_ | _TBD_ | _TBD_ |
+| leg | artifact | size | builds (v1/v2/v3) | update+ready | rollback wall |
+|---|---|---|---|---|---|
+| ubuntu-22.04 | `.AppImage` + `.sig` | **80M** | 294s/114s/113s | **67s** | **78s** |
+| windows-latest | `-setup.exe` + `.sig` | **3.2M** | 266s/51s/50s | **10s** | **47s** |
+| macos-latest | `.app.tar.gz` + `.sig` | **5.0M** | 199s/27s/31s | **6s** | **47s** |
 
-Per-OS notes (install semantics the spike exercised):
+Rollback wall time is dominated by the 45s readiness deadline
+(`PYLAIR_ROLLBACK_DEADLINE_MS`, env-tunable) plus restore+relaunch:
+~2s on macOS/Windows, ~31s on Linux (an 80M AppImage re-extracts the
+restored copy before `main` runs). A real app's deadline should cover
+its slowest plausible readiness, e.g. model load.
 
-- **Linux AppImage**: the artifact *is* the runnable file. The updater
+**Integration findings the run surfaced** (each cost an iteration):
+
+- `plugins.updater.endpoints` **must be https** — plain `http://` is
+  rejected at plugin init unless
+  `plugins.updater.dangerousInsecureTransportProtocol: true`. That flag
+  is correct for a local dev/CI server only; the developer surface in
+  §7 keeps https mandatory for shipped apps.
+- The updater compares the remote version against **`tauri.conf.json`'s
+  `version`** (baked into the bundle), not `Cargo.toml` — the spike's
+  own markers read `env!("CARGO_PKG_VERSION")` and lied until both were
+  patched. Scaffold builds must keep the two in sync.
+- `bundle.createUpdaterArtifacts: true` is required or the signed
+  updater payloads (`.sig`) are not produced.
+- **Windows**: `download_and_install` never returns on Windows — it
+  ShellExecutes `-setup.exe /S /UPDATE /R` then `exit(0)` inside the
+  call. Any log/watchdog wiring must be armed *before* the call.
+  Default `installMode: passive` shows an NSIS progress window that can
+  hang on agent/headless sessions — `installMode: "quiet"` (`/S`) is
+  the right default for unattended updates; relaunch happens via the
+  installer's `/R` flag (`restart_after_install` defaults true).
+- **Windows relaunch loses the environment**: the NSIS installer
+  relaunches the exe with the desktop/explorer environment — env-var
+  state does not survive. Anything the relaunched process needs must
+  travel in argv (the updater forwards the app's own args via `/ARGS`)
+  or in files; the spike carries `--state-dir` for exactly this reason.
+- **Linux AppImage**: the artifact *is* the runnable file; the updater
   rewrites it at the `APPIMAGE` path and `restart()` re-execs. Under
-  `APPIMAGE_EXTRACT_AND_RUN=1` (CI) `current_exe` is the extracted mount
-  — rollback bookkeeping must record `APPIMAGE`, not `current_exe`.
-- **Windows NSIS**: `download_and_install` runs the `-setup.exe`
-  silently with the app closed; the installer relaunches the app. The
-  app cannot supervise its own replacement — see §2.
+  `APPIMAGE_EXTRACT_AND_RUN=1` `current_exe` is the extracted mount —
+  rollback bookkeeping must record `APPIMAGE`, not `current_exe`.
+  Restoring = overwrite + chmod; the ~30s cold re-extract is the
+  dominating cost on this platform.
 - **macOS**: `.app.tar.gz` replaces the `.app` in place at its current
   path; `restart()` re-runs the binary inside the new bundle. Unsigned
-  dev-built `.app`s work for update because the artifact is produced
-  locally (no quarantine attr); shipped builds need real signing +
-  notarization regardless (macOS requirement, not updater-specific).
+  dev-built `.app`s work locally (no quarantine attr); shipped builds
+  need real signing + notarization regardless.
 
 ## 2. Readiness-gated rollback
 
@@ -110,12 +145,15 @@ Two details the spike enforces that a real implementation must keep:
   the actor = the watchdog process itself — not the installer, not the
   next boot of the app (by then the verdict may already be "dead").
 
-**Proof** (run `<RUN_ID>`): v3 carries `BROKEN = True` in
+**Proof** (run `45347893012`): v3 carries `BROKEN = True` in
 `backend/app.py`; the app exits(3) before writing `ready-0.3.0`. The
 watchdog's deadline fires, it re-verifies the cached v2 artifact,
 restores it (per-OS path above), writes `restored 0.2.0` into
 `rollback-reason.txt`, and a subsequent check logs
-`skip: 0.3.0 on skip list`.
+`skip: 0.3.0 on skip list`. Observed end-to-end on all three legs:
+v3 boot → crash → deadline → verify → skip-list → restore →
+`boot v0.2.0` → `ready v0.2.0` — and the restored build re-checked,
+found the same offer, and skipped it.
 
 ## 3. Downgrade mechanics
 
@@ -255,12 +293,16 @@ PRs, in order:
    update + rollback + skip-list on ubuntu + windows; macOS as a step
    inside an existing macOS job (capacity rule) once proven.
 
-Runtime cost estimate (from spike timings, §1): each leg ≈
-`3 × build` + `update` + `rollback` ≈ _TBD_ min ubuntu / windows,
-_TBD_ min macOS — dominated by the three `tauri build`s. Mitigations:
-share the cargo target dir across versions (deps compile once), build
-v1+v2+v3 sequentially in one job (not three jobs), and reuse
-`sccache`/`cargo-cache` keyed on the lockfile.
+Runtime cost estimate (measured, run `45347893012`): per leg ≈
+`3 × tauri build` + proofs ≈ **~9min ubuntu** (294+114+113s builds,
+167s proofs), **~7min windows** (266+51+50s builds, ~2min proofs),
+**~5min macOS** (199+27+31s builds, ~2min proofs) — dominated by the
+cold first build; warm builds are ~¼ the time because deps compile
+once in a shared `target/`. An acceptance job per OS at these numbers
+is affordable; on macOS it belongs as a step inside an existing macOS
+job (capacity rule). A real Pylair app additionally builds the bundled
+CPython + backend venv, roughly doubling build time but not the
+update/rollback mechanics.
 
 ## Alternatives considered
 
