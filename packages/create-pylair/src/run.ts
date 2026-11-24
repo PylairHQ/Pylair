@@ -13,6 +13,7 @@ import {
   TEMPLATES,
   WRAP_APPS,
   WRAP_FRAMEWORKS,
+  applyUpdater,
   copyTree,
   substitutions,
   wrapUnavailable,
@@ -25,7 +26,7 @@ import { scaffolderVersion } from "./version.js";
 import { wordmark } from "./wordmark.js";
 
 const USAGE =
-  "usage: create-pylair <app-name> [--mode bridge|wrap] [--framework command|gradio|streamlit] [--identifier com.x.y] [--local /repo] [--template default]";
+  "usage: create-pylair <app-name> [--mode bridge|wrap] [--framework command|gradio|streamlit] [--identifier com.x.y] [--local /repo] [--template default] [--with-updater]";
 const VALUE_FLAGS = ["--local", "--identifier", "--template", "--mode", "--into", "--name", "--framework"];
 
 export interface RunIo {
@@ -110,7 +111,16 @@ export async function run(argv: string[], io: RunIo): Promise<number> {
         { value: "streamlit", label: "Streamlit" },
       ]);
 
-    return scaffold(name, mode, framework, argv, io, cwd, caps, fail);
+    // Auto-update opt-in (decision 0011): --with-updater, else prompt with
+    // the default on "no" - unsigned apps shouldn't self-update.
+    let withUpdater = argv.includes("--with-updater");
+    if (!withUpdater && canPrompt)
+      withUpdater = await askSelect(prompt, "add auto-update support? (signing key via pylair keys init)", [
+        { value: false, label: "no" },
+        { value: true, label: "yes" },
+      ]);
+
+    return scaffold(name, mode, framework, argv, io, cwd, caps, fail, withUpdater);
   } catch (e) {
     if (e instanceof PromptCancelled) {
       out("cancelled.");
@@ -130,6 +140,11 @@ function into(argv: string[], io: RunIo, cwd: string): number {
     io.error.write(`create-pylair: ${msg}\n`);
     return 1;
   };
+  if (argv.includes("--with-updater"))
+    return fail(
+      "--with-updater applies to fresh scaffolds - for an existing project, " +
+        "add plugins.updater by hand (docs/updates.md)",
+    );
   const dir = resolve(cwd, argValue(argv, "--into") ?? ".");
   if (argValue(argv, "--mode") !== "wrap") return fail("--into needs --mode wrap");
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return fail(`${dir} is not a directory`);
@@ -162,6 +177,7 @@ function scaffold(
   cwd: string,
   caps: Caps,
   fail: (msg: string) => number,
+  withUpdater = false,
 ): number {
   const identifier = argValue(argv, "--identifier") ?? `com.example.${name.replace(/-/g, "")}`;
   const local = argValue(argv, "--local");
@@ -191,6 +207,7 @@ function scaffold(
     );
   if (!statSync(join(dest, "src-tauri/tauri.conf.json")).isFile())
     return fail("template produced no tauri.conf.json (internal error)");
+  if (withUpdater) applyUpdater(dest);
 
   // The outro prints through the shared ui: a success line, then the Next
   // commands with the command accented and the comment muted. Plain caps
@@ -206,6 +223,9 @@ function scaffold(
     ],
     ...(mode === "wrap" ? [] : ([["", "# (pnpm users: pnpm pylair dev / pnpm pylair build)"]] as [string, string][])),
     ["npx pylair build", "# native installer with bundled python"],
+    ...(withUpdater
+      ? ([["npx pylair keys init", "# generate the update signing keypair"]] as [string, string][])
+      : []),
     ["npx pylair doctor", "# diagnose environment any time"],
   ];
   u.ok(`Created ${name}/ (${mode === "wrap" ? `wrap, ${framework}` : "bridge"})`);
@@ -214,7 +234,7 @@ function scaffold(
   for (const [cmd, note] of next)
     u.line(
       note
-        ? `  ${paint(caps, "accent", cmd.padEnd(20))}${paint(caps, "muted", note)}`
+        ? `  ${paint(caps, "accent", cmd.padEnd(Math.max(20, cmd.length + 1)))}${paint(caps, "muted", note)}`
         : `  ${paint(caps, "accent", cmd)}`,
     );
   u.line();

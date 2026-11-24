@@ -51,6 +51,7 @@ import { fetchPython, stageEnv } from "./build/python.js";
 import { adHocSign } from "./build/sign.js";
 import { stageSource } from "./build/source.js";
 import { isWin, runTool } from "./build/util.js";
+import { assertUpdaterVersionSync } from "./update.js";
 import { formatDuration, formatSize, ui } from "./ui/index.js";
 import { wrapWarnings } from "./wrapconfig.js";
 import {
@@ -80,6 +81,10 @@ export interface BuildOptions {
   appDir: string;
   /** Extra tauri-cli args (e.g. --bundles). */
   tauriArgs?: string[];
+  /** `pylair build --sign`: produce signed updater artifacts — forces
+   * bundle.createUpdaterArtifacts and requires TAURI_SIGNING_PRIVATE_KEY
+   * in the environment (0011 §6). */
+  sign?: boolean;
   /** Skip the interpreter fetch (reuse staged resources/python). */
   skipFetch?: boolean;
   /** Stage and verify everything (interpreter, locked env, source, prune,
@@ -110,6 +115,27 @@ export async function build(opts: BuildOptions): Promise<void> {
   // Capability scopes are checked first: a bad `allow: []` or a half-scoped
   // window is a configuration error, not worth a Python download to find out.
   for (const w of assertCapabilities(appDir)) ui.warn(formatFinding(w), { bare: true });
+
+  // Updater-enabled apps: tauri.conf.json's version is what the updater
+  // compares an offer against; Cargo.toml's is what the binary reports —
+  // they must match or an updated app misreports itself (0011 §1). Checked
+  // for every build once plugins.updater exists, and whenever --sign asks
+  // for updater artifacts.
+  if (tconf.updater || opts.sign) assertUpdaterVersionSync(tauriDir, tconf.version);
+  if (opts.sign) {
+    if (!process.env.TAURI_SIGNING_PRIVATE_KEY)
+      throw new Error(
+        "pylair build --sign: TAURI_SIGNING_PRIVATE_KEY is not set - generate " +
+          "the keypair with `pylair keys init` and put the private key in CI " +
+          "secrets (docs/updates.md)",
+      );
+    if (!tconf.updater)
+      ui.warn(
+        "warning: --sign produces updater artifacts but tauri.conf.json has no " +
+          "plugins.updater block - nothing will consume them (docs/updates.md)",
+        { bare: true },
+      );
+  }
 
   const targetTriple = hostTriple(); // cross-compile refused by construction
   ui.header(
@@ -292,6 +318,11 @@ export async function build(opts: BuildOptions): Promise<void> {
         : true; // no signing concept on Linux: don't warn
 
   const tauriArgs = opts.tauriArgs ?? [];
+  // --sign forces bundle.createUpdaterArtifacts via tauri's --config merge,
+  // so a one-off signed build needs no conf edit. Merged last: it wins over
+  // a --config the user forwarded only for this one key.
+  if (opts.sign)
+    tauriArgs.push("--config", JSON.stringify({ bundle: { createUpdaterArtifacts: true } }));
   const tauriStarted = Date.now();
   await ui.step("build installer", (s) =>
     runTool(ui, process.execPath, [tauriCliEntry(appDir), "build", ...tauriArgs], appDir, {

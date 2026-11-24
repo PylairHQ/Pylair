@@ -11,9 +11,11 @@ import { build } from "./build.js";
 import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
 import { doctor } from "./doctor.js";
+import { keysInit } from "./keys.js";
 import { loadManifest } from "./manifest.js";
 import { initUi, ui } from "./ui/index.js";
-import { PromptCancelled } from "./ui/prompts.js";
+import { interactive, PromptCancelled } from "./ui/prompts.js";
+import { updateManifestCommand } from "./update.js";
 import { initWrap } from "./wrap.js";
 import { WRAP_FRAMEWORKS, type WrapFramework } from "./wrapconfig.js";
 import { cliVersion } from "./version.js";
@@ -35,6 +37,8 @@ Commands:
   codegen   Generate typed TypeScript stubs from @expose signatures
   wrap      Turn an existing Python web app into a desktop app (wrap mode)
   init      pylair init --mode wrap  (the same as \`pylair wrap\`)
+  keys      Update signing keys (pylair keys init)
+  update    Auto-update artifacts (pylair update manifest)
 
 wrap options:
   [entry]               The app's entry file (gradio / streamlit), e.g. app.py
@@ -58,6 +62,8 @@ codegen options:
 build options:
   --dir <path>          App directory (default: cwd)
   --bundles <list>      Comma-separated bundle kinds passed to tauri build
+  --sign                Also produce signed updater artifacts (requires
+                        TAURI_SIGNING_PRIVATE_KEY in the environment)
   --skip-fetch          Reuse already-staged resources/python
   --stage-only          Stage and verify the bundle, stop before tauri build
   --verbose             Stream uv and tauri output instead of folding it into
@@ -67,6 +73,31 @@ build options:
 
   Builds are native-only: run on each target OS (no cross-compile).
   Unsigned by default: set signing env vars for distribution builds.
+
+keys options:
+  pylair keys init      Generate the update signing keypair: private key to
+                        --key-path (never inside the project), pubkey into
+                        tauri.conf.json
+    --dir <path>        App directory (default: cwd)
+    --key-path <file>   Where the private key is written (must be outside
+                        the project or git-ignored; prompted on a TTY)
+    --password <pw>     Private-key password (default: the env var
+                        TAURI_SIGNING_PRIVATE_KEY_PASSWORD, else prompted)
+    --no-password       Generate an unprotected private key (warned;
+                        never implied by a failed attempt)
+    --force             Overwrite an existing pubkey/key (rotation needs the
+                        OLD key - see docs/updates.md)
+
+update options:
+  pylair update manifest   Scan the bundle output for signed updater
+                           artifacts and write latest.json
+    --dir <path>        App directory (default: cwd)
+    --base-url <url>    https directory hosting manifest + artifacts
+                        (default: derived from plugins.updater.endpoints[0])
+    --channel <name>    Write latest-<name>.json instead of latest.json
+    --notes <text>      Release notes for the manifest
+    --out <file>        Manifest path (default: <target>/release/bundle/)
+    --insecure-dev      Allow an http:// base url (local dev/CI only)
 `);
 }
 
@@ -115,6 +146,7 @@ function spawnProbe(cmd: string): boolean {
 export function parseBuildArgs(rest: string[]): {
   dir?: string;
   bundles?: string;
+  sign: boolean;
   skipFetch: boolean;
   stageOnly: boolean;
   verbose: boolean;
@@ -122,6 +154,7 @@ export function parseBuildArgs(rest: string[]): {
 } {
   let dir: string | undefined;
   let bundles: string | undefined;
+  let sign = false;
   let skipFetch = false;
   let stageOnly = false;
   let verbose = false;
@@ -143,6 +176,10 @@ export function parseBuildArgs(rest: string[]): {
       bundles = inline ?? rest[++i];
       continue;
     }
+    if (key === "--sign") {
+      sign = true;
+      continue;
+    }
     if (key === "--skip-fetch") {
       skipFetch = true;
       continue;
@@ -160,7 +197,7 @@ export function parseBuildArgs(rest: string[]): {
     }
   }
   if (bundles !== undefined) tauriArgs.push("--bundles", bundles);
-  return { dir, bundles, skipFetch, stageOnly, verbose, tauriArgs };
+  return { dir, bundles, sign, skipFetch, stageOnly, verbose, tauriArgs };
 }
 
 /** Split `pylair wrap` / `pylair init` args. Everything after `--cmd` is the
@@ -295,10 +332,11 @@ export function main(rawArgv: string[]): number | Promise<number> {
     }
   }
   if (command === "build") {
-    const { dir, skipFetch, stageOnly, verbose, tauriArgs } = parseBuildArgs(rest);
+    const { dir, sign, skipFetch, stageOnly, verbose, tauriArgs } = parseBuildArgs(rest);
     return build({
       appDir: resolveAppDir(dir),
       tauriArgs,
+      sign,
       skipFetch,
       stageOnly,
       verbose,
@@ -306,6 +344,50 @@ export function main(rawArgv: string[]): number | Promise<number> {
       () => 0,
       (e) => failed("build", e),
     );
+  }
+  if (command === "keys") {
+    const [sub, ...subrest] = rest;
+    if (sub !== "init") {
+      ui.error(`pylair keys: unknown subcommand '${sub ?? ""}' (only 'init')`);
+      return 2;
+    }
+    const force = subrest.includes("--force");
+    const noPassword = subrest.includes("--no-password");
+    const password = argValue(subrest, "--password");
+    const canPrompt = interactive(process.stdin, process.env);
+    return keysInit({
+      appDir: resolveAppDir(argValue(subrest, "--dir")),
+      keyPath: argValue(subrest, "--key-path"),
+      password,
+      noPassword,
+      force,
+      prompt: canPrompt ? { input: process.stdin, output: process.stdout, caps: ui.caps } : undefined,
+    }).then(
+      (code) => code,
+      (e) =>
+        e instanceof PromptCancelled
+          ? (ui.line("cancelled."), 130)
+          : failed("keys init", e),
+    );
+  }
+  if (command === "update") {
+    const [sub, ...subrest] = rest;
+    if (sub !== "manifest") {
+      ui.error(`pylair update: unknown subcommand '${sub ?? ""}' (only 'manifest')`);
+      return 2;
+    }
+    try {
+      return updateManifestCommand({
+        appDir: resolveAppDir(argValue(subrest, "--dir")),
+        baseUrl: argValue(subrest, "--base-url"),
+        channel: argValue(subrest, "--channel"),
+        notes: argValue(subrest, "--notes"),
+        out: argValue(subrest, "--out"),
+        insecureDev: subrest.includes("--insecure-dev"),
+      });
+    } catch (e) {
+      return failed("update manifest", e);
+    }
   }
   if (command === "dev") {
     const dir = resolveAppDir(argValue(rest, "--dir"));
