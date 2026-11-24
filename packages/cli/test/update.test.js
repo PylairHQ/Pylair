@@ -9,6 +9,7 @@ import { c as tarCreate } from "tar";
 
 import {
   assertUpdaterVersionSync,
+  canonArch,
   findUpdaterArtifacts,
   updateManifest,
 } from "../dist/update.js";
@@ -85,6 +86,10 @@ const ALL_KINDS = [
   ["nsis", "up-app_0.2.0_x64-setup.exe", "win-bytes"],
 ];
 
+// The .app.tar.gz name carries no arch - its platform key falls back to the
+// host arch, so expectations differ on arm64 (macOS CI) vs x64.
+const DARWIN = `darwin-${canonArch(process.arch)}`;
+
 function addSigs(dir, skip = -1) {
   for (const [i, [kind, file]] of ALL_KINDS.entries()) {
     if (i === skip) continue;
@@ -98,11 +103,11 @@ describe("findUpdaterArtifacts", () => {
     const got = findUpdaterArtifacts(join(dir, "src-tauri"));
     assert.deepEqual(
       got.map((a) => a.platform),
-      ["darwin-x86_64", "linux-x86_64", "windows-x86_64"],
+      [DARWIN, "linux-x86_64", "windows-x86_64"],
     );
     assert.equal(got.find((a) => a.platform === "linux-x86_64").version, "0.2.0");
     assert.equal(got.find((a) => a.platform === "windows-x86_64").version, "0.2.0");
-    assert.equal(got.find((a) => a.platform === "darwin-x86_64").version, undefined);
+    assert.equal(got.find((a) => a.platform === DARWIN).version, undefined);
   });
 
   test("arch comes from a --target triple dir when present", () => {
@@ -139,7 +144,7 @@ describe("updateManifest", () => {
       notes: "hello",
       now,
     });
-    assert.deepEqual(platforms, ["darwin-x86_64", "linux-x86_64", "windows-x86_64"]);
+    assert.deepEqual(platforms, [DARWIN, "linux-x86_64", "windows-x86_64"]);
     const m = JSON.parse(readFileSync(file, "utf-8"));
     assert.equal(file, join(dir, "src-tauri/target/release/bundle/latest.json"));
     assert.equal(m.version, "0.2.0");
@@ -152,7 +157,7 @@ describe("updateManifest", () => {
       "https://github.com/me/app/releases/latest/download/up-app_0.2.0_amd64.AppImage",
     );
     assert.equal(linux.sha256, sha("linux-bytes"));
-    assert.equal(m.platforms["darwin-x86_64"].url.endsWith("up-app.app.tar.gz"), true);
+    assert.equal(m.platforms[DARWIN].url.endsWith("up-app.app.tar.gz"), true);
   });
 
   test("--channel writes latest-<channel>.json", () => {

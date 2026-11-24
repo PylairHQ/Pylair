@@ -77,7 +77,7 @@ const ARCH_CANON: Record<string, string> = {
 /** Rust-triple arch prefixes (the first `-`-separated segment). */
 const TRIPLE_ARCHS = new Set(Object.keys(ARCH_CANON).concat(["riscv64gc"]));
 
-function canonArch(a: string): string {
+export function canonArch(a: string): string {
   return ARCH_CANON[a.toLowerCase()] ?? a.toLowerCase();
 }
 
