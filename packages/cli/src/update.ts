@@ -132,28 +132,37 @@ export function findUpdaterArtifacts(
     const tripleArch = /^[a-z0-9_]+-/.test(triple) && TRIPLE_ARCHS.has(triple.split("-")[0])
       ? canonArch(triple.split("-")[0])
       : "";
+    // A universal-apple-darwin build serves BOTH mac arches from one
+    // fat artifact: the triple dir segment, or a `_universal` arch
+    // token in the filename, marks it.
+    const tripleUniversal = triple.split("-")[0] === "universal";
     for (const kind of readdirSync(root, { withFileTypes: true })) {
       const os = KIND_OS[kind.name];
       if (!kind.isDirectory() || !os) continue;
       const re = KIND_FILE[kind.name];
       for (const file of readdirSync(join(root, kind.name))) {
         if (!re.test(file)) continue;
+        const universal =
+          os === "darwin" &&
+          (tripleUniversal || /(?:^|[_-])universal(?:[_.-]|$)/i.test(file));
         const arch = tripleArch || nameArch(file) || canonArch(process.arch);
-        const platform = `${os}-${arch}`;
-        const artifact: UpdaterArtifact = {
-          path: join(root, kind.name, file),
-          file,
-          platform,
-          version: nameVersion(file),
-        };
-        const prev = byPlatform.get(platform);
-        // Two spellings of the same payload (.exe and .nsis.zip): the exe wins.
-        if (prev && !(prev.file.endsWith(".zip") && file.endsWith(".exe")))
-          throw new Error(
-            `multiple updater artifacts for ${platform}: ${prev.file} and ${file} ` +
-              `(${join(root, kind.name)}) - clean the bundle dir and rebuild`,
-          );
-        byPlatform.set(platform, artifact);
+        for (const a of universal ? ["aarch64", "x86_64"] : [arch]) {
+          const platform = `${os}-${a}`;
+          const artifact: UpdaterArtifact = {
+            path: join(root, kind.name, file),
+            file,
+            platform,
+            version: nameVersion(file),
+          };
+          const prev = byPlatform.get(platform);
+          // Two spellings of the same payload (.exe and .nsis.zip): the exe wins.
+          if (prev && !(prev.file.endsWith(".zip") && file.endsWith(".exe")))
+            throw new Error(
+              `multiple updater artifacts for ${platform}: ${prev.file} and ${file} ` +
+                `(${join(root, kind.name)}) - clean the bundle dir and rebuild`,
+            );
+          byPlatform.set(platform, artifact);
+        }
       }
     }
   }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-python-update-relaunch"
+description = "Enables the python_update_relaunch command without any pre-configured scope."
+commands.allow = ["python_update_relaunch"]
+
+[[permission]]
+identifier = "deny-python-update-relaunch"
+description = "Denies the python_update_relaunch command without any pre-configured scope."
+commands.deny = ["python_update_relaunch"]

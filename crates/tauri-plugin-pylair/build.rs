@@ -14,6 +14,13 @@ const COMMANDS: &[&str] = &[
     "python_selftest_report",
     "python_selftest_b_report",
     "python_bench_report",
+    // Declared unconditionally so the permission files exist for
+    // --with-updater scaffolds; on a feature-off build the commands are
+    // absent and invoking them simply fails "command not found".
+    "python_update_check",
+    "python_update_download",
+    "python_update_install",
+    "python_update_relaunch",
 ];
 
 fn main() {

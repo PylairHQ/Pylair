@@ -217,6 +217,12 @@ impl<R: Runtime> Builder<R> {
                 reg.lock().unwrap().set_fairness(handle.fairness());
                 app.manage(PyRuntime(handle));
                 app.manage(reg);
+                // Update gate (decision 0011): only exists for apps
+                // carrying plugins.updater — writes the file contract
+                // the watchdog reads (boot marker happens inside).
+                if let Some(gate) = crate::update::UpdateGate::new(app) {
+                    app.manage(gate);
+                }
                 let wrap_ui = match &wrap_rt {
                     Some(rt) => {
                         let ui = wrap::Ui::new(app, url_source.clone(), rt);
@@ -229,6 +235,9 @@ impl<R: Runtime> Builder<R> {
 
                 let app_handle = app.clone();
                 let stderr = self.stderr.clone();
+                let update_gate = app
+                    .try_state::<std::sync::Arc<crate::update::UpdateGate>>()
+                    .map(|s| (*s).clone());
                 tauri::async_runtime::spawn(async move {
                     while let Some(ev) = ev_rx.recv().await {
                         // Wrap mode: record the event and drive the window
@@ -236,6 +245,11 @@ impl<R: Runtime> Builder<R> {
                         // can be given what it missed.
                         if let Some(ui) = &wrap_ui {
                             ui.on_event(&ev);
+                        }
+                        // Update gate: readiness/boot evidence writes —
+                        // before fan-out, on every generation event.
+                        if let Some(g) = &update_gate {
+                            g.on_event(&ev);
                         }
                         let payload = match ev {
                             // A web runtime's url is read at emit time, so a lagging

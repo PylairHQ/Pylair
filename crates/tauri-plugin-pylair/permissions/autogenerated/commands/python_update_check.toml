@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-python-update-check"
+description = "Enables the python_update_check command without any pre-configured scope."
+commands.allow = ["python_update_check"]
+
+[[permission]]
+identifier = "deny-python-update-check"
+description = "Denies the python_update_check command without any pre-configured scope."
+commands.deny = ["python_update_check"]

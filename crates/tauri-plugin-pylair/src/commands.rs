@@ -324,11 +324,31 @@ pub fn python_health_impl<R: Runtime>(
     rt: &PyRuntime,
 ) -> Result<Value, ErrorObj> {
     subscribed(window, reg);
-    serde_json::to_value(rt.0.health(Some(window.label()))).map_err(|e| ErrorObj {
+    let mut v = serde_json::to_value(rt.0.health(Some(window.label()))).map_err(|e| ErrorObj {
         code: protocol::INTERNAL,
         message: format!("health snapshot failed to serialize: {e}"),
         data: None,
-    })
+    })?;
+    // Updater-enabled apps additionally carry `update` and an
+    // `updating` readiness component (decision 0011 §2) — merged here
+    // rather than in HealthSnapshot because the file state is owned by
+    // the update gate, not the supervisor.
+    if let Some(gate) = window
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::update::UpdateGate>>()
+    {
+        v["update"] = gate.health();
+        if let Some(state) = gate.component_state() {
+            if !v["app"].is_object() {
+                v["app"] = json!({"components": {}});
+            }
+            // Host-injected, so no last-report timestamp exists —
+            // ms_ago is 0, matching the "just observed" truth.
+            v["app"]["components"]["updating"] =
+                json!({"phase": state, "progress": null, "detail": null, "ms_ago": 0});
+        }
+    }
+    Ok(v)
 }
 
 #[tauri::command]
@@ -343,18 +363,42 @@ async fn python_shutdown<R: Runtime>(
 
 pub(super) fn invoke_handler<R: Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![
-        python_call,
-        python_call_stream,
-        python_grant_credit,
-        python_release_blob,
-        python_cancel,
-        python_retry,
-        python_state,
-        python_health,
-        python_shutdown,
-        python_selftest_report,
-        python_selftest_b_report,
-        python_bench_report,
-    ]
+    #[cfg(feature = "updater")]
+    {
+        tauri::generate_handler![
+            python_call,
+            python_call_stream,
+            python_grant_credit,
+            python_release_blob,
+            python_cancel,
+            python_retry,
+            python_state,
+            python_health,
+            python_shutdown,
+            python_selftest_report,
+            python_selftest_b_report,
+            python_bench_report,
+            crate::update::cmd::python_update_check,
+            crate::update::cmd::python_update_download,
+            crate::update::cmd::python_update_install,
+            crate::update::cmd::python_update_relaunch,
+        ]
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        tauri::generate_handler![
+            python_call,
+            python_call_stream,
+            python_grant_credit,
+            python_release_blob,
+            python_cancel,
+            python_retry,
+            python_state,
+            python_health,
+            python_shutdown,
+            python_selftest_report,
+            python_selftest_b_report,
+            python_bench_report,
+        ]
+    }
 }

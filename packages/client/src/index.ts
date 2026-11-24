@@ -104,10 +104,33 @@ export class PermissionDeniedError extends PythonError {
   }
 }
 
+/** Protocol code for update machinery failures (decision 0011). */
+export const UPDATE_FAILED = -32060;
+
+/**
+ * An update command failed. `.updateCode` is the stable machine code
+ * from the error's data — `"NotUpdatable"` (App Translocation, a
+ * non-updater build, an unresolvable install location),
+ * `"NeedsApproval"` (per-machine install requiring elevation),
+ * `"SignatureInvalid"`, `"NoOffer"` (download/install before check),
+ * `"EndpointError"`, `"CheckFailed"`, `"DownloadFailed"`,
+ * `"CacheFailed"` (rollback cache), `"InstallFailed"`.
+ */
+export class UpdateError extends PythonError {
+  readonly updateCode: string;
+  constructor(message: string, data?: unknown) {
+    super(UPDATE_FAILED, message, data);
+    this.name = "UpdateError";
+    const d = (data ?? {}) as { code?: unknown };
+    this.updateCode = typeof d.code === "string" ? d.code : "UpdateFailed";
+  }
+}
+
 /** Build the typed error for a wire code. */
 function mkError(code: number, message: string, data?: unknown): PythonError {
   if (code === LIMIT_EXCEEDED) return new LimitExceededError(message, data);
   if (code === PERMISSION_DENIED) return new PermissionDeniedError(message, data);
+  if (code === UPDATE_FAILED) return new UpdateError(message, data);
   return new PythonError(code, message, data);
 }
 
@@ -935,6 +958,28 @@ export interface HealthSnapshot {
   self: HealthSelf | null;
   /** App-reported readiness — null/absent unless the runtime reports. */
   app?: HealthApp | null;
+  /** Update activity (decision 0011) — absent on non-updater apps. */
+  update?: HealthUpdate;
+}
+
+/**
+ * `health().update` — the watchdog-visible update lifecycle. `state`
+ * shares the `updating` readiness component's vocabulary:
+ * `pending` (installed, first boot unconfirmed), `installing`,
+ * `ready` (watchdog confirmed it), `rolled-back`,
+ * `rollback-pending-approval` (per-machine: restore needs elevation),
+ * `none`. `lastRollback` carries the watchdog's `{from, to, reason,
+ * at}` record when a rollback happened.
+ */
+export interface HealthUpdate {
+  state:
+    | "none"
+    | "pending"
+    | "installing"
+    | "ready"
+    | "rolled-back"
+    | "rollback-pending-approval";
+  lastRollback?: { from?: string; to?: string; reason?: string; at?: number };
 }
 
 /**
@@ -1047,4 +1092,83 @@ export const python = {
   onExposes,
   onHealth,
   onApp,
+};
+
+// ---- in-app updates (decision 0011) -----------------------------------------
+
+/** `update.check()`'s answer for an offerable update. */
+export interface UpdateInfo {
+  /** The offered version. */
+  version: string;
+  /** Manifest `notes` — null when the release carries none. */
+  notes: string | null;
+  /** Manifest `sha256` extension for the platform artifact, when published. */
+  sha256: string | null;
+  /** The version this app is running. */
+  current: string;
+}
+
+/** Download progress — the upstream updater plugin's event shapes. */
+export type UpdateDownloadEvent =
+  | { event: "Started"; data: { contentLength: number | null } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished"; data: Record<string, never> };
+
+/**
+ * Check the update endpoint for a newer release. Resolves to the offer
+ * or `null` — including when the artifact is on the skip list, so a
+ * rolled-back build is never re-presented. Throws `UpdateError`
+ * (`updateCode` `NotUpdatable`) on a non-updater or translocated app.
+ */
+async function updateCheck(): Promise<UpdateInfo | null> {
+  return (await ipc())
+    .invoke<UpdateInfo | null>(CMD.updateCheck)
+    .catch((e) => {
+      throw asPythonError(e);
+    });
+}
+
+/**
+ * Download the checked update (progress via `onEvent` in the upstream
+ * Started/Progress/Finished shapes), arm the watchdog contract and
+ * install it. On Windows the install never returns — the process
+ * exits into the installer — so anything that must persist before
+ * relaunch is already written by the time this call resolves on other
+ * platforms. Follow with `update.relaunch()` where it does return.
+ */
+async function updateDownloadAndInstall(opts: {
+  onEvent?: (ev: UpdateDownloadEvent) => void;
+} = {}): Promise<void> {
+  const b = await ipc();
+  await b
+    .invokeChannel(CMD.updateDownload, {}, (ev) =>
+      opts.onEvent?.(ev as unknown as UpdateDownloadEvent),
+    )
+    .catch((e) => {
+      throw asPythonError(e);
+    });
+  await b.invoke(CMD.updateInstall, {}).catch((e) => {
+    throw asPythonError(e);
+  });
+}
+
+/** Restart into the installed version. */
+async function updateRelaunch(): Promise<void> {
+  return (await ipc())
+    .invoke<void>(CMD.updateRelaunch, {})
+    .catch((e) => {
+      throw asPythonError(e);
+    });
+}
+
+/**
+ * In-app update surface (decision 0011). All commands reject with
+ * `UpdateError`; the app must be built with the `updater` cargo
+ * feature and a `plugins.updater` config block (`--with-updater`
+ * scaffolds carry both) or every call lands `NotUpdatable`.
+ */
+export const update = {
+  check: updateCheck,
+  downloadAndInstall: updateDownloadAndInstall,
+  relaunch: updateRelaunch,
 };

@@ -119,6 +119,26 @@ describe("findUpdaterArtifacts", () => {
     assert.deepEqual(got.map((a) => a.platform), ["darwin-aarch64"]);
   });
 
+  test("a universal-apple-darwin build registers under BOTH mac arches", () => {
+    const dir = fakeApp();
+    withTripleArtifacts(dir, [
+      TRIPLE_ART("universal-apple-darwin", "macos", "up-app.app.tar.gz", "b"),
+    ]);
+    const got = findUpdaterArtifacts(join(dir, "src-tauri"));
+    assert.deepEqual(got.map((a) => a.platform), ["darwin-aarch64", "darwin-x86_64"]);
+    // Same payload under both keys.
+    assert.equal(got[0].path, got[1].path);
+  });
+
+  test("a `_universal` arch token in the filename does the same", () => {
+    const dir = fakeApp();
+    withTripleArtifacts(dir, [
+      TRIPLE_ART("any-triple", "macos", "up-app_universal.app.tar.gz", "b"),
+    ]);
+    const got = findUpdaterArtifacts(join(dir, "src-tauri"));
+    assert.deepEqual(got.map((a) => a.platform), ["darwin-aarch64", "darwin-x86_64"]);
+  });
+
   test("two artifacts for one platform throw", () => {
     const dir = fakeApp({
       artifacts: [
@@ -158,6 +178,26 @@ describe("updateManifest", () => {
     );
     assert.equal(linux.sha256, sha("linux-bytes"));
     assert.equal(m.platforms[DARWIN].url.endsWith("up-app.app.tar.gz"), true);
+  });
+
+  test("a universal macOS artifact lands under both darwin keys", () => {
+    const dir = fakeApp();
+    withTripleArtifacts(dir, [
+      { triple: "universal-apple-darwin", kind: "macos", file: "up-app.app.tar.gz", body: "x" },
+    ]);
+    // Universal artifact: real tarball + sig, matching the conf version.
+    const tarDir = join(dir, "src-tauri/target/universal-apple-darwin/release/bundle/macos");
+    rmSync(join(tarDir, "up-app.app.tar.gz"));
+    makeAppTar(join(tarDir, "up-app.app.tar.gz"), "0.2.0");
+    writeFileSync(join(tarDir, "up-app.app.tar.gz.sig"), "SIG-mac");
+    const { file, platforms } = updateManifest({ appDir: dir, baseUrl: "https://x/dl" });
+    assert.deepEqual(platforms, ["darwin-aarch64", "darwin-x86_64"]);
+    const m = JSON.parse(readFileSync(file, "utf-8"));
+    for (const p of ["darwin-aarch64", "darwin-x86_64"]) {
+      assert.equal(m.platforms[p].signature, "SIG-mac");
+      assert.ok(m.platforms[p].url.endsWith("up-app.app.tar.gz"));
+      assert.equal(m.platforms[p].sha256, m.platforms["darwin-aarch64"].sha256);
+    }
   });
 
   test("--channel writes latest-<channel>.json", () => {

@@ -96,13 +96,30 @@ export function applyUpdater(dest: string): void {
   const cargoPath = join(dest, "src-tauri", "Cargo.toml");
   const cargo = readFileSync(cargoPath, "utf-8");
   // Anchor on the pylair dep line - the one line both templates' [dependencies]
-  // guarantee (the wrap template has no [features] section).
-  if (!/^tauri-plugin-pylair = .+$/m.test(cargo))
+  // guarantee (the wrap template has no [features] section). The dep gets
+  // the `updater` cargo feature so the host compiles its update machinery;
+  // tauri-plugin-updater itself is pinned on the next line.
+  const pylairDep = cargo.match(/^tauri-plugin-pylair = (".+")$/m);
+  const pylairTable = cargo.match(/^tauri-plugin-pylair = \{(.+)\}$/m);
+  if (pylairDep) {
+    writeFileSync(
+      cargoPath,
+      cargo.replace(
+        /^tauri-plugin-pylair = .+$/m,
+        `tauri-plugin-pylair = { version = ${pylairDep[1]}, features = ["updater"] }\n${PINS.updater}`,
+      ),
+    );
+  } else if (pylairTable) {
+    writeFileSync(
+      cargoPath,
+      cargo.replace(
+        /^tauri-plugin-pylair = .+$/m,
+        `tauri-plugin-pylair = { ${pylairTable[1]}, features = ["updater"] }\n${PINS.updater}`,
+      ),
+    );
+  } else {
     throw new Error(`applyUpdater: ${cargoPath} has no tauri-plugin-pylair dep to anchor on`);
-  writeFileSync(
-    cargoPath,
-    cargo.replace(/^(tauri-plugin-pylair = .+)$/m, `$1\n${PINS.updater}`),
-  );
+  }
 
   const confPath = join(dest, "src-tauri", "tauri.conf.json");
   const conf = JSON.parse(readFileSync(confPath, "utf-8"));
@@ -121,7 +138,16 @@ export function applyUpdater(dest: string): void {
 
   const capPath = join(dest, "src-tauri", "capabilities", "default.json");
   const cap = JSON.parse(readFileSync(capPath, "utf-8"));
-  cap.permissions.push("updater:default");
+  cap.permissions.push(
+    "updater:default",
+    // The host's own update commands (python_update_*) - separate from
+    // upstream's updater:* namespace; absent without the feature they
+    // would grant nothing.
+    "pylair:allow-python-update-check",
+    "pylair:allow-python-update-download",
+    "pylair:allow-python-update-install",
+    "pylair:allow-python-update-relaunch",
+  );
   writeFileSync(capPath, JSON.stringify(cap, null, 2) + "\n");
 
   const ignorePath = join(dest, ".gitignore");

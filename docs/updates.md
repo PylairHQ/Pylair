@@ -137,6 +137,71 @@ endpoint minus its filename, so it usually stays unset.
 channels are separate manifest files on the same release, and an app
 pins one by its endpoint URL. Cheap, reviewable, no server.
 
+A `universal-apple-darwin` build is listed under **both**
+`darwin-aarch64` and `darwin-x86_64` — one fat artifact serves both
+arches, so `update manifest` registers it twice (detected from the
+`--target` triple dir or a `_universal` arch token in the filename).
+
+## App-side API
+
+Everything below runs on apps scaffolded `--with-updater` (the crate's
+`updater` cargo feature + a `plugins.updater` block); calls on any
+other app reject with `UpdateError` code `NotUpdatable`.
+
+### Client (`@pylair/client`)
+
+```ts
+import { update, onHealth } from "@pylair/client";
+
+const offer = await update.check();          // {version, notes, sha256, current} | null
+await update.downloadAndInstall({
+  onEvent: (e) => {                          // upstream's event shapes
+    // Started {contentLength} | Progress {chunkLength} | Finished
+  },
+});
+await update.relaunch();                     // restart into the new version
+```
+
+- `check()` returns `null` when nothing is offered — including when the
+  artifact is on the skip list, so a rolled-back build is never
+  re-presented.
+- On **Windows** the install never returns: the process exits into the
+  installer. Everything the watchdog needs (cached rollback artifact,
+  `pending.json`) is armed before that call.
+- Errors throw `UpdateError` with a stable `updateCode`:
+  `NotUpdatable` (no updater config, macOS App Translocation — move the
+  app to `/Applications`), `NeedsApproval` (a per-machine Windows
+  install whose rollback needs an approved restore — install itself
+  proceeds, one UAC prompt the user initiated), `SignatureInvalid`,
+  `NoOffer`, `EndpointError`,
+  `CheckFailed`, `DownloadFailed`, `CacheFailed`, `InstallFailed`.
+- `health().update = {state, lastRollback?}` tracks the lifecycle:
+  `pending` | `installing` | `ready` | `rolled-back` |
+  `rollback-pending-approval` | `none`. The same vocabulary appears as
+  the `updating` readiness component under `health().app.components`.
+- Verification knobs live under `plugins.pylair.update` in
+  `tauri.conf.json` and are copied into `pending.json` for the
+  watchdog: `heartbeatMs` (default 60 s of silence ⇒ dead), `maxBoots`
+  (default 3 failed boots ⇒ crash loop), `hardCapMs` (default 10 min —
+  the only wall clock; live component progress keeps the window open).
+
+### Python (`pylair.update`)
+
+```python
+from pylair import update
+
+if update.state() == "pending":          # "none" | "pending" | "confirmed"
+    run_read_only_mode()                  # a rollback is still possible
+update.on_update_confirmed(migrate_state) # runs once the update is proven
+```
+
+`"pending"` means this boot is the update's verification window — run
+read-only, defer schema/state migrations until `on_update_confirmed`
+fires (the watchdog wrote `update-ok`). If the update rolls back the
+hook never runs: a restored build has nothing to migrate. Migrations
+must tolerate the previous version reading the files they write
+(decision 0011 §4).
+
 ## Security notes
 
 - **Signatures are mandatory.** The updater verifies every artifact
@@ -156,7 +221,8 @@ pins one by its endpoint URL. Cheap, reviewable, no server.
 ## What lands next
 
 The remaining pieces from 0011 arrive in the rest of the series: the
-`pylair.update` client API (check / download with progress / install),
-the `updating` readiness component and `update` field in `health()`, the
-readiness-gated rollback watchdog, and per-OS update+rollback acceptance
-legs in CI.
+readiness-gated rollback watchdog that consumes the `updater-state/`
+file contract this API writes (pending.json, boot markers, ready/failed
+markers, skip list), the `rollback-<version>.json` manifests the
+rollback cache fetches, and per-OS update+rollback acceptance legs in
+CI.

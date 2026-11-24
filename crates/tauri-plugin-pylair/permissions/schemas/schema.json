@@ -439,6 +439,54 @@
           "markdownDescription": "Denies the python_state command without any pre-configured scope."
         },
         {
+          "description": "Enables the python_update_check command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-update-check",
+          "markdownDescription": "Enables the python_update_check command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_update_check command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-update-check",
+          "markdownDescription": "Denies the python_update_check command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the python_update_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-update-download",
+          "markdownDescription": "Enables the python_update_download command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_update_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-update-download",
+          "markdownDescription": "Denies the python_update_download command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the python_update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-update-install",
+          "markdownDescription": "Enables the python_update_install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-update-install",
+          "markdownDescription": "Denies the python_update_install command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the python_update_relaunch command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-python-update-relaunch",
+          "markdownDescription": "Enables the python_update_relaunch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the python_update_relaunch command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-python-update-relaunch",
+          "markdownDescription": "Denies the python_update_relaunch command without any pre-configured scope."
+        },
+        {
           "description": "Call exposed Python functions, stream results, cancel tasks, read runtime state and health.\n#### This default permission set includes:\n\n- `allow-python-call`\n- `allow-python-call-stream`\n- `allow-python-grant-credit`\n- `allow-python-release-blob`\n- `allow-python-cancel`\n- `allow-python-state`\n- `allow-python-health`",
           "type": "string",
           "const": "default",

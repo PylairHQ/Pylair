@@ -29,6 +29,29 @@ the series is released until all PRs land._
   `*.key` gitignore. Default scaffolds unchanged — a golden test pins it.
 - [docs/updates.md](docs/updates.md): setup walkthrough, channels and the
   security model, flagged not-available-yet until the series ships.
+- Host update machinery (PR 2 of 5): a new `updater` cargo feature on
+  `tauri-plugin-pylair` (off by default; `--with-updater` scaffolds now
+  compile it via `features = ["updater"]`) adds `python_update_check /
+  _download / _install / _relaunch`. Install arms the watchdog file
+  contract first — `pending.json` (`from`, `to`, `to_sha256`, cached
+  `artifact`/`sha256`/`sig`, `install_path`, `session_id`, knobs),
+  rollback cache outside the install dir, `update-ok` cleared — since
+  `download_and_install` never returns on Windows. App Translocation
+  refuses `NotUpdatable`; per-machine Windows installs refuse
+  `NeedsApproval`. Readiness signals land too: per-boot `boots/`
+  markers, `ready-<version>` on `health().app` ready (keyed on the
+  pending `session_id`), `failed-<version>` on a failed component, and
+  `health().update` + an `updating` readiness component
+  (`pending|installing|ready|rolled-back|rollback-pending-approval`).
+- `pylair.update` (Python): `state()` → `"none"|"pending"|"confirmed"`
+  and `on_update_confirmed(fn)` for deferred migrations on the pending
+  first boot.
+- `@pylair/client` `update.*`: `check()`, `downloadAndInstall({onEvent})`
+  (upstream Started/Progress/Finished shapes), `relaunch()`;
+  `health().update` typing; `UpdateError` with stable `updateCode`
+  (`NotUpdatable`, `NeedsApproval`, `SignatureInvalid`, …).
+- `update manifest`: a `universal-apple-darwin` build lists its artifact
+  under both `darwin-aarch64` and `darwin-x86_64`.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
