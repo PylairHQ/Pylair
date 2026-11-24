@@ -11,7 +11,16 @@ from pylair._blob import Blob
 from pylair._expose import expose
 from pylair._readiness import failed, loading, on_startup, ready
 
-__all__ = ["Blob", "expose", "failed", "loading", "models", "on_startup", "ready", "update"]
+__all__ = [
+    "Blob",
+    "expose",
+    "failed",
+    "loading",
+    "models",
+    "on_startup",
+    "ready",
+    "update",
+]
 
 
 def _version() -> str:
