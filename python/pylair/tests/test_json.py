@@ -355,14 +355,17 @@ def test_coerce_result_containers():
     cr = _json.coerce_result
     list_big = {"type": "list", "items": _B}
     assert [type(v) for v in cr(list_big, [1, 2])] == [BigInt, BigInt]
-    assert isinstance(cr(list_big, (1,))[0], BigInt)  # tuple stays tuple
-    assert isinstance(cr(list_big, (1,)), tuple)
-    assert {type(v) for v in cr(list_big, {1, 2})} == {BigInt}  # set too
+    # Changed containers come back as plain lists — wire-identical, and
+    # never rebuilt through type(value) which NamedTuple can't survive.
+    out = cr(list_big, (1,))
+    assert out == [BigInt(1)] and type(out) is list
+    out = cr(list_big, {1, 2})
+    assert type(out) is list and sorted(out) == [1, 2]
     dict_big = {"type": "dict", "keys": _ANY, "values": _B}
     assert isinstance(cr(dict_big, {"k": 4})["k"], BigInt)
     tup = {"type": "tuple", "items": [_B, {"type": "str"}]}
     out = cr(tup, [3, "x"])
-    assert isinstance(out[0], BigInt) and out[1] == "x"
+    assert out == [BigInt(3), "x"] and type(out) is list
     # Nested: list[Optional[BigInt]].
     deep = {
         "type": "list",
@@ -376,11 +379,55 @@ def test_coerce_result_containers():
     assert cr(None, 5) == 5
 
 
+def test_coerce_result_unchanged_containers_keep_identity():
+    """A bigint-bearing schema whose walk changes nothing returns the
+    original object — zero rebuild cost per result."""
+    cr = _json.coerce_result
+    list_big = {"type": "list", "items": _B}
+    for v in ([BigInt(1), BigInt(2)], ["a", "b"], (BigInt(1),), {BigInt(1)}):
+        assert cr(list_big, v) is v
+    # …but a set of plain ints widens like any sequence (to a list of
+    # tags — a set can't hold dicts, and lists encode identically).
+    out = cr(list_big, {1, 2})
+    assert type(out) is list and all(isinstance(x, BigInt) for x in out)
+    dict_big = {"type": "dict", "keys": _ANY, "values": _B}
+    d = {"k": BigInt(4)}
+    assert cr(dict_big, d) is d
+    # Nested walk, nothing to widen -> the whole tree comes back as-is.
+    nested = {"type": "list", "items": {"type": "list", "items": _B}}
+    l = [["x"], [BigInt(1)]]
+    assert cr(nested, l) is l
+    # …but a deep change rebuilds only along the changed path.
+    out = cr(nested, [["x"], [2]])
+    assert out == [["x"], [BigInt(2)]]
+
+
+def test_coerce_result_namedtuple_survives():
+    """NamedTuple under list/tuple schemas: type(value)(...) would raise
+    TypeError — the plain-list rebuild doesn't care."""
+    import collections
+
+    Point = collections.namedtuple("Point", ["x", "y"])
+    cr = _json.coerce_result
+    out = cr({"type": "list", "items": _B}, Point(1, 2))
+    assert out == [BigInt(1), BigInt(2)]
+    out = cr({"type": "tuple", "items": [_B, {"type": "str"}]}, Point(1, "a"))
+    assert out == [BigInt(1), "a"]
+    # …and with no BigInt in the schema the value is untouched.
+    p = Point(1, 2)
+    assert cr({"type": "tuple", "items": [{"type": "int"}, {"type": "int"}]}, p) is p
+
+
 def test_coerce_result_dataclass_field():
+    inits = [0]
+
     @dataclasses.dataclass
     class Stats:
         total: BigInt
         name: str
+
+        def __post_init__(self):
+            inits[0] += 1
 
     schema = {
         "type": "dataclass",
@@ -389,11 +436,70 @@ def test_coerce_result_dataclass_field():
             {"name": "name", "schema": {"type": "str"}},
         ],
     }
-    out = _json.coerce_result(schema, Stats(total=5, name="s"))
-    assert isinstance(out.total, BigInt) and out.name == "s"
+    s = Stats(total=5, name="s")
+    assert inits[0] == 1
+    out = _json.coerce_result(schema, s)
+    # A plain field dict — wire-identical to the instance — and no
+    # dataclasses.replace: __post_init__ ran exactly once.
+    assert out == {"total": BigInt(5), "name": "s"} and type(out) is dict
+    assert inits[0] == 1
     # A plain dict result gets the same field-wise widening.
     out = _json.coerce_result(schema, {"total": 5, "name": "s", "extra": 1})
     assert isinstance(out["total"], BigInt) and out["extra"] == 1
     # Already-BigInt fields rebuild nothing.
     s = Stats(total=BigInt(2), name="s")
     assert _json.coerce_result(schema, s) is s
+
+
+def test_task_result_untouched_when_no_bigint_declared(monkeypatch):
+    """The fast path end to end: a fn whose returns schema has no bigint
+    leaf gets ret_schema=None, the result object crosses untouched
+    (is-check), and coerce_result is never invoked."""
+    import asyncio
+
+    import pylair._expose as _ex
+    from pylair import expose
+    from pylair._tasks import TaskRegistry
+
+    calls = []
+    real = _json.coerce_result
+
+    def spy(schema, value):
+        calls.append(schema)
+        return real(schema, value)
+
+    monkeypatch.setattr(_json, "coerce_result", spy)
+
+    saved = dict(_ex._registry)
+    _ex._registry.clear()
+    try:
+        BIG = [{"n": i} for i in range(5000)]
+
+        @expose
+        def big_list() -> list[dict]:
+            return BIG
+
+        ex = _ex._registry["big_list"]
+        assert ex.ret_schema is None  # no bigint leaf -> skip entirely
+
+        @expose
+        def with_bigint() -> BigInt:
+            return 0
+
+        assert _ex._registry["with_bigint"].ret_schema == {"type": "bigint"}
+
+        async def go():
+            sent = []
+            reg = TaskRegistry(sent.append)
+            await reg.start(
+                1, 1, "big_list", "sync", ex.fn, {}, ret_schema=ex.ret_schema
+            )
+            await asyncio.wait_for(reg.get(1).asyncio_task, 5)
+            return sent
+
+        sent = asyncio.run(go())
+        assert sent[-1]["result"] is BIG  # identical object, not a copy
+        assert calls == []
+    finally:
+        _ex._registry.clear()
+        _ex._registry.update(saved)

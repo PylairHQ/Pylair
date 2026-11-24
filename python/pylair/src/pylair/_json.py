@@ -191,12 +191,14 @@ def _tag_bigints(obj: Any) -> Any:
     """Pre-dump transform: every BigInt leaf -> {"$bigint": "<decimal>"}.
 
     Why a pass and not a `default` case: json's encoder serializes int
-    subclasses natively, so `default` never fires for BigInt. Containers
-    are rebuilt into a fresh tree (shared/cyclic shapes keep sharing —
-    a cycle rebuilds as a cycle so dumps raises its own circular error);
-    bytes, Blob, datetime and friends are left for _default. A set
-    can't hold the tag dicts, so it emits _default's sorted list
-    directly, each item already tagged.
+    subclasses natively, so `default` never fires for BigInt. A subtree
+    with no BigInt inside is returned AS-IS — containers are rebuilt
+    only along changed paths, so ordinary frames pay a walk, not a
+    copy. Shared nodes are tagged once via the memo (a shared subtree
+    is visited once), and a cycle rebuilds as a cycle so dumps raises
+    its own circular error. bytes, Blob, datetime and friends are left
+    for _default; a set can't hold tag dicts, so a changed set emits
+    _default's sorted list directly.
     """
     memo: dict[int, Any] = {}
 
@@ -210,27 +212,57 @@ def _tag_bigints(obj: Any) -> Any:
             return {BIGINT_TAG: str(int(node))}
         if node is None or isinstance(node, (bool, int, float, str)):
             return node
-        hit = memo.get(id(node))
-        if hit is not None:
-            return hit
+        nid = id(node)
+        if nid in memo:
+            return memo[nid]
         if isinstance(node, dict):
             out: dict = {}
-            memo[id(node)] = out
+            memo[nid] = out  # cycles must see the in-progress rebuild
+            changed = False
             for k, v in node.items():
-                out[k] = tag(v)
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out[k] = c
+            if not changed:
+                memo[nid] = node
+                return node
             return out
         if isinstance(node, (list, tuple)):
             out = []
-            memo[id(node)] = out
-            out.extend(tag(v) for v in node)
+            memo[nid] = out
+            changed = False
+            for v in node:
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            if not changed:
+                memo[nid] = node
+                return node
             return out
         if isinstance(node, (set, frozenset)):
-            return [tag(v) for v in sorted(node, key=repr)]
+            out = []
+            changed = False
+            for v in sorted(node, key=repr):
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            return out if changed else node
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             out = {}
-            memo[id(node)] = out
+            memo[nid] = out
+            changed = False
             for f in dataclasses.fields(node):
-                out[f.name] = tag(getattr(node, f.name))
+                v = getattr(node, f.name)
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out[f.name] = c
+            if not changed:
+                memo[nid] = node
+                return node
             return out
         if isinstance(node, enum.Enum):
             return tag(node.value)
@@ -581,7 +613,11 @@ def coerce_result(schema: dict[str, Any] | None, value: Any) -> Any:
 
     Best-effort widening only: a non-int under a bigint leaf, a bool
     anywhere, and every unmapped shape keep the value's own encoding —
-    no silent str/float conversion and no new error. `schema` is the
+    no silent str/float conversion and no new error. A container is
+    rebuilt only when a child actually changed — an unchanged walk
+    returns the original object (identity), and a changed one is a
+    plain list/dict, which encodes identically on the wire and never
+    trips a NamedTuple-style constructor. `schema` is the
     callable_schema() "returns" dict; for a generator that is the YIELD
     schema, so the same walk covers stream chunks.
     """
@@ -599,40 +635,69 @@ def coerce_result(schema: dict[str, Any] | None, value: Any) -> Any:
     if t == "list":
         item = schema.get("items") or {}
         if isinstance(value, (list, tuple, set, frozenset)):
-            return type(value)(coerce_result(item, v) for v in value)
+            return _widened_seq(item, value)
         return value
     if t == "tuple":
         items = schema.get("items") or ()
         if isinstance(value, (list, tuple)) and len(items) == len(value):
-            return type(value)(
-                coerce_result(s, v) for s, v in zip(items, value, strict=True)
-            )
+            out = []
+            changed = False
+            for s, v in zip(items, value, strict=True):
+                c = coerce_result(s, v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            return out if changed else value
         return value
     if t == "dict":
         vals = schema.get("values") or {}
         if isinstance(value, dict):
-            return {k: coerce_result(vals, v) for k, v in value.items()}
+            out = {}
+            changed = False
+            for k, v in value.items():
+                c = coerce_result(vals, v)
+                if c is not v:
+                    changed = True
+                out[k] = c
+            return out if changed else value
         return value
     if t == "dataclass":
         fields = {f["name"]: f.get("schema") for f in schema.get("fields") or ()}
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            changed = {}
+            out = {}
+            changed = False
             for f in dataclasses.fields(value):
-                if f.name in fields:
-                    old = getattr(value, f.name)
-                    out = coerce_result(fields[f.name], old)
-                    if out is not old:
-                        changed[f.name] = out
-            if not changed:
-                return value
-            try:
-                return dataclasses.replace(value, **changed)
-            except Exception:  # noqa: BLE001 - replace re-runs __init__;
-                return value  # refuse quietly, keep the value
+                v = getattr(value, f.name)
+                c = coerce_result(fields[f.name], v) if f.name in fields else v
+                if c is not v:
+                    changed = True
+                out[f.name] = c
+            # A plain field dict encodes identically to the instance —
+            # dataclasses.replace would re-run __init__/__post_init__.
+            return out if changed else value
         if isinstance(value, dict):
-            return {
-                k: coerce_result(fields[k], v) if k in fields else v
-                for k, v in value.items()
-            }
+            out = {}
+            changed = False
+            for k, v in value.items():
+                c = coerce_result(fields[k], v) if k in fields else v
+                if c is not v:
+                    changed = True
+                out[k] = c
+            return out if changed else value
         return value
     return value
+
+
+def _widened_seq(item_schema: Any, seq: Any) -> Any:
+    """coerce_result over a sequence's items: the original object when
+    nothing changed, else a plain list — sets and tuple subclasses
+    encode as JSON arrays anyway, so rebuilding via type(seq)(...) is
+    both unnecessary and fragile (NamedTuple's constructor)."""
+    out = []
+    changed = False
+    for v in seq:
+        c = coerce_result(item_schema, v)
+        if c is not v:
+            changed = True
+        out.append(c)
+    return out if changed else seq

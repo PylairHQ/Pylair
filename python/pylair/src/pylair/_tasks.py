@@ -396,7 +396,8 @@ class TaskRegistry:
     async def _run_async(self, task: Task, fn: Callable[..., Any], input: dict) -> None:
         try:
             result = await fn(**input)  # input coerced at dispatch (_call)
-            result = _json.coerce_result(task.ret_schema, result)
+            if task.ret_schema is not None:
+                result = _json.coerce_result(task.ret_schema, result)
             self._finish(task, proto.response(task.call_id, result))
         except asyncio.CancelledError:
             self._finish(
@@ -417,7 +418,8 @@ class TaskRegistry:
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(None, lambda: fn(**input))
-            result = _json.coerce_result(task.ret_schema, result)
+            if task.ret_schema is not None:
+                result = _json.coerce_result(task.ret_schema, result)
             self._finish(task, proto.response(task.call_id, result))
         except asyncio.CancelledError:
             # Inline sync can't be interrupted — the executor thread keeps
@@ -448,7 +450,8 @@ class TaskRegistry:
                 value = await agen.__anext__()
                 # The declared yield type decides tagging — coerce before
                 # the caps so the probe measures what really goes out.
-                value = _json.coerce_result(task.ret_schema, value)
+                if task.ret_schema is not None:
+                    value = _json.coerce_result(task.ret_schema, value)
                 task.credit -= 1
                 # A chunk deeper than the host's parser limit is a
                 # malformed frame on arrival — end THIS stream with the
