@@ -483,23 +483,22 @@ below was skipped for rc.20 only.
   verdict; pack/registry legs append it and arm
   `PYLAIR_BLOB_EXPECTED=1` only when the resolved crate is ≥
   `0.1.0-rc.23` AND pylair ≥ `0.1.0rc15` AND `@pylair/client` ≥
-  `0.1.0-rc.29`. No release yet carries any of it — the next train
-  ships the series. The bump commit (PR 165) took the crate to
-  `0.1.0-rc.23` and `pylair` to `0.1.0rc15`; the crate is published
-  on crates.io (checksum `fa2a4907…865c`) and `pylair 0.1.0rc15` on
-  PyPI. This pins commit moves the npm trio to `0.1.0-rc.29`, the
-  scaffold pins to `rs =0.1.0-rc.23` / `py pylair==0.1.0rc15`, and
-  regenerates both template `Cargo.lock` files against the published
-  crate. Remaining order:
+  `0.1.0-rc.29`. The rc.29 train shipped the series: crate
+  `0.1.0-rc.23` on crates.io, `pylair 0.1.0rc15` on PyPI, npm trio
+  `0.1.0-rc.29`. The bump commit (PR 169) took `pylair` to
+  `0.1.0rc16` for the #167 warm-worker macOS fix — the crate stays
+  `0.1.0-rc.23`; `pylair 0.1.0rc16` is on PyPI. This pins commit
+  moves the npm trio to `0.1.0-rc.30` and the scaffold py/js/cli
+  pins with it (`rs` stays `=0.1.0-rc.23`, so the template
+  `Cargo.lock` files are untouched). Remaining order:
 
   1. pack-mode acceptance green on this commit (scaffolded pins
-     resolve crate rc.23 + pylair rc15, both live);
+     resolve crate rc.23 + pylair rc16, both live);
   2. the npm trio under `--tag next`;
   3. registry acceptance with `source=registry` and
-     `expect_version 0.1.0-rc.29` — the first run where
-     `PYLAIR_BLOB_EXPECTED` arms (resolved crate ≥ `0.1.0-rc.23` AND
-     pylair ≥ `0.1.0rc15` AND `@pylair/client` ≥ `0.1.0-rc.29`), so
-     a `blob` skip fails the leg on every OS.
+     `expect_version 0.1.0-rc.30` — `PYLAIR_BLOB_EXPECTED` keeps
+     arming (all three resolved versions are already past their
+     floors), so a `blob` skip still fails the leg on every OS.
 
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 

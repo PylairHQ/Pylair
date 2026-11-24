@@ -14,9 +14,9 @@ const BINARY = new Set([".png", ".ico", ".icns"]);
 /** The registry versions a scaffolded app pins. Bump together with the
  * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
 export const PINS = {
-  py: "pylair==0.1.0rc15",
-  js: "0.1.0-rc.29",
-  cli: "0.1.0-rc.29",
+  py: "pylair==0.1.0rc16",
+  js: "0.1.0-rc.30",
+  cli: "0.1.0-rc.30",
   rs: `tauri-plugin-pylair = "=0.1.0-rc.23"`,
 } as const;
 
