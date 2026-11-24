@@ -153,6 +153,10 @@ jobs:
         if: needs.changes.outputs.code == 'true'
       - run: cargo test
         if: needs.changes.outputs.code == 'true'
+      # The updater feature is off by default — its tests (the watchdog
+      # suite incl. the Windows restore path) need an explicit run.
+      - run: cargo test --features updater
+        if: needs.changes.outputs.code == 'true'
 
   python:
     name: Python (${{ matrix.os }})
@@ -304,6 +308,8 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo build
           cargo test
+          # Off-by-default updater feature: watchdog suite needs this run.
+          cargo test --features updater
       - name: "Python suite: pylair, ollama integration, w0 spike"
         id: python
         if: ${{ !cancelled() }}

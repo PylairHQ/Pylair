@@ -37,8 +37,9 @@ the series is released until all PRs land._
   `artifact`/`sha256`/`sig`, `install_path`, `session_id`, knobs),
   rollback cache outside the install dir, `update-ok` cleared — since
   `download_and_install` never returns on Windows. App Translocation
-  refuses `NotUpdatable`; per-machine Windows installs refuse
-  `NeedsApproval`. Readiness signals land too: per-boot `boots/`
+  refuses `NotUpdatable`; per-machine Windows installs proceed (the
+  UAC prompt is the user's own) — only a rollback records
+  `rollback-pending-approval`. Readiness signals land too: per-boot `boots/`
   markers, `ready-<version>` on `health().app` ready (keyed on the
   pending `session_id`), `failed-<version>` on a failed component, and
   `health().update` + an `updating` readiness component
@@ -52,6 +53,25 @@ the series is released until all PRs land._
   (`NotUpdatable`, `NeedsApproval`, `SignatureInvalid`, …).
 - `update manifest`: a `universal-apple-darwin` build lists its artifact
   under both `darwin-aarch64` and `darwin-x86_64`.
+- Rollback watchdog (PR 3 of 5): the app binary carries a hidden
+  `--pylair-upwatch` mode; `python_update_install` copies the exe into
+  `updater-state/cache/` and spawns it detached before `install()`. It
+  waits for `ready-<to>` + `session_id`, rolls back on a failed marker,
+  `maxBoots` boots without ready, `heartbeatMs` of silence (live
+  component progress — the update gate writes `progress.json` on a
+  timer while newer component reports keep landing — extends the
+  window to `hardCapMs`), or the hard cap. Rollback verifies the cached artifact (sha256 + minisign vs the
+  compiled-in pubkey), refuses an `install_path` mismatch, writes the
+  skip-list entry before relaunching, restores per OS, and records
+  `rollback-reason.txt` → `health().update.lastRollback`; per-machine
+  installs record `rollback-pending-approval` instead of a silent
+  restore. Single instance per window (state-dir lock), bounded
+  `upwatch.log`.
+- `plugins.updater.rollbackUrl` replaces the endpoint-strip rollback
+  manifest fetch: a `{{version}}` template resolving to each release's
+  own `latest.json`. Unset or unfetchable ⇒ install refuses — no
+  rollback path, no install. `create-pylair --with-updater` injects a
+  placeholder.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 

@@ -193,24 +193,34 @@ pub async fn python_update_download<R: Runtime>(
     Ok(())
 }
 
-/// Fetch `rollback-<from>.json` beside the update endpoint and cache
-/// the current version's signed artifact under `updater-state/cache/`
-/// — outside the install dir, so an in-place install cannot clobber
-/// the fallback. Returns `(artifact_path, sha256_hex, sig)` for
-/// pending.json.
+/// The rollback manifest URL for a rollbackUrl template + current
+/// version (§6): `{{version}}` substitutes the version being replaced.
+/// Unset refuses — no rollback manifest means no fallback to offer.
+#[doc(hidden)]
+pub fn rollback_manifest_url(template: Option<&str>, version: &str) -> Result<String, ErrorObj> {
+    let template = template.ok_or_else(|| {
+        err(
+            codes::ENDPOINT,
+            "plugins.updater.rollbackUrl is not set — updates require a \
+             rollback manifest (no rollback → no install, decision 0011 §6)",
+        )
+    })?;
+    Ok(template.replace("{{version}}", version))
+}
+
+/// Fetch the rollback manifest via `plugins.updater.rollbackUrl` and
+/// cache the current version's signed artifact under
+/// `updater-state/cache/` — outside the install dir, so an in-place
+/// install cannot clobber the fallback. Each release's own
+/// `latest.json` is its rollback manifest (§6): `{{version}}` in the
+/// template becomes the *current* version. No rollback manifest means
+/// no fallback, so install refuses rather than updating unguarded.
+/// Returns `(artifact_path, sha256_hex, sig)` for pending.json.
 async fn cache_current_artifact<R: Runtime>(
     app: &AppHandle<R>,
     gate: &UpdateGate,
 ) -> Result<(PathBuf, String, String), ErrorObj> {
-    let endpoint = gate
-        .endpoints
-        .first()
-        .ok_or_else(|| err(codes::ENDPOINT, "plugins.updater.endpoints is empty"))?;
-    let base = endpoint
-        .rsplit_once('/')
-        .map(|(d, _)| d)
-        .unwrap_or(endpoint);
-    let url = format!("{base}/rollback-{}.json", gate.version);
+    let url = rollback_manifest_url(gate.rollback_url.as_deref(), &gate.version)?;
     let fetch = url.clone();
     let body: Value = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         ureq::get(&fetch)
@@ -266,9 +276,35 @@ async fn cache_current_artifact<R: Runtime>(
     Ok((path, sha256, sig))
 }
 
+/// Stage the watchdog binary outside the install dir and spawn it
+/// detached in watchdog mode (argv only, never env — §1). Windows and
+/// macOS run a state-dir copy of the running exe; Linux runs the
+/// cached rollback AppImage itself (self-contained libs — a bare exe
+/// copy could not start). Either way the watchdog IS the app binary,
+/// so the trust anchor (compiled-in `plugins.updater.pubkey`) travels
+/// with it (§2/§6).
+fn spawn_watchdog(gate: &UpdateGate, p: &PendingFile) -> Result<(), ErrorObj> {
+    let bin = super::upwatch::stage_binary(&gate.dir, p).map_err(|e| err(codes::INSTALL, e))?;
+    let args = super::upwatch::spawn_args(&gate.dir, &p.session_id, Path::new(&p.install_path));
+    std::process::Command::new(&bin)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            err(
+                codes::INSTALL,
+                format!("spawn watchdog {}: {e}", bin.display()),
+            )
+        })?;
+    Ok(())
+}
+
 /// Arm the watchdog contract and install. Everything the rollback
-/// needs — cached artifact, pending.json — is in place BEFORE
-/// `install()` runs, because on Windows that call never returns (§1).
+/// needs — cached artifact, pending.json, the spawned watchdog — is in
+/// place BEFORE `install()` runs, because on Windows that call never
+/// returns (§1).
 #[tauri::command]
 pub async fn python_update_install<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorObj> {
     let gate = gate(&app)?;
@@ -313,6 +349,10 @@ pub async fn python_update_install<R: Runtime>(app: AppHandle<R>) -> Result<(), 
         .map_err(|e| err(codes::INSTALL, format!("write pending.json: {e}")))?;
     // A new pending window supersedes any prior confirmation.
     let _ = std::fs::remove_file(gate.dir.join(UPDATE_OK_FILE));
+    // The watchdog must be armed BEFORE install: on Windows install
+    // never returns, so it is the only component that can observe the
+    // new version's first boot (§2).
+    spawn_watchdog(&gate, &pending)?;
     gate.set_installing(true);
     update
         .install(&bytes)

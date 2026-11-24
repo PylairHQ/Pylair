@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "updater")]
 pub mod cmd;
 pub mod gate;
+#[cfg(feature = "updater")]
+pub mod upwatch;
 
 pub use gate::UpdateGate;
 
@@ -42,6 +44,9 @@ pub const APPROVAL_FILE: &str = "rollback-pending-approval";
 pub const ROLLBACK_REASON_FILE: &str = "rollback-reason.txt";
 pub const BOOTS_DIR: &str = "boots";
 pub const CACHE_DIR: &str = "cache";
+/// Live readiness-progress evidence for the watchdog's heartbeat (§2):
+/// the host touches this on every `app.component` report.
+pub const PROGRESS_FILE: &str = "progress.json";
 /// Name inside `cache/` holding the previous version's signed bundle.
 pub const CACHED_ARTIFACT_FILE: &str = "rollback-artifact";
 
@@ -224,6 +229,26 @@ pub fn write_ready_marker(dir: &Path, p: &PendingFile) -> io::Result<PathBuf> {
             "version": p.to,
             "artifact_sha256": p.to_sha256,
             "session_id": p.session_id,
+            "at_ms": now_ms(),
+        }),
+    )?;
+    Ok(path)
+}
+
+/// `progress.json` — the watchdog's heartbeat evidence (§2): written
+/// by the update gate's timer while a pending window is open and
+/// `app.component` reports keep landing, so a long honest load
+/// (progress ticking, no phase change) is "alive" while true silence
+/// rolls back. The file's mtime is the evidence; the body records how
+/// fresh the newest report was at write time.
+pub fn write_progress(dir: &Path, p: &PendingFile, newest_ms_ago: u64) -> io::Result<PathBuf> {
+    let path = dir.join(PROGRESS_FILE);
+    write_json_file(
+        &path,
+        &json!({
+            "version": p.to,
+            "session_id": p.session_id,
+            "newest_report_ms_ago": newest_ms_ago,
             "at_ms": now_ms(),
         }),
     )?;

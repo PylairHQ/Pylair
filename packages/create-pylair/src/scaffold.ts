@@ -121,6 +121,30 @@ export function applyUpdater(dest: string): void {
     throw new Error(`applyUpdater: ${cargoPath} has no tauri-plugin-pylair dep to anchor on`);
   }
 
+  // Watchdog dispatch at the top of run() (decision 0011 sec. 2): only
+  // --with-updater apps carry it. The default template must stay
+  // byte-identical AND compile against the published crate, which does
+  // not export update_watchdog_entry yet.
+  const libPath = join(dest, "src-tauri", "src", "lib.rs");
+  const lib = readFileSync(libPath, "utf-8");
+  const anchor = "pub fn run() {";
+  if (!lib.includes(anchor)) {
+    throw new Error(`applyUpdater: ${libPath} has no run() to anchor on`);
+  }
+  writeFileSync(
+    libPath,
+    lib.replace(
+      `${anchor}\n`,
+      `${anchor}\n` +
+        "    // Update watchdog mode (decision 0011): the update installer spawns\n" +
+        "    // a detached copy of this app with --pylair-upwatch to watch the\n" +
+        "    // new version's first boot and roll back if it never reaches ready.\n" +
+        "    if let Some(code) = tauri_plugin_pylair::update_watchdog_entry(&tauri::generate_context!()) {\n" +
+        "        std::process::exit(code);\n" +
+        "    }\n",
+    ),
+  );
+
   const confPath = join(dest, "src-tauri", "tauri.conf.json");
   const conf = JSON.parse(readFileSync(confPath, "utf-8"));
   conf.bundle.createUpdaterArtifacts = true;
@@ -131,6 +155,12 @@ export function applyUpdater(dest: string): void {
       // https URL - point them at where you'll host latest.json (docs/updates.md).
       pubkey: PUBKEY_PLACEHOLDER,
       endpoints: ["https://example.com/releases/latest/download/latest.json"],
+      // Each release's own latest.json doubles as its rollback manifest
+      // (decision 0011 sec. 6): {{version}} resolves to the version being
+      // replaced. Unset or unreachable => install refuses (no rollback,
+      // no install).
+      rollbackUrl:
+        "https://example.com/releases/download/v{{version}}/latest.json",
       windows: { installMode: "quiet" },
     },
   };

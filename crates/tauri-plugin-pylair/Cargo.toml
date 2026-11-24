@@ -20,7 +20,7 @@ default = []
 # Opt-in in-app updates (decision 0011): pulls tauri-plugin-updater for
 # check/download/install plus ureq for the rollback-artifact fetch. Apps
 # scaffolded without --with-updater never compile these dependencies.
-updater = ["dep:tauri-plugin-updater", "dep:ureq", "dep:sha2"]
+updater = ["dep:tauri-plugin-updater", "dep:ureq", "dep:sha2", "dep:minisign-verify", "dep:base64"]
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
@@ -39,6 +39,10 @@ rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 tauri-plugin-updater = { version = "2", optional = true }
 ureq = { version = "2", features = ["json"], optional = true }
 sha2 = { version = "0.10", optional = true }
+# Watchdog re-verifies the cached artifact before restore (§2) — the
+# same verifier tauri-plugin-updater uses for forward updates.
+minisign-verify = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -56,3 +60,4 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tauri = { version = "2", features = ["test"] }
+minisign = "0.10"
