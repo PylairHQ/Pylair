@@ -79,8 +79,10 @@ describe("create-pylair --with-updater", () => {
     const lib = readFileSync(join(app, "src-tauri/src/lib.rs"), "utf-8");
     assert.match(
       lib,
-      /pub fn run\(\) \{\n    .*\n.*update_watchdog_entry\(&tauri::generate_context!\(\)\)/s,
+      /pub fn run\(\) \{\n    .*\n.*update_watchdog_entry::<tauri::Wry>\(&tauri::generate_context!\(\)\)/s,
     );
+    // app.updater() panics without the plugin's managed UpdaterState.
+    assert.match(lib, /\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
 
     // Cargo.lock ships unchanged: it pins the default dep set (incl. the
     // pylair crate); the added plugin resolves on first cargo build. Same
@@ -103,7 +105,8 @@ describe("create-pylair --with-updater", () => {
     assert.match(cargo, /tauri-plugin-updater/);
     assert.match(cargo, /tauri-plugin-pylair = \{ .+features = \["updater"\] \}/);
     const lib = readFileSync(join(cwd, "wrap-up/src-tauri/src/lib.rs"), "utf-8");
-    assert.match(lib, /update_watchdog_entry\(&tauri::generate_context!\(\)\)/);
+    assert.match(lib, /update_watchdog_entry::<tauri::Wry>\(&tauri::generate_context!\(\)\)/);
+    assert.match(lib, /\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
   });
 
   test("default scaffold output is byte-identical to the golden", () => {

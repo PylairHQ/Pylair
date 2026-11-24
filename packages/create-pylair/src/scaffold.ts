@@ -131,18 +131,34 @@ export function applyUpdater(dest: string): void {
   if (!lib.includes(anchor)) {
     throw new Error(`applyUpdater: ${libPath} has no run() to anchor on`);
   }
+  // The upstream updater plugin MUST be registered: UpdaterExt::updater()
+  // reads UpdaterState, which only its setup() manages -- without it every
+  // check/download/install panics on the command thread (found by PR 4's
+  // first real boot).
+  const builderAnchor = "tauri::Builder::default()";
+  if (!lib.includes(builderAnchor)) {
+    throw new Error(`applyUpdater: ${libPath} has no tauri::Builder anchor`);
+  }
   writeFileSync(
     libPath,
-    lib.replace(
-      `${anchor}\n`,
-      `${anchor}\n` +
-        "    // Update watchdog mode (decision 0011): the update installer spawns\n" +
-        "    // a detached copy of this app with --pylair-upwatch to watch the\n" +
-        "    // new version's first boot and roll back if it never reaches ready.\n" +
-        "    if let Some(code) = tauri_plugin_pylair::update_watchdog_entry(&tauri::generate_context!()) {\n" +
-        "        std::process::exit(code);\n" +
-        "    }\n",
-    ),
+    lib
+      .replace(
+        `${anchor}\n`,
+        `${anchor}\n` +
+          "    // Update watchdog mode (decision 0011): the update installer spawns\n" +
+          "    // a detached copy of this app with --pylair-upwatch to watch the\n" +
+          "    // new version's first boot and roll back if it never reaches ready.\n" +
+          "    if let Some(code) = tauri_plugin_pylair::update_watchdog_entry::<tauri::Wry>(&tauri::generate_context!()) {\n" +
+          "        std::process::exit(code);\n" +
+          "    }\n",
+      )
+      .replace(
+        builderAnchor,
+        `${builderAnchor}\n` +
+          "        // The updater plugin's setup() manages the state app.updater()\n" +
+          "        // reads - without it the update commands panic.\n" +
+          "        .plugin(tauri_plugin_updater::Builder::new().build())",
+      ),
   );
 
   const confPath = join(dest, "src-tauri", "tauri.conf.json");
