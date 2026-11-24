@@ -358,6 +358,88 @@ async fn the_component_cap_drops_new_names_not_updates() {
     h.shutdown().await;
 }
 
+/// 0011 §2: a component-report flood during a pending update window
+/// must not cost the bounded events channel any genuine event —
+/// progress evidence rides the gate's timer (reading health's
+/// `ms_ago`), never the channel itself. Drives the same flood that
+/// exposed the AppProgress regression, with a live gate tapped exactly
+/// the way the builder taps it (gate first, then the fan-out log).
+#[tokio::test]
+async fn a_component_burst_during_pending_still_delivers_every_transition() {
+    use tauri_plugin_pylair::update::{self, gate::GateOpts, UpdateGate};
+    let dir = std::env::temp_dir().join(format!(
+        "pylair-burst-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gate = UpdateGate::with_dir(GateOpts {
+        dir: dir.clone(),
+        version: "1.1.0".into(),
+        knobs: update::Knobs::default(),
+        install_mode: "current-user".into(),
+        endpoints: vec![],
+        rollback_url: None,
+        session_id: Some("sess-burst".into()),
+        grace_ms: 50,
+    });
+    update::write_pending(
+        &dir,
+        &update::PendingFile {
+            from: "1.0.0".into(),
+            to: "1.1.0".into(),
+            to_sha256: None,
+            artifact: "x".into(),
+            sha256: "x".into(),
+            sig: "x".into(),
+            install_path: "x".into(),
+            session_id: "sess-burst".into(),
+            install_mode: None,
+            at_ms: None,
+            knobs: update::Knobs::default(),
+        },
+    )
+    .unwrap();
+
+    let (events, mut rx) = mpsc::channel(64);
+    let h = spawn_h(spec(FAKE_APP_CAP), fast_config(), events);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = log.clone();
+        let g = gate.clone();
+        tokio::spawn(async move {
+            while let Some(e) = rx.recv().await {
+                g.on_event(&e);
+                sink.lock().unwrap().push(e);
+            }
+        });
+    }
+    wait_state(&h, State::Ready).await;
+
+    assert!(
+        eventually(|| app_events(&log).len() == 33).await,
+        "the burst dropped transitions: {:?}",
+        app_events(&log)
+    );
+    // The heartbeat path: a tick over health's newest report writes
+    // progress.json inside the pending window — no event involved.
+    let ago = h
+        .health(None)
+        .app
+        .as_ref()
+        .and_then(|a| a.components.values().map(|c| c.ms_ago).min());
+    assert!(ago.is_some());
+    gate.progress_tick(ago);
+    let prog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("progress.json")).unwrap()).unwrap();
+    assert_eq!(prog["session_id"], json!("sess-burst"));
+    h.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// §5: app state is per-generation — teardown clears it. With the
 /// breaker parking after one crash the map must read null forever
 /// after the generation dies, not show the dead one's report.

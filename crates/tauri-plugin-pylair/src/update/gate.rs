@@ -60,8 +60,11 @@ pub struct UpdateGate {
     pub session_id: String,
     /// Grace window for a first component report (tests shrink it).
     grace_ms: u64,
-    /// Throttle for `progress.json` writes (watchdog heartbeat).
-    last_progress_write: Mutex<std::time::Instant>,
+    /// The newest component report the heartbeat has already written —
+    /// a `progress.json` write happens only on NEW evidence, so a
+    /// silent app stops refreshing the file (which is itself the
+    /// rollback trigger).
+    last_report_seen: Mutex<Option<std::time::Instant>>,
 }
 
 impl UpdateGate {
@@ -118,10 +121,33 @@ impl UpdateGate {
             runtime_ready: AtomicBool::new(false),
             session_id: new_session_id(),
             grace_ms: NO_COMPONENTS_GRACE_MS,
-            last_progress_write: Mutex::new(std::time::Instant::now() - Duration::from_secs(2)),
+            last_report_seen: Mutex::new(None),
         };
+        let gate = Arc::new(gate);
+        // Watchdog heartbeat (§2): while a pending window is open the
+        // gate mirrors the newest `app.component` report into
+        // progress.json — on a timer reading health's per-component
+        // `ms_ago`, NOT an event. The events channel is bounded and a
+        // report burst must never crowd genuine events out of it.
+        {
+            let weak = Arc::downgrade(&gate);
+            let app = app.clone();
+            let period = Duration::from_millis((gate.knobs.heartbeat_ms / 4).max(50));
+            std::thread::spawn(move || loop {
+                std::thread::sleep(period);
+                let Some(g) = weak.upgrade() else {
+                    return;
+                };
+                let newest_ms_ago = app
+                    .try_state::<crate::PyRuntime>()
+                    .map(|rt| rt.0.health(None))
+                    .and_then(|s| s.app)
+                    .and_then(|a| a.components.values().map(|c| c.ms_ago).min());
+                g.progress_tick(newest_ms_ago);
+            });
+        }
         gate.note_boot();
-        Some(Arc::new(gate))
+        Some(gate)
     }
 
     /// Constructor for tests and non-app contexts: same gate, explicit
@@ -146,7 +172,7 @@ impl UpdateGate {
             runtime_ready: AtomicBool::new(false),
             session_id: opts.session_id.unwrap_or_else(new_session_id),
             grace_ms: opts.grace_ms,
-            last_progress_write: Mutex::new(std::time::Instant::now() - Duration::from_secs(2)),
+            last_report_seen: Mutex::new(None),
         };
         gate.note_boot();
         Arc::new(gate)
@@ -182,7 +208,6 @@ impl UpdateGate {
                     self.note_component(n, p);
                 }
             }
-            RuntimeEvent::AppProgress(v) => self.note_progress(v),
             _ => {}
         }
     }
@@ -259,24 +284,41 @@ impl UpdateGate {
         }
     }
 
-    /// Heartbeat evidence for the watchdog (§2): every `app.component`
-    /// report is a sign of life, throttled to one `progress.json` write
-    /// per second — the file's mtime is what the watchdog reads, so a
-    /// chatty app costs a few small writes, not a flush per tick.
-    fn note_progress(&self, payload: &Value) {
+    /// One heartbeat tick — the `new()` timer fires every
+    /// `heartbeat_ms/4`; tests drive it directly. While a pending
+    /// window targets the running version, a component report NEWER
+    /// than the last written one refreshes `progress.json` (its mtime
+    /// is the watchdog's "still alive" evidence — §2: live component
+    /// progress keeps the window open until hard_cap_ms). No pending
+    /// window, no writes at all; a silent app writes nothing, which is
+    /// itself the silence the watchdog rolls back on.
+    ///
+    /// `newest_ms_ago` is the smallest `ms_ago` across
+    /// `health().app.components` — `None` when no component has ever
+    /// reported.
+    #[doc(hidden)]
+    pub fn progress_tick(&self, newest_ms_ago: Option<u64>) {
+        let Some(p) = read_pending(&self.dir) else {
+            return;
+        };
+        if p.to != self.version {
+            return;
+        }
+        let Some(ago) = newest_ms_ago else {
+            return;
+        };
+        let newest = std::time::Instant::now()
+            .checked_sub(Duration::from_millis(ago))
+            .unwrap_or_else(std::time::Instant::now);
         {
-            let mut last = self.last_progress_write.lock().unwrap();
-            if last.elapsed() < Duration::from_secs(1) {
+            let mut last = self.last_report_seen.lock().unwrap();
+            if last.is_some_and(|t| newest <= t) {
                 return;
             }
-            *last = std::time::Instant::now();
+            *last = Some(newest);
         }
-        if let Some(p) = read_pending(&self.dir) {
-            if p.to == self.version {
-                if let Err(e) = write_progress(&self.dir, &p, payload) {
-                    eprintln!("[pylair] update: progress write failed: {e}");
-                }
-            }
+        if let Err(e) = write_progress(&self.dir, &p, ago) {
+            eprintln!("[pylair] update: progress write failed: {e}");
         }
     }
 

@@ -332,7 +332,6 @@ impl<R: Runtime> Ui<R> {
             RuntimeEvent::Exposes(_) => {}
             RuntimeEvent::HealthChanged(_) => {}
             RuntimeEvent::AppChanged(_) => {}
-            RuntimeEvent::AppProgress(_) => {}
         }
     }
 

@@ -237,6 +237,13 @@ of (0011 §2):
   progress reports) keeps the window open until `hardCapMs` (0011 §2),
 - `hardCapMs` elapsed — the only wall clock.
 
+The heartbeat producer is the update gate on the host side, not the
+watchdog: while `pending.json` exists it rewrites `progress.json` on a
+timer (about `heartbeatMs / 4`) from the newest component report it has
+seen in `health().app` — fresh reports keep the window open, true
+silence ages it out. With nothing pending the timer writes nothing and
+costs nothing.
+
 On ready it writes `update-ok` (what `pylair.update.state()` reports as
 `"confirmed"` and what fires `on_update_confirmed`), clears
 `pending.json`, and exits.

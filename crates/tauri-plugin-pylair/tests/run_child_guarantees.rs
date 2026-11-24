@@ -284,12 +284,6 @@ impl Rec {
                     RuntimeEvent::Exposes(x) => Ev::Exposes(x),
                     RuntimeEvent::HealthChanged(_) => Ev::Health,
                     RuntimeEvent::AppChanged(_) => Ev::App,
-                    // Per-report progress ticks are evidence, not
-                    // verdicts — don't record, just wake waiters.
-                    RuntimeEvent::AppProgress(_) => {
-                        r.bump.notify_waiters();
-                        continue;
-                    }
                 };
                 r.log.lock().unwrap().push(ev);
                 r.bump.notify_waiters();

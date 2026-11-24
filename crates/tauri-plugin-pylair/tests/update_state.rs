@@ -191,41 +191,34 @@ fn failed_component_writes_failed_marker() {
 }
 
 #[test]
-fn progress_events_write_the_heartbeat_file_during_pending() {
-    use tauri_plugin_pylair::supervisor::RuntimeEvent;
+fn progress_ticks_write_the_heartbeat_only_on_new_reports() {
     let dir = tmp();
     update::write_pending(&dir, &pending("1.0.0", "1.1.0")).unwrap();
     let g = gate(&dir, "1.1.0");
-    g.on_event(&RuntimeEvent::AppProgress(
-        json!({"name": "model", "phase": "loading", "progress": 0.4}),
-    ));
+    // A fresh report (0 ms ago) lands during the pending window.
+    g.progress_tick(Some(0));
     let p: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("progress.json")).unwrap()).unwrap();
     assert_eq!(p["version"], "1.1.0");
     assert_eq!(p["session_id"], "sess-1");
-    // Throttle: a second report inside the window is one write, not two.
-    let first = fs::metadata(dir.join("progress.json"))
-        .unwrap()
-        .modified()
-        .unwrap();
-    g.on_event(&RuntimeEvent::AppProgress(
-        json!({"name": "model", "phase": "loading", "progress": 0.5}),
-    ));
-    assert_eq!(
-        fs::metadata(dir.join("progress.json"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        first
-    );
+    // The same report again (or an older one) writes nothing — the
+    // file's mtime only advances on NEW evidence.
+    let before = fs::read(dir.join("progress.json")).unwrap();
+    g.progress_tick(Some(30_000));
+    assert_eq!(fs::read(dir.join("progress.json")).unwrap(), before);
+    // A NEWER report writes again.
+    g.progress_tick(Some(0));
+    assert_ne!(fs::read(dir.join("progress.json")).unwrap(), before);
     let _ = fs::remove_dir_all(&dir);
 
     // No pending window: nothing is written.
     let dir = tmp();
     let g = gate(&dir, "1.1.0");
-    g.on_event(&RuntimeEvent::AppProgress(
-        json!({"name": "ui", "phase": "loading"}),
-    ));
+    g.progress_tick(Some(0));
+    assert!(!dir.join("progress.json").exists());
+    // Pending for a DIFFERENT version: also nothing.
+    update::write_pending(&dir, &pending("1.0.0", "9.9.9")).unwrap();
+    g.progress_tick(Some(0));
     assert!(!dir.join("progress.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }

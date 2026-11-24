@@ -262,10 +262,6 @@ impl<R: Runtime> Builder<R> {
                             RuntimeEvent::Exposes(x) => Some((events::EXPOSES, x)),
                             RuntimeEvent::HealthChanged(x) => Some((events::HEALTH, x)),
                             RuntimeEvent::AppChanged(x) => Some((events::APP, x)),
-                            // Watchdog-only progress evidence — the
-                            // update gate consumed it above; webviews
-                            // get AppChanged transitions instead.
-                            RuntimeEvent::AppProgress(_) => None,
                         };
                         let Some((event, payload)) = payload else {
                             continue;

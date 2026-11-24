@@ -235,19 +235,20 @@ pub fn write_ready_marker(dir: &Path, p: &PendingFile) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// `progress.json` — the watchdog's heartbeat evidence (§2): touched
-/// on every `app.component` report during the pending window, so a
-/// long honest load (progress ticking, no phase change) is "alive"
-/// while true silence rolls back.
-pub fn write_progress(dir: &Path, p: &PendingFile, payload: &Value) -> io::Result<PathBuf> {
+/// `progress.json` — the watchdog's heartbeat evidence (§2): written
+/// by the update gate's timer while a pending window is open and
+/// `app.component` reports keep landing, so a long honest load
+/// (progress ticking, no phase change) is "alive" while true silence
+/// rolls back. The file's mtime is the evidence; the body records how
+/// fresh the newest report was at write time.
+pub fn write_progress(dir: &Path, p: &PendingFile, newest_ms_ago: u64) -> io::Result<PathBuf> {
     let path = dir.join(PROGRESS_FILE);
     write_json_file(
         &path,
         &json!({
             "version": p.to,
             "session_id": p.session_id,
-            "component": payload.get("name"),
-            "phase": payload.get("phase"),
+            "newest_report_ms_ago": newest_ms_ago,
             "at_ms": now_ms(),
         }),
     )?;

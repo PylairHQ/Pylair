@@ -58,9 +58,9 @@ the series is released until all PRs land._
   `updater-state/cache/` and spawns it detached before `install()`. It
   waits for `ready-<to>` + `session_id`, rolls back on a failed marker,
   `maxBoots` boots without ready, `heartbeatMs` of silence (live
-  component progress — a new `RuntimeEvent::AppProgress` written to
-  `progress.json` — extends the window to `hardCapMs`), or the hard
-  cap. Rollback verifies the cached artifact (sha256 + minisign vs the
+  component progress — the update gate writes `progress.json` on a
+  timer while newer component reports keep landing — extends the
+  window to `hardCapMs`), or the hard cap. Rollback verifies the cached artifact (sha256 + minisign vs the
   compiled-in pubkey), refuses an `install_path` mismatch, writes the
   skip-list entry before relaunching, restores per OS, and records
   `rollback-reason.txt` → `health().update.lastRollback`; per-machine

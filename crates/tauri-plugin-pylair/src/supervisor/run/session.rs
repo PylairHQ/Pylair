@@ -690,25 +690,12 @@ impl Session<'_> {
                             .filter(|x| x.is_finite() && (0.0..=1.0).contains(x));
                         let detail = p["detail"].as_str().map(str::to_string);
                         let ev = match phase {
-                            Some(phase) if !name.is_empty() => {
-                                // Progress evidence for the update
-                                // watchdog (0011 §2): every valid
-                                // report is a sign of life, not just
-                                // phase transitions — best-effort, a
-                                // full channel just drops it.
-                                let _ = self.sup.events.try_send(RuntimeEvent::AppProgress(
-                                    serde_json::json!({
-                                        "name": name,
-                                        "phase": phase.as_str(),
-                                        "progress": progress,
-                                    }),
-                                ));
-                                self.sup
-                                    .health
-                                    .lock()
-                                    .unwrap()
-                                    .note_app_component(name, phase, progress, detail)
-                            }
+                            Some(phase) if !name.is_empty() => self
+                                .sup
+                                .health
+                                .lock()
+                                .unwrap()
+                                .note_app_component(name, phase, progress, detail),
                             _ => None,
                         };
                         if let Some(payload) = ev {
