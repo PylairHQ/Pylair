@@ -193,7 +193,13 @@ pub fn is_skipped(dir: &Path, version: &str, sha256: Option<&str>) -> bool {
 /// crash-loop evidence (§2 `max_boots`). No-op when no pending update
 /// targets the running version.
 pub fn write_boot_marker(dir: &Path, p: &PendingFile, pid: u32) -> io::Result<PathBuf> {
-    let path = dir.join(BOOTS_DIR).join(format!("{}-{pid}.json", now_ms()));
+    // Nanos in the name: two boots inside one millisecond are still
+    // distinct files — the watchdog counts entries, not names.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(BOOTS_DIR).join(format!("{nanos}-{pid}.json"));
     write_json_file(
         &path,
         &json!({
