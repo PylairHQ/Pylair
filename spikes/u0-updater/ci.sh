@@ -99,8 +99,9 @@ case "$OS" in
     ;;
 esac
 
-assert_marker() { # assert_marker <ver> — poll up to 30s for content
-  for _ in $(seq 30); do
+assert_marker() { # assert_marker <ver> - poll up to 120s for content
+  # (a restored 83MB AppImage re-extracts on boot: observed ~31s on CI)
+  for _ in $(seq 120); do
     [ -f "$STATE/backend-marker.txt" ]       && grep -q "VERSION = \"$1\"" "$STATE/backend-marker.txt"       && grep -q "runtime-marker $1" "$STATE/backend-marker.txt"       && { echo "PASS marker $1" >> "$STATE/results.txt"; return 0; }
     sleep 1
   done
