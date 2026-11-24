@@ -154,12 +154,18 @@ if (process.platform === "darwin") {
   const tarPath = join(macosDir, tar);
   // tar the way tauri does: the .app at the archive root.
   execSync(`tar czf "${tar}" "${app}"`, { cwd: macosDir, stdio: "inherit" });
-  // Re-sign the repacked tarball. The throwaway key file path travels in
-  // UPD_KEY_PATH (set by the workflow's keys step); -p "" matches the
-  // --no-password generation, else fall back to the signer env vars.
-  const keyArgs = process.env.UPD_KEY_PATH
-    ? ["-f", process.env.UPD_KEY_PATH, "-p", ""]
-    : [];
+  // Re-sign the repacked tarball. The workflow exports BOTH the key
+  // content (TAURI_SIGNING_PRIVATE_KEY — `sign` picks it up as -k) and
+  // its path (UPD_KEY_PATH); -f alongside the env key is a clap
+  // conflict, so -f only when no env key is present. -p "" matches the
+  // --no-password generation.
+  const keyArgs = [
+    ...(process.env.UPD_KEY_PATH && !process.env.TAURI_SIGNING_PRIVATE_KEY
+      ? ["-f", process.env.UPD_KEY_PATH]
+      : []),
+    "-p",
+    "",
+  ];
   run("pnpm", ["exec", "tauri", "signer", "sign", ...keyArgs, tarPath]);
 }
 
