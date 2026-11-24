@@ -228,8 +228,8 @@ scenario_c() {
   wait_for 300 "restored v2 booted (second 2.0.0 boot record)" \
     "[ \$(log_count boot '2.0.0') -ge 2 ]"
   wait_log 300 "restored v2's fresh check is skipped -> null" "check" '"data": "null"'
-  assert_true "health().update surfaces rolled-back + lastRollback" \
-    "log_has health 'rolled-back'"
+  wait_log 60 "health().update surfaces rolled-back + lastRollback" \
+    "health" "rolled-back"
   note_t "scenario c $((SECONDS - s))s"
   snapshot "c-readiness-rollback"
 }
