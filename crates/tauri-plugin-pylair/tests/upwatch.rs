@@ -617,7 +617,7 @@ fn per_user_windows_still_restores_silently() {
 /// install itself lives under a machine-wide root.
 #[test]
 fn program_files_install_path_forces_approval_despite_declared_mode() {
-    let mut f = fixture(knobs(50, 3, 60_000));
+    let mut f = fixture(knobs(1_000, 3, 60_000));
     let root = f.dir.join("Program Files");
     let ip = root.join("app-under-test").join("app.exe");
     fs::create_dir_all(ip.parent().unwrap()).unwrap();
@@ -645,7 +645,7 @@ fn program_files_install_path_forces_approval_despite_declared_mode() {
 /// declared mode, is authoritative.
 #[test]
 fn both_mode_per_user_install_still_restores_silently() {
-    let mut f = fixture(knobs(50, 3, 60_000));
+    let mut f = fixture(knobs(1_000, 3, 60_000));
     f.pending.install_mode = Some("both".into());
     update::write_pending(&f.dir, &f.pending).unwrap();
     let mut h = test_hooks();
