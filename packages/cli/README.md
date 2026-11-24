@@ -15,7 +15,7 @@ The installed command is `pylair` even though the package is scoped.
 
 **Release candidate:** while there's no stable release, `latest`
 tracks the newest RC — pin an exact version for reproducibility:
-`npm i -D @pylair/cli@0.1.0-rc.29`.
+`npm i -D @pylair/cli@0.1.0-rc.30`.
 Installers produced by `pylair build` are **unsigned** unless you
 configure code signing — expect Gatekeeper/SmartScreen warnings.
 
