@@ -102,13 +102,17 @@ def sync_sleep(seconds: float) -> str:
     return "slept"
 
 
-def _write_pidfile(path: str, pid: int) -> None:
-    """Publish a pid atomically: a reader polling `exists()` must never
+def _write_atomic(path: str, content: str) -> None:
+    """Publish a marker atomically: a reader polling `exists()` must never
     see the empty file `open(path, "w")` leaves before the write lands."""
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        f.write(str(pid))
+        f.write(content)
     os.replace(tmp, path)
+
+
+def _write_pidfile(path: str, pid: int) -> None:
+    _write_atomic(path, str(pid))
 
 
 @expose(isolated=True)
@@ -191,8 +195,7 @@ def sigterm_immune(ready_file: str) -> str:
     import signal
 
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    with open(ready_file, "w") as f:
-        f.write("ready")
+    _write_atomic(ready_file, "ready")
     time.sleep(600)
     return "never"
 
@@ -300,8 +303,7 @@ def warm_break_witness(witness: str, seconds: float, started: str | None = None)
     import signal as _signal
 
     def _on_interrupt(_signum, _frame) -> None:
-        with open(witness, "w") as f:
-            f.write("break")
+        _write_atomic(witness, "break")
         raise KeyboardInterrupt
 
     if sys.platform == "win32":
@@ -311,10 +313,7 @@ def warm_break_witness(witness: str, seconds: float, started: str | None = None)
     if started:
         # Atomic: the test parses this as the member's pid — a bare
         # open/write would expose the create-then-write gap as "".
-        tmp = started + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(str(os.getpid()))
-        os.replace(tmp, started)
+        _write_pidfile(started, os.getpid())
     time.sleep(seconds)
     return "slept"
 
@@ -352,8 +351,7 @@ def warm_gated_result(marker: str, size: int) -> dict:
     big enough that building and writing its frame takes measurable
     time — the interrupt-vs-completion race test lands signals inside
     exactly that window."""
-    with open(marker, "w") as f:
-        f.write(str(os.getpid()))
+    _write_pidfile(marker, os.getpid())
     return {"pid": os.getpid(), "items": ["x"] * size}
 
 

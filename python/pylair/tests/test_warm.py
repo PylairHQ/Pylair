@@ -189,9 +189,20 @@ def _wait_file(path, timeout: float = _HANG_S) -> None:
 
 
 def _wait_pidfile(path, timeout: float = _HANG_S) -> int:
-    """Poll for the worker's pidfile — never a fixed sleep."""
-    _wait_file(path, timeout)
-    return int(path.read_text().strip())
+    """Poll for the worker's pidfile — never a fixed sleep. The file
+    must also PARSE as a pid: a writer that doesn't publish atomically
+    exposes a create-then-write gap where exists() is already true but
+    the content hasn't landed yet."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return int(path.read_text().strip())
+        except (OSError, ValueError):
+            if time.time() >= deadline:
+                raise AssertionError(
+                    f"pidfile {path} never appeared/parsed\n{_hang_dump(_ACTIVE_RT)}"
+                ) from None
+            time.sleep(0.05)
 
 
 def _pid_alive(pid: int) -> bool:
