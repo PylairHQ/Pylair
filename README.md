@@ -110,6 +110,8 @@ crate at `0.1.0-rc.23`). Check each registry for its latest RC.
   [cancellation semantics](docs/cancellation.md),
   [codegen](docs/codegen.md), [packaging and installers](docs/build.md)
   and the [wrap guide](docs/wrap.md).
+- Auto-update: [docs/updates.md](docs/updates.md) — **not available yet**;
+  the doc ships ahead of the feature (decision 0011).
 - Security model: [docs/security.md](docs/security.md); reporting a
   vulnerability: [SECURITY.md](SECURITY.md).
 - Design history: [docs/decisions/](docs/decisions/).

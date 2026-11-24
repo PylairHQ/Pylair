@@ -8,6 +8,28 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+_Part of the unreleased auto-update series (decision 0011) — nothing in
+the series is released until all PRs land._
+
+- `pylair keys init`: wraps `tauri signer generate` — private key to a
+  user-picked path that can never land in git (verified via
+  `git check-ignore`), pubkey into `plugins.updater.pubkey`, CI-secret and
+  backup instructions. Refuses to overwrite an existing pubkey without
+  `--force` (rotation needs the old key).
+- `pylair update manifest`: scans the bundle output for signed updater
+  artifacts and writes `latest.json` (`--base-url`, `--channel`,
+  `--notes`, `--insecure-dev`); fails on a missing `.sig`, versioned
+  filenames that disagree with `tauri.conf.json`, or a non-https base url.
+- `pylair build --sign`: produces signed updater artifacts (requires
+  `TAURI_SIGNING_PRIVATE_KEY`). Builds of updater-enabled apps now check
+  `tauri.conf.json` version == `src-tauri/Cargo.toml` version.
+- `create-pylair --with-updater` (interactive question, default no):
+  injects the updater plugin dep, `plugins.updater` conf block,
+  `updater:default` capability permission, `createUpdaterArtifacts` and a
+  `*.key` gitignore. Default scaffolds unchanged — a golden test pins it.
+- [docs/updates.md](docs/updates.md): setup walkthrough, channels and the
+  security model, flagged not-available-yet until the series ships.
+
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
 Crate `0.1.0-rc.23`, `pylair 0.1.0rc16` on PyPI, npm `0.1.0-rc.30`.
