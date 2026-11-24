@@ -25,18 +25,23 @@ apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq \
 export HOME=/work/home
 mkdir -p "$HOME"
 
-# One shared X server for the entire run.
+# One shared X server for the entire run. Fail loudly if it did not
+# come up — a dead DISPLAY silently produces the "app writes nothing"
+# failure mode that once burned the whole 90-minute job budget.
 Xvfb :99 -screen 0 1280x800x24 &
+XVFB_PID=$!
 export DISPLAY=:99
 sleep 1
+kill -0 "$XVFB_PID" 2>/dev/null || { echo "FATAL: Xvfb :99 failed to start"; exit 2; }
 
 # AppImage extract timings for the PR body — each launch pays a
-# re-extract under APPIMAGE_EXTRACT_AND_RUN=1.
+# re-extract under APPIMAGE_EXTRACT_AND_RUN=1. Bounded: a stuck
+# extractor must not stall the run.
 APPIMAGE=$(find /work/htdocs/installable/v1.0.0 -name '*.AppImage' | head -1)
 if [ -n "$APPIMAGE" ]; then
   echo "── v1 AppImage extract timing"
-  /usr/bin/time -v "$APPIMAGE" --appimage-extract >/dev/null 2>/work/extract-time.txt || \
-    { time "$APPIMAGE" --appimage-extract >/dev/null; } 2>>/work/extract-time.txt
+  timeout 120 /usr/bin/time -v "$APPIMAGE" --appimage-extract >/dev/null 2>/work/extract-time.txt || \
+    { timeout 120 time "$APPIMAGE" --appimage-extract >/dev/null; } 2>>/work/extract-time.txt
   rm -rf squashfs-root
 fi
 

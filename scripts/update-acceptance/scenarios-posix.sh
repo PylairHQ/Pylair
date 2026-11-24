@@ -44,6 +44,7 @@ STATE_DIR="$DATA_DIR/updater-state"
 LOG="$DATA_DIR/accept/log.jsonl"
 EVIDENCE="$WORK/evidence"
 TIMINGS="$WORK/timings.log"
+CONSOLE="$WORK/app-console.log"
 FAILED=0
 
 mkdir -p "$WORK/app" "$EVIDENCE" "$DATA_DIR/accept" "$HTDOCS/latest"
@@ -80,6 +81,18 @@ assert_true() { # assert_true <desc> <frag>
   if ! eval "$2"; then fail "assert: $1"; fi
 }
 
+# First-record liveness: the accept log's first line proves webview ->
+# driver -> backend all came up. Bounded short — when it fails, the app
+# console (captured by launch) almost always says why, so dump it into
+# the step log rather than leaving a bare "timeout".
+wait_app_log() {
+  if ! wait_for 120 "app produced its first accept record" "[ -s '$LOG' ]"; then
+    echo "── $CONSOLE (tail):"
+    tail -40 "$CONSOLE" 2>/dev/null
+    return 1
+  fi
+}
+
 state_seq() { # update.state transitions, consecutive-dup collapsed
   [ -f "$LOG" ] || return 0
   grep -F '"tag": "update.state"' "$LOG" | grep -o '"data": "[a-z_]*"' | cut -d'"' -f4 |
@@ -105,18 +118,21 @@ install_tag() { # install_tag <tag> — replace the install with this version
 
 APP_PID=""
 launch() { # launch — run whatever is currently installed
+  # stdout+stderr go to $CONSOLE — a dead launch is otherwise invisible
+  # (the accept-log waits then just burn their full windows).
+  echo "── launch $(date +%H:%M:%S)" >> "$CONSOLE"
   case "$OS" in
     linux)
       # DISPLAY comes from the environment (linux-in-container.sh runs
       # one shared Xvfb) — relaunches and the watchdog's restore-spawn
       # land outside any per-launch wrapper and must inherit it.
-      APPIMAGE_EXTRACT_AND_RUN=1 "$WORK/app/app.AppImage" >/dev/null 2>&1 &
+      APPIMAGE_EXTRACT_AND_RUN=1 "$WORK/app/app.AppImage" >>"$CONSOLE" 2>&1 &
       APP_PID=$!;;
     darwin)
       local app exe
       app=$(find "$WORK/app" -maxdepth 1 -name '*.app' | head -1)
       exe=$(find "$app/Contents/MacOS" -type f | head -1)
-      "$exe" >/dev/null 2>&1 &
+      "$exe" >>"$CONSOLE" 2>&1 &
       APP_PID=$!;;
   esac
   say "launched pid=$APP_PID"
@@ -176,6 +192,7 @@ scenario_a() {
   say "── scenario a: v1 -> v2 confirms"
   local s=$SECONDS
   reset_state; set_offer v2.0.0; install_tag v1.0.0; launch
+  wait_app_log
   wait_log 420 "v1 records the v2 offer" "install" "2.0.0"
   wait_file 420 "watchdog wrote update-ok" "$STATE_DIR/update-ok"
   wait_log 60 "on_update_confirmed fired for 2.0.0" "confirmed" "2.0.0"
@@ -193,6 +210,7 @@ scenario_b() {
   say "── scenario b: v1 -> v2-slow confirms despite heartbeat"
   local s=$SECONDS
   reset_state; set_offer v2.1.0; install_tag v1.0.0; launch
+  wait_app_log
   wait_log 420 "v1 records the v2-slow offer" "install" "2.1.0"
   wait_file 120 "progress.json appears" "$STATE_DIR/progress.json"
   # Progress must keep the window open past heartbeat_ms (10s): sample
@@ -214,6 +232,7 @@ scenario_c() {
   say "── scenario c: v2 -> v3 rolls back readiness_failed"
   local s=$SECONDS
   reset_state; set_offer v3.0.0; install_tag v2.0.0; launch
+  wait_app_log
   wait_log 420 "v2 records the v3 offer" "install" "3.0.0"
   wait_file 300 "rollback reason written" "$STATE_DIR/rollback-reason.txt"
   assert_true "reason is readiness_failed" \
@@ -238,6 +257,7 @@ scenario_d() {
   say "── scenario d: v2 -> v3-crash rolls back crash_loop"
   local s=$SECONDS
   reset_state; set_offer v4.0.0; install_tag v2.0.0; launch
+  wait_app_log
   wait_log 420 "v2 records the v4 offer" "install" "4.0.0"
   wait_file 120 "pending armed" "$STATE_DIR/pending.json"
   # The driver's own relaunch is boot #1 (v4 exits ~1.5s in). Drive two
@@ -260,6 +280,7 @@ scenario_e() {
   say "── scenario e: tampered cache -> verify_failed, no restore"
   local s=$SECONDS
   reset_state; set_offer v3.0.0; install_tag v2.0.0; launch
+  wait_app_log
   wait_log 420 "v2 records the v3 offer" "install" "3.0.0"
   wait_file 120 "pending armed + cache written" "$STATE_DIR/pending.json"
   local artifact
