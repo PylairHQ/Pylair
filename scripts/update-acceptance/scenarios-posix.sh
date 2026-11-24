@@ -36,7 +36,7 @@ IDENT="${IDENT:-com.pylair.acceptupd}"
 PORT="${PORT:-8791}"
 
 case "$OS" in
-  Linux|linux)   DATA_DIR="$HOME/.local/share/$IDENT";;
+  Linux|linux)   OS=linux; DATA_DIR="$HOME/.local/share/$IDENT";;
   Darwin|darwin) OS=darwin; DATA_DIR="$HOME/Library/Application Support/$IDENT";;
   *) echo "unknown OS $OS"; exit 2;;
 esac
