@@ -367,8 +367,20 @@ fn verify_artifact(dir: &Path, p: &PendingFile, pubkey_b64: &str) -> Result<(), 
     };
     let sig = minisign_verify::Signature::decode(&sig_text)
         .map_err(|e| format!("cached sig decode: {e}"))?;
-    let pubkey = minisign_verify::PublicKey::from_base64(pubkey_b64.trim())
-        .map_err(|e| format!("updater pubkey decode: {e}"))?;
+    // plugins.updater.pubkey is base64 of the WHOLE .pub file — same
+    // convention as the sig above (upstream tauri signs/verifies this
+    // way). PublicKey::from_base64 wants the bare key line and rejects
+    // the wrapped form — decode the file text instead.
+    let pubkey = {
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(pubkey_b64.trim())
+            .map_err(|e| format!("updater pubkey is not base64: {e}"))?;
+        let text =
+            String::from_utf8(raw).map_err(|e| format!("updater pubkey is not utf-8: {e}"))?;
+        minisign_verify::PublicKey::decode(&text)
+            .map_err(|e| format!("updater pubkey decode: {e}"))?
+    };
     pubkey
         .verify(&bytes, &sig, true)
         .map_err(|e| format!("cached artifact failed minisign verify: {e}"))?;

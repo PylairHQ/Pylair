@@ -50,7 +50,11 @@ struct Keys {
 fn keys() -> Keys {
     let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
     Keys {
-        pubkey_b64: kp.pk.to_base64(),
+        // plugins.updater.pubkey carries base64 of the WHOLE .pub file
+        // (what `pylair keys init` writes), not the bare key line —
+        // PublicKey::to_box() is exactly that file's text.
+        pubkey_b64: base64::engine::general_purpose::STANDARD
+            .encode(kp.pk.to_box().unwrap().into_string()),
         kp,
     }
 }
