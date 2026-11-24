@@ -451,9 +451,11 @@ mod tests {
     // panicked every non-updater app at init).
     #[test]
     fn plugin_config_accepts_absent_and_present_sections() {
-        assert!(serde_json::from_value::<Option<PluginConfig>>(serde_json::Value::Null)
-            .unwrap()
-            .is_none());
+        assert!(
+            serde_json::from_value::<Option<PluginConfig>>(serde_json::Value::Null)
+                .unwrap()
+                .is_none()
+        );
         let conf = serde_json::from_value::<Option<PluginConfig>>(serde_json::json!({}))
             .unwrap()
             .expect("an empty map is a present section");
