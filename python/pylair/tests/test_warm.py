@@ -134,33 +134,39 @@ def _hang_dump(runtime) -> str:
     return "\n".join(parts)
 
 
-@pytest.fixture(autouse=True)
-def _hang_guard(runtime):
-    """Default this module's recv/recv_until to _HANG_S: every call is
-    an event wait whose 10 s harness default was the macOS flake. A
-    guard trip dumps the runtime's parked threads + member process
-    states before failing."""
+def _guard(rt) -> None:
+    """Default a Runtime's recv/recv_until to _HANG_S and make a guard
+    trip dump ITS state — required on custom `Runtime(env=...)` handles
+    too, not only the fixture's."""
     global _ACTIVE_RT
-    _ACTIVE_RT = runtime
-    orig_recv, orig_until = runtime.recv, runtime.recv_until
+    _ACTIVE_RT = rt
+    orig_recv, orig_until = rt.recv, rt.recv_until
 
     def recv(timeout=_HANG_S):
         try:
             return orig_recv(timeout=timeout)
         except queue.Empty:
             raise AssertionError(
-                f"recv starved past {timeout}s\n{_hang_dump(runtime)}"
+                f"recv starved past {timeout}s\n{_hang_dump(rt)}"
             ) from None
 
     def recv_until(pred, timeout=_HANG_S):
         try:
             return orig_until(pred, timeout=timeout)
-        except TimeoutError:
+        except (TimeoutError, queue.Empty):
             raise AssertionError(
-                f"recv_until starved past {timeout}s\n{_hang_dump(runtime)}"
+                f"recv_until starved past {timeout}s\n{_hang_dump(rt)}"
             ) from None
 
-    runtime.recv, runtime.recv_until = recv, recv_until
+    rt.recv, rt.recv_until = recv, recv_until
+
+
+@pytest.fixture(autouse=True)
+def _hang_guard(runtime):
+    """Wrap the fixture Runtime; tests spawning extra `Runtime(env=...)`
+    handles call _guard on each — a trip must dump the runtime that
+    actually wedged, not the fixture's idle one."""
+    _guard(runtime)
     yield runtime
     _ACTIVE_RT = None
 
@@ -617,6 +623,7 @@ def test_warm_member_holds_cap_slot():
     """max_isolated_workers bounds live processes: one idle warm member
     leaves no room for a process-mode worker."""
     with Runtime(env={"PYLAIR_MAX_ISOLATED_WORKERS": "1"}) as rt:
+        _guard(rt)
         rt.recv()
         rt.send(call(1, "warm_pid", task=1))
         rt.recv()
@@ -630,6 +637,7 @@ def test_warm_spawn_cap_fails_at_acquire():
     """pool=2 with cap=1: the second concurrent call hits the live-process
     cap at pool-acquire time — LIMIT_EXCEEDED, not a silent wait."""
     with Runtime(env={"PYLAIR_MAX_ISOLATED_WORKERS": "1"}) as rt:
+        _guard(rt)
         rt.recv()
         rt.send(call(1, "warm2_sleep", task=1, input={"seconds": 3}))
         rt.send(call(2, "warm2_sleep", task=2, input={"seconds": 3}))
@@ -647,6 +655,7 @@ def test_warm_idle_member_reaped_on_shutdown(tmp_path):
     """An idle warm member is not a task — the drain path still reaps it."""
     pidfile = tmp_path / "idle.pid"
     with Runtime() as rt:
+        _guard(rt)
         rt.recv(timeout=_HANG_S)
         rt.send(
             call(1, "warm_sleep", task=1, input={"seconds": 0, "pidfile": str(pidfile)})
@@ -662,6 +671,7 @@ def test_warm_eof_reaps_idle_member(tmp_path):
     """stdin EOF takes the same drain path — no orphans either way."""
     pidfile = tmp_path / "eof.pid"
     rt = Runtime()
+    _guard(rt)
     try:
         rt.recv(timeout=_HANG_S)
         rt.send(
@@ -1086,6 +1096,7 @@ def test_warm_death_with_killpg_eperm_still_reports_and_respawns(tmp_path):
     except handler — the call task ended without a terminal and the
     caller waited forever. The terminal must now be unconditional."""
     with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        _guard(rt)
         rt.recv(timeout=_HANG_S)
         rt.send(call(1, "warm_crash_stderr", task=1, input={"marker": "EPERM_FIRST"}))
         resp = rt.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
@@ -1113,6 +1124,7 @@ def test_warm_cancel_with_killpg_eperm_reports_terminated(tmp_path):
     contained the verdict stays 'terminated' and the call still ends."""
     pidfile = tmp_path / "sleeper.pid"
     with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        _guard(rt)
         rt.recv(timeout=_HANG_S)
         rt.send(
             call(
@@ -1189,6 +1201,7 @@ def test_prewarm_reports_ready_before_any_call():
     completes its import+resolve handshake — worker:<fn> goes
     loading -> ready without a single call being sent."""
     with Runtime("testapp_prewarm") as rt:
+        _guard(rt)
         rt.recv()  # hello
         frames = _components_until(rt, "worker:prewarm_pid", ["loading", "ready"])
         got = [p["phase"] for p in frames if p["name"] == "worker:prewarm_pid"]
@@ -1201,6 +1214,7 @@ def test_prewarm_first_call_uses_prewarmed_member(tmp_path):
     handshake) and the call must come back from that same pid."""
     pf = tmp_path / "prewarmed.pid"
     with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_PIDFILE": str(pf)}) as rt:
+        _guard(rt)
         rt.recv()
         _components_until(rt, "worker:prewarm_pid", ["ready"])
         prewarmed = _wait_pidfile(pf)  # the member proved itself at import
@@ -1216,6 +1230,7 @@ def test_prewarm_import_failure_reports_failed():
     """A member whose app import explodes answers ready:false — the
     component reports failed with the import error as detail."""
     with Runtime("testapp_warmfail") as rt:
+        _guard(rt)
         rt.recv()
         frames = _components_until(rt, "worker:warmfail_pid", ["failed"])
         got = [p for p in frames if p["name"] == "worker:warmfail_pid"]
@@ -1229,6 +1244,7 @@ def test_prewarm_requires_gate_waits_then_succeeds(tmp_path):
     the handshake reports ready."""
     gate = tmp_path / "prewarm.gate"
     with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_GATE": str(gate)}) as rt:
+        _guard(rt)
         rt.recv()
         # The component is visible while the member's import is gated.
         _components_until(rt, "worker:prewarm_pid", ["loading"])
@@ -1262,6 +1278,7 @@ def test_prewarm_false_stays_lazy(tmp_path):
     so its absence proves no member ever spawned."""
     pf = tmp_path / "lazy.pid"
     with Runtime("testapp_prewarm", env={"PYLAIR_LAZY_PIDFILE": str(pf)}) as rt:
+        _guard(rt)
         rt.recv()
         frames = _components_until(rt, "worker:prewarm_pid", ["ready"])
         assert not any(p["name"] == "worker:lazy_pid" for p in frames), (
