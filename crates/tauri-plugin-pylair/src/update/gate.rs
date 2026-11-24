@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 
 pub struct UpdateGate {
@@ -50,7 +50,6 @@ pub struct UpdateGate {
     /// False while the generation is not in Ready (dead, starting,
     /// restarting) — a stale grace timer must not confirm it.
     runtime_ready: AtomicBool,
-    ready_since: Mutex<Option<Instant>>,
     /// Session nonce for this process's pending window — written into
     /// pending.json by install; the watchdog keys ready markers on it.
     pub session_id: String,
@@ -106,7 +105,6 @@ impl UpdateGate {
             seen_component: AtomicBool::new(false),
             ready_seq: AtomicU64::new(0),
             runtime_ready: AtomicBool::new(false),
-            ready_since: Mutex::new(None),
             session_id: new_session_id(),
             grace_ms: NO_COMPONENTS_GRACE_MS,
         };
@@ -133,7 +131,6 @@ impl UpdateGate {
             seen_component: AtomicBool::new(false),
             ready_seq: AtomicU64::new(0),
             runtime_ready: AtomicBool::new(false),
-            ready_since: Mutex::new(None),
             session_id: opts.session_id.unwrap_or_else(new_session_id),
             grace_ms: opts.grace_ms,
         };
@@ -196,7 +193,6 @@ impl UpdateGate {
     /// "no instrumentation").
     fn note_ready(self: &Arc<Self>) {
         self.runtime_ready.store(true, Ordering::SeqCst);
-        *self.ready_since.lock().unwrap() = Some(Instant::now());
         let seq = self.ready_seq.fetch_add(1, Ordering::SeqCst) + 1;
         if self.seen_component.load(Ordering::SeqCst) {
             self.try_ready_marker();
