@@ -170,8 +170,10 @@ await update.relaunch();                     // restart into the new version
   `pending.json`) is armed before that call.
 - Errors throw `UpdateError` with a stable `updateCode`:
   `NotUpdatable` (no updater config, macOS App Translocation — move the
-  app to `/Applications`), `NeedsApproval` (per-machine Windows
-  install), `SignatureInvalid`, `NoOffer`, `EndpointError`,
+  app to `/Applications`), `NeedsApproval` (a per-machine Windows
+  install whose rollback needs an approved restore — install itself
+  proceeds, one UAC prompt the user initiated), `SignatureInvalid`,
+  `NoOffer`, `EndpointError`,
   `CheckFailed`, `DownloadFailed`, `CacheFailed`, `InstallFailed`.
 - `health().update = {state, lastRollback?}` tracks the lifecycle:
   `pending` | `installing` | `ready` | `rolled-back` |

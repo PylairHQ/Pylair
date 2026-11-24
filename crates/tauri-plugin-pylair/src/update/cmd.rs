@@ -273,17 +273,12 @@ async fn cache_current_artifact<R: Runtime>(
 pub async fn python_update_install<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorObj> {
     let gate = gate(&app)?;
     refuse_translocated()?;
-    #[cfg(target_os = "windows")]
-    if gate.install_mode != "current-user" {
-        // A per-machine bundle cannot be installed (or rolled back)
-        // without elevation — refuse rather than trigger a UAC prompt
-        // the user did not ask for (§2). The approval UX lands with
-        // the watchdog PR.
-        return Err(err(
-            codes::NEEDS_APPROVAL,
-            "per-machine install requires elevated approval to update",
-        ));
-    }
+    // §2: a per-machine install PROCEEDS — its NSIS installer prompts
+    // UAC once, which is acceptable since the user initiated the
+    // update. The approval-needed state only exists on the ROLLBACK
+    // side: install_mode travels in pending.json so the watchdog knows
+    // a silent restore is impossible and records
+    // rollback-pending-approval instead.
     let bytes = gate
         .downloaded
         .lock()
