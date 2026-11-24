@@ -158,7 +158,10 @@ if (process.platform === "darwin") {
   // content (TAURI_SIGNING_PRIVATE_KEY — `sign` picks it up as -k) and
   // its path (UPD_KEY_PATH); -f alongside the env key is a clap
   // conflict, so -f only when no env key is present. -p "" matches the
-  // --no-password generation.
+  // --no-password generation. --app-version re-binds the version in the
+  // sig's trusted comment — `tauri build` sets it on its own sigs but a
+  // manual signer call does not, and restore_update forces
+  // require_signed_version (this broke the macOS rollback fetch).
   const keyArgs = [
     ...(process.env.UPD_KEY_PATH && !process.env.TAURI_SIGNING_PRIVATE_KEY
       ? ["-f", process.env.UPD_KEY_PATH]
@@ -166,7 +169,7 @@ if (process.platform === "darwin") {
     "-p",
     "",
   ];
-  run("pnpm", ["exec", "tauri", "signer", "sign", ...keyArgs, tarPath]);
+  run("pnpm", ["exec", "tauri", "signer", "sign", ...keyArgs, "--app-version", version, tarPath]);
 }
 
 // 7. stage <out>/releases/<tag>/ — artifact + .sig + latest.json.
