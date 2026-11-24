@@ -131,6 +131,12 @@ export function applyUpdater(dest: string): void {
       // https URL - point them at where you'll host latest.json (docs/updates.md).
       pubkey: PUBKEY_PLACEHOLDER,
       endpoints: ["https://example.com/releases/latest/download/latest.json"],
+      // Each release's own latest.json doubles as its rollback manifest
+      // (decision 0011 sec. 6): {{version}} resolves to the version being
+      // replaced. Unset or unreachable => install refuses (no rollback,
+      // no install).
+      rollbackUrl:
+        "https://example.com/releases/download/v{{version}}/latest.json",
       windows: { installMode: "quiet" },
     },
   };

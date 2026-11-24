@@ -12,13 +12,22 @@
 //! polling for python under the install dir is the positive control.
 
 use tauri::Manager;
-use tauri_plugin_pylair::{app_spawn_spec, self_test_gui, self_test_headless, self_test_requested};
+use tauri_plugin_pylair::{
+    app_spawn_spec, self_test_gui, self_test_headless, self_test_requested, update_watchdog_entry,
+};
 
 const APP_MODULE: &str = "backend.app";
 const SOURCE_DIR: &str = "backend";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Update watchdog mode (decision 0011): python_update_install spawns
+    // a state-dir copy of this exe with --pylair-upwatch to watch the new
+    // version's first boot. A no-op without the flag (and without the
+    // plugin's `updater` feature).
+    if let Some(code) = update_watchdog_entry(&tauri::generate_context!()) {
+        std::process::exit(code);
+    }
     if self_test_requested() {
         std::process::exit(self_test_headless(APP_MODULE, SOURCE_DIR));
     }
