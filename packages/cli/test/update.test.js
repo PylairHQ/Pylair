@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after } from "node:test";
+import { c as tarCreate } from "tar";
 
 import {
   assertUpdaterVersionSync,
@@ -25,9 +26,32 @@ after(() => {
 
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 
+/** A real gzipped tar holding `<app>.app/Contents/Info.plist` with
+ * CFBundleShortVersionString = plistVersion - what tauri bundle emits. */
+function makeAppTar(dest, plistVersion) {
+  const app = dest.split(/[\\/]/).pop().replace(/\.tar\.gz$/, "");
+  const stage = tmp();
+  mkdirSync(join(stage, app, "Contents"), { recursive: true });
+  writeFileSync(
+    join(stage, app, "Contents", "Info.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n` +
+      `<key>CFBundleShortVersionString</key>\n<string>${plistVersion}</string>\n` +
+      `</dict>\n</plist>\n`,
+  );
+  tarCreate({ file: dest, cwd: stage, gzip: true, sync: true }, [app]);
+}
+
 /** A minimal updater-enabled app: conf (+ optionally Cargo.toml) and a
- * bundle tree with fake artifacts. `artifacts` = [dir, filename, body]. */
-function fakeApp({ version = "0.2.0", cargoVersion, artifacts = [], endpoints } = {}) {
+ * bundle tree with artifacts. `artifacts` = [dir, filename, body]; a
+ * `.app.tar.gz` filename gets a REAL tarball (plist version plistVersion,
+ * else the conf version) since `update manifest` reads it. */
+function fakeApp({
+  version = "0.2.0",
+  cargoVersion,
+  artifacts = [],
+  endpoints,
+  plistVersion,
+} = {}) {
   const dir = tmp();
   const tauri = join(dir, "src-tauri");
   mkdirSync(tauri, { recursive: true });
@@ -39,7 +63,8 @@ function fakeApp({ version = "0.2.0", cargoVersion, artifacts = [], endpoints } 
   for (const [kind, file, body] of artifacts) {
     const d = join(tauri, "target", "release", "bundle", kind);
     mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, file), body);
+    if (file.endsWith(".app.tar.gz")) makeAppTar(join(d, file), plistVersion ?? version);
+    else writeFileSync(join(d, file), body);
   }
   return dir;
 }
@@ -181,6 +206,34 @@ describe("updateManifest", () => {
     assert.throws(
       () => updateManifest({ appDir: dir, baseUrl: "https://x" }),
       /artifact version mismatch: up-app_0\.2\.0_amd64\.AppImage is 0\.2\.0 but tauri\.conf\.json says 0\.3\.0/,
+    );
+  });
+
+  test("a macOS tarball whose Info.plist version disagrees fails naming the file", () => {
+    const dir = fakeApp({
+      version: "0.2.0",
+      plistVersion: "0.1.0",
+      artifacts: [["macos", "up-app.app.tar.gz", null]],
+    });
+    writeFileSync(
+      join(dir, "src-tauri/target/release/bundle/macos/up-app.app.tar.gz.sig"),
+      "S",
+    );
+    assert.throws(
+      () => updateManifest({ appDir: dir, baseUrl: "https://x" }),
+      /artifact version mismatch: up-app\.app\.tar\.gz bundles CFBundleShortVersionString "0\.1\.0" but tauri\.conf\.json says 0\.2\.0/,
+    );
+  });
+
+  test("a macOS artifact that isn't a tarball fails naming the file", () => {
+    const dir = fakeApp();
+    const macd = join(dir, "src-tauri/target/release/bundle/macos");
+    mkdirSync(macd, { recursive: true });
+    writeFileSync(join(macd, "up-app.app.tar.gz"), "not-a-tarball");
+    writeFileSync(join(macd, "up-app.app.tar.gz.sig"), "S");
+    assert.throws(
+      () => updateManifest({ appDir: dir, baseUrl: "https://x" }),
+      /up-app\.app\.tar\.gz: not a readable \.app\.tar\.gz/,
     );
   });
 

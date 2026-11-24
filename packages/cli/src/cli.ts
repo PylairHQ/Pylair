@@ -83,6 +83,8 @@ keys options:
                         the project or git-ignored; prompted on a TTY)
     --password <pw>     Private-key password (default: the env var
                         TAURI_SIGNING_PRIVATE_KEY_PASSWORD, else prompted)
+    --no-password       Generate an unprotected private key (warned;
+                        never implied by a failed attempt)
     --force             Overwrite an existing pubkey/key (rotation needs the
                         OLD key - see docs/updates.md)
 
@@ -350,12 +352,14 @@ export function main(rawArgv: string[]): number | Promise<number> {
       return 2;
     }
     const force = subrest.includes("--force");
+    const noPassword = subrest.includes("--no-password");
     const password = argValue(subrest, "--password");
     const canPrompt = interactive(process.stdin, process.env);
     return keysInit({
       appDir: resolveAppDir(argValue(subrest, "--dir")),
       keyPath: argValue(subrest, "--key-path"),
       password,
+      noPassword,
       force,
       prompt: canPrompt ? { input: process.stdin, output: process.stdout, caps: ui.caps } : undefined,
     }).then(

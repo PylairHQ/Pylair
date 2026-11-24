@@ -49,11 +49,23 @@ npx pylair keys init --key-path ~/keys/myapp-updater.key
 ```
 
 `keys init` wraps `tauri signer generate` (minisign). It refuses paths
-inside the project unless git-ignored (verified via `git check-ignore`),
-writes the pubkey into `plugins.updater.pubkey`, and prints the storage
-rules. Re-running against an existing pubkey is refused: rotation means
+inside the repository containing the app unless git-ignored (verified via
+`git check-ignore`) — in a monorepo that boundary is the repo root, so a
+key at the root or in a sibling package is refused the same way. The
+pubkey goes into `plugins.updater.pubkey`, and the storage rules print.
+Re-running against an existing pubkey is refused: rotation means
 shipping an update signed by the *old* key that embeds the new pubkey —
 `--force` only when you know what you're doing (0011 §6).
+
+Password handling, in order: `--password`, the
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env var, the tauri CLI's own prompt
+on a TTY, or `--no-password` for a deliberately unprotected key (warned;
+never implied — a failed generation is never silently retried with a
+weaker password). Two caveats: `tauri signer generate` only accepts the
+password via `-p` on its command line (no env/stdin support), so it can
+appear briefly in process listings — prefer the interactive prompt where
+that matters. And a non-interactive shell with none of the three sources
+fails rather than guessing.
 
 Store the private key safely:
 
@@ -94,8 +106,11 @@ npx pylair update manifest \
 ```
 
 `update manifest` scans `src-tauri/target/.../release/bundle` for the
-signed artifacts, checks every `.sig` exists and every versioned
-filename agrees with `tauri.conf.json`, and writes `latest.json`:
+signed artifacts, checks every `.sig` exists and every artifact's version
+agrees with `tauri.conf.json` — from the filename where it carries one,
+and on macOS from the `CFBundleShortVersionString` inside the
+`.app.tar.gz`'s `Contents/Info.plist` (the name carries none, so a stale
+bundle can't slip in under the new version) — and writes `latest.json`:
 
 ```json
 {

@@ -24,6 +24,9 @@ export interface KeysOps {
    * CLI prompt for the password itself on a TTY; `capture` is for the
    * non-interactive `-p` path and returns combined output. */
   generate: (args: string[], mode: "inherit" | "capture", stdin?: string) => number;
+  /** The git work-tree root containing `cwd`, or undefined outside a repo
+   * (`git -C cwd rev-parse --show-toplevel`). */
+  repoTop: (cwd: string) => string | undefined;
   /** Is `path` ignored under the git repo containing `cwd`? - "ignored" only
    * when `git check-ignore` exits 0; "untracked" on 1; "unknown" when there
    * is no repo or no git binary (a path we can't verify counts as tracked). */
@@ -38,6 +41,13 @@ const keysRealOps: KeysOps = {
     });
     return r.status ?? 1;
   },
+  repoTop: (cwd) => {
+    const r = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+    });
+    const top = r.status === 0 ? r.stdout.trim() : "";
+    return top ? resolve(top) : undefined;
+  },
   checkIgnored: (path, cwd) => {
     const r = spawnSync("git", ["-C", cwd, "check-ignore", "-q", "--", path]);
     if (r.status === 0) return "ignored";
@@ -49,11 +59,17 @@ const keysRealOps: KeysOps = {
 export interface KeysInitOptions {
   appDir: string;
   /** `--key-path`: where the private key is written. Must be outside the
-   * project - or git-ignored inside it, verified via `git check-ignore`. */
+   * repository containing the app - or git-ignored inside it, verified via
+   * `git check-ignore`. */
   keyPath?: string;
   /** `--password`: private-key password; otherwise the env var, a TTY prompt
-   * from the tauri CLI itself, or (non-interactive) an empty password. */
+   * from the tauri CLI itself, or --no-password for a deliberately
+   * unprotected key. */
   password?: string;
+  /** `--no-password`: explicit opt-in to an UNPROTECTED private key (a
+   * warning is printed). Never implied - a failed generate is never
+   * silently retried with an empty password. */
+  noPassword?: boolean;
   /** Overwrite an existing pubkey in tauri.conf.json and/or an existing key
    * file. Off by default: a new key needs the OLD one to reach installed
    * copies (the signed rollover update of 0011 sec. 6). */
@@ -86,9 +102,24 @@ function defaultKeyPath(appDir: string, product: string): string {
   return join(homedir(), ".pylair-keys", `${safe}-updater.key`);
 }
 
-/** Refuse a private-key path the user could later commit: inside the app
- * dir it must be git-ignored (verified, not assumed); outside is always
- * fine. Also refuses to clobber an existing key file without --force. */
+/** `abs` inside `scope`? Returns the scope-relative path (display case), or
+ * undefined outside. Case-folded on win32 so an oddly-cased absolute path
+ * can't slip past the boundary check. */
+function relInside(scope: string, abs: string): string | undefined {
+  const fold = (s: string) => (process.platform === "win32" ? s.toLowerCase() : s);
+  const rel = relative(fold(scope), fold(abs));
+  return rel === "" || rel.startsWith("..") || isAbsolute(rel)
+    ? undefined
+    : relative(scope, abs);
+}
+
+/** Refuse a private-key path the user could later commit: inside the git
+ * repository containing the app it must be git-ignored (verified, not
+ * assumed) - in a monorepo that boundary is the repo root, not the app
+ * dir, so a key at the root or in a sibling package is inside git just the
+ * same. Outside the repo is always fine; with no repo at all, the app dir
+ * is the boundary as before. Also refuses to clobber an existing key file
+ * without --force. */
 function assertSafeKeyPath(
   keyPath: string,
   appDir: string,
@@ -96,19 +127,24 @@ function assertSafeKeyPath(
   ops: KeysOps,
 ): void {
   const abs = resolve(appDir, keyPath);
-  const rel = relative(appDir, abs);
-  const inside = rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-  if (inside) {
+  const repo = ops.repoTop(appDir);
+  const scope = resolve(repo ?? appDir);
+  const rel = relInside(scope, abs);
+  if (rel !== undefined) {
     const ignored = ops.checkIgnored(abs, appDir);
-    if (ignored !== "ignored")
+    if (ignored !== "ignored") {
+      const where = repo ? "the repository" : "the project";
       throw new Error(
-        `${CONF_ERR_PREFIX}: refusing to write the private key inside the project ` +
+        `${CONF_ERR_PREFIX}: refusing to write the private key inside ${where} ` +
           `(${rel}) - it would end up in git. ` +
           (ignored === "unknown"
-            ? "This directory isn't a git repo, so nothing proves the path is untracked. "
+            ? repo
+              ? "git could not verify it as untracked. "
+              : "This directory isn't a git repo, so nothing proves the path is untracked. "
             : "It's not covered by .gitignore. ") +
-          "Pick a path outside the project (e.g. the suggested default).",
+          `Pick a path outside ${where} (e.g. the suggested default).`,
       );
+    }
   }
   if (existsSync(abs) && !force)
     throw new Error(
@@ -119,27 +155,50 @@ function assertSafeKeyPath(
 }
 
 /** `signer generate` writes `<key>` and `<key>.pub`; the pubkey goes into
- * tauri.conf.json. Password order: --password, env var, then (TTY) the tauri
- * CLI's own prompt with inherited stdio, then (non-interactive) an explicit
- * empty one - piped, the spike proved some CLI builds read stdin instead of
- * honouring `-p ""`. */
+ * tauri.conf.json. Password order: --password / env var, then --no-password
+ * (explicit opt-in, warned), then the tauri CLI's own TTY prompt with
+ * inherited stdio. Non-interactive with none of those is a usage error,
+ * and a FAILED generate is never silently retried with a weaker password -
+ * a mistyped confirmation must not quietly produce an unprotected key.
+ * (The only documented scripted delivery is `-p` on argv - tauri signer
+ * generate has no env/stdin password support; caveat in docs/updates.md.) */
 function runGenerate(
   entry: string,
   keyPath: string,
   password: string | undefined,
+  noPassword: boolean | undefined,
+  interactive: boolean,
   ops: KeysOps,
 ): void {
+  const failed = () => {
+    throw new Error(
+      `${CONF_ERR_PREFIX}: tauri signer generate failed - no key was written. ` +
+        "Fix the cause (see output above) and run `pylair keys init` again.",
+    );
+  };
   mkdirSync(dirname(keyPath), { recursive: true });
   const args = [entry, "signer", "generate", "-w", keyPath];
   if (password !== undefined) {
-    if (ops.generate([...args, "-p", password], "capture") !== 0)
-      throw new Error(`${CONF_ERR_PREFIX}: tauri signer generate failed`);
+    if (ops.generate([...args, "-p", password], "capture") !== 0) failed();
     return;
   }
-  if (ops.generate(args, "inherit") === 0) return;
-  // Non-interactive or a build that ignores an absent -p: empty password.
-  if (ops.generate([...args, "-p", ""], "capture", "\n") === 0) return;
-  throw new Error(`${CONF_ERR_PREFIX}: tauri signer generate failed`);
+  if (noPassword) {
+    ui.note(
+      "WARNING: --no-password generates an UNPROTECTED private key - anyone " +
+        "who copies the file can sign updates as you.",
+    );
+    // Piped stdin: the spike proved some CLI builds read stdin instead of
+    // honouring `-p ""`, so answer a possible prompt with an empty line.
+    if (ops.generate([...args, "-p", ""], "capture", "\n") !== 0) failed();
+    return;
+  }
+  if (!interactive)
+    throw new Error(
+      `${CONF_ERR_PREFIX}: no password source in a non-interactive shell - ` +
+        "pass --password, set TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or " +
+        "--no-password for a deliberately unprotected key",
+    );
+  if (ops.generate(args, "inherit") !== 0) failed();
 }
 
 export async function keysInit(opts: KeysInitOptions): Promise<number> {
@@ -181,8 +240,17 @@ export async function keysInit(opts: KeysInitOptions): Promise<number> {
   }
   assertSafeKeyPath(keyPath, opts.appDir, opts.force, ops);
 
+  if (opts.password !== undefined && opts.noPassword)
+    throw new Error(`${CONF_ERR_PREFIX}: pass --password or --no-password, not both`);
   const password = opts.password ?? env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
-  runGenerate(tauriCliEntry(opts.appDir), keyPath, password, ops);
+  runGenerate(
+    tauriCliEntry(opts.appDir),
+    keyPath,
+    password,
+    opts.noPassword,
+    opts.prompt !== undefined,
+    ops,
+  );
 
   const pubFile = `${keyPath}.pub`;
   if (!existsSync(pubFile))

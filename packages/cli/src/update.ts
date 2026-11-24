@@ -8,9 +8,19 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { x as untar } from "tar";
 import { loadTauriConfig, type TauriConfig } from "./config.js";
 import { ui } from "./ui/index.js";
 
@@ -206,6 +216,46 @@ function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/** The CFBundleShortVersionString inside a `<name>.app.tar.gz` updater
+ * artifact: the filename carries no version, so without this check a stale
+ * bundle (validly signed) would be published under the new version - and
+ * Macs would keep being re-offered the old build. Only the matching
+ * Contents/Info.plist entry is extracted; tauri writes it as XML. */
+export function appTarVersion(path: string, file: string): string {
+  const tmp = mkdtempSync(join(tmpdir(), "pylair-uptar-"));
+  try {
+    const plists: string[] = [];
+    try {
+      untar({
+        file: path,
+        cwd: tmp,
+        sync: true,
+        filter: (p) => /(^|\/)Contents\/Info\.plist$/.test(p),
+        onentry: (e) => {
+          if (e.type === "File") plists.push(e.path);
+        },
+      });
+    } catch (e) {
+      throw new Error(
+        `${file}: not a readable .app.tar.gz (${(e as Error).message}) - ` +
+          "was it produced by tauri bundle?",
+      );
+    }
+    for (const p of plists) {
+      const m = readFileSync(join(tmp, p), "utf-8").match(
+        /<key>\s*CFBundleShortVersionString\s*<\/key>\s*<string>\s*([^<]+?)\s*<\/string>/,
+      );
+      if (m) return m[1].trim();
+    }
+    throw new Error(
+      `${file}: no CFBundleShortVersionString in any Contents/Info.plist ` +
+        "inside the tarball - not a macOS app bundle?",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 /** Scan the bundle output for signed updater artifacts and write
  * `latest[-<channel>].json`. Returns the manifest path. Fails loudly on: no
  * artifacts, a missing `.sig`, artifacts whose embedded version disagrees
@@ -229,10 +279,17 @@ export function updateManifest(opts: UpdateManifestOptions): { file: string; pla
   const base = resolveBaseUrl(opts, tconf);
   const platforms: Record<string, { signature: string; url: string; sha256: string }> = {};
   for (const a of artifacts) {
-    if (a.version !== undefined && a.version !== version)
+    // macOS tarballs carry no version in the name - read the bundled
+    // Info.plist instead; other platforms carry it in the filename.
+    const darwin = a.platform.startsWith("darwin-");
+    const actual = darwin ? appTarVersion(a.path, a.file) : a.version;
+    if (actual !== undefined && actual !== version)
       throw new Error(
-        `artifact version mismatch: ${a.file} is ${a.version} but ` +
-          `tauri.conf.json says ${version} - rebuild the version you're shipping`,
+        `artifact version mismatch: ${a.file} ` +
+          (darwin
+            ? `bundles CFBundleShortVersionString "${actual}" `
+            : `is ${actual} `) +
+          `but tauri.conf.json says ${version} - rebuild the version you're shipping`,
       );
     const sig = `${a.path}.sig`;
     if (!existsSync(sig))
