@@ -5,6 +5,8 @@ name: u0-updater
 
 on:
   workflow_dispatch:
+  push:
+    branches: [u0-updater]
 
 jobs:
   u0-ubuntu:
