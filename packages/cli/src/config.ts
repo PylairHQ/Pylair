@@ -42,6 +42,9 @@ export interface TauriConfig {
   /** bundle.macOS.signingIdentity — a configured identity means Tauri
    * signs for real during bundling; pylair must not ad-hoc over it. */
   macSigningIdentity?: string;
+  /** plugins.updater — present exactly when the app is updater-enabled
+   * (decision 0011). Drives the build-time version-sync check. */
+  updater?: { pubkey?: string; endpoints?: string[] };
 }
 
 /** Parse [tool.pylair] with smol-toml — no Python interpreter required at
@@ -100,6 +103,7 @@ export function loadTauriConfig(appDir: string): TauriConfig {
     identifier: raw.identifier ?? "com.example.app",
     version: raw.version ?? "0.1.0",
     macSigningIdentity: raw.bundle?.macOS?.signingIdentity ?? undefined,
+    updater: raw.plugins?.updater ?? undefined,
   };
 }
 
