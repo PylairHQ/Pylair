@@ -363,7 +363,26 @@ Merged since rc.17 (d7daaaf):
   self-test check (same-pid reuse, POSIX interrupt survival vs
   Windows terminated+new-pid), the unmanaged `worker:<fn>` sweep
   diagnostic, the cold-vs-warm bench case with three-OS numbers in
-  `docs/performance.md`, and the docs pass.
+  `docs/performance.md`, and the docs pass. The check's POSIX side
+  later learned the contract's second verdict: silence past
+  `cancel_grace_ms` is the kill path by design (the verdict is
+  parent-side — a starved runner's event-loop lag is
+  indistinguishable from a stuck call), so POSIX accepts
+  `cancelled`-and-same-pid or `terminated`-and-new-pid and asserts
+  whichever aftermath the ack claims. A later macOS loop wedge
+  (`_queue.Empty` at the full hang guard, member absent from `ps`,
+  runtime loop parked in `select`) traced to a real kill-path bug:
+  a member exiting to a zombie makes `killpg` on its group raise
+  `PermissionError` — macOS differs from Linux (ESRCH) here — and it
+  escaped `_kill_proc`'s `ProcessLookupError`-only catches, the
+  exception handler's cleanup and the task itself, so the terminal
+  frame was never sent (a cancel surfaced as
+  `termination_in_progress`). Signal errors are now contained at every
+  `_killpg`/`proc.kill` site and the cleanup awaits before `_finish`
+  are guarded — a task can never end without a terminal.
+  `PYLAIR_KILLPG_FAULT=eperm` reproduces it anywhere — a test-only
+  fault hook, honoured only for that exact value, POSIX-only
+  (`_killpg` is never reached on Windows).
 - PR 148: #142 — the runtime entered drain but never exited on
   Windows + newest CPython: the tp-writer thread sits inside a
   synchronous `write()` on a pipe the host never drains, and

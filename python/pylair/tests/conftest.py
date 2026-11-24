@@ -23,8 +23,15 @@ class Runtime:
     def __init__(self, module: str = "testapp", env: dict | None = None):
         env = dict(os.environ) | (env or {})
         env.pop("PYTHONPATH", None)
+        # A SIGABRT to a wedged runtime dumps every thread's stack to its
+        # stderr — the flake-hunt diagnostics in test_warm._hang_dump rely
+        # on it. No effect on normal operation.
+        env["PYTHONFAULTHANDLER"] = "1"
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "pylair", module],
+            # _diag_run.py wraps `python -m pylair` (runpy, alter_sys —
+            # identical argv/env semantics) to add a SIGUSR1 coroutine-task
+            # dump for the warm-suite flake hunt.
+            [sys.executable, str(HERE / "_diag_run.py"), module],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -33,8 +40,11 @@ class Runtime:
         )
         self._q: queue.Queue = queue.Queue()
         self.stderr_lines: list[str] = []
-        threading.Thread(target=self._drain_stdout, daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self.io_error: str | None = None
+        self._stdout_t = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stdout_t.start()
+        self._stderr_t = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_t.start()
 
     def _drain_stdout(self) -> None:
         try:
@@ -46,6 +56,9 @@ class Runtime:
                 body = self.proc.stdout.read(n)
                 self._q.put(json.loads(body))
         except (OSError, ValueError) as e:
+            # The reader thread is now dead — every later frame is lost.
+            # Surface it on the next recv instead of starving the wait.
+            self.io_error = str(e)
             self._q.put({"__io_error__": str(e)})
 
     def _drain_stderr(self) -> None:
@@ -62,7 +75,10 @@ class Runtime:
         self.proc.stdin.flush()
 
     def recv(self, timeout: float = 10.0) -> dict:
-        return self._q.get(timeout=timeout)
+        msg = self._q.get(timeout=timeout)
+        if "__io_error__" in msg:
+            raise RuntimeError(f"runtime stdout reader died: {msg['__io_error__']}")
+        return msg
 
     def recv_until(self, pred, timeout: float = 10.0) -> dict:
         import time

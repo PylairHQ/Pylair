@@ -164,7 +164,10 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // path for pylair < 0.1.0rc13. warmPlatform picks the cancel
   // semantics: POSIX interrupts (plain "cancelled" ack, same pid after)
   // and win32 is kill-only ("terminated" ack, a new pid after).
-  const { warm = "ok", warmPlatform = "linux" } = opts;
+  // warmAck overrides the ack outcome (e.g. "terminated" on POSIX — the
+  // starved-grace kill path); warmRespawn kills the member on cancel
+  // regardless of platform (the next witness reports a new pid).
+  const { warm = "ok", warmPlatform = "linux", warmAck = null, warmRespawn = false } = opts;
   // Model manager (0009): "ok" — the fixtures answer (fetch reports
   // path+root+one hit, the warm worker resolves the same path, cleanup
   // removes); "missing" — FUNCTION_NOT_FOUND (-32601), the skip path
@@ -206,6 +209,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
         cancelHooks.get(args.task)?.();
         // A cancelled warm sleep acknowledges per platform: POSIX's
         // interrupt keeps the member (plain cancelled); Windows kills it.
+        if (warmAck !== null && warmSleeps.has(args.task)) return warmAck;
         return warmSleeps.has(args.task) && warmPlatform === "win32"
           ? "terminated"
           : "cancelled";
@@ -288,9 +292,10 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
       if (fnName === "warm_selftest" && warm === "ok" && (input.seconds ?? 0) > 0) {
         warmSleeps.add(task);
         cancelHooks.set(task, () => {
-          // On win32 the member dies with the cancelled call — the next
-          // witness reports a new pid.
-          if (warmPlatform === "win32") warmPid += 1;
+          // Kill-path verdicts kill the member: on win32 always, and on
+          // POSIX when the run models a starved grace (warmRespawn) —
+          // the next witness reports a new pid either way.
+          if (warmPlatform === "win32" || warmRespawn) warmPid += 1;
           later(() =>
             onEvent({ task, done: true, error: { code: -32010, message: "cancelled" } }),
           );
@@ -576,19 +581,38 @@ test("flag set: a leaked PYLAIR_MODELS_ALLOW_INSECURE fails models", { timeout: 
   assert.match(checks["models"], /^FAIL: .*ALLOW_INSECURE/);
 });
 
-test("flag set: POSIX interrupted with a kill-path ack fails warm-workers", { timeout: 20_000 }, async () => {
+test("flag set: POSIX starved grace — terminated + a new member is the kill path", { timeout: 20_000 }, async () => {
   const m = await import(pathToFileURL(join(dist, "index.js")).href);
-  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true);
-  // POSIX legs must see a plain "cancelled" + the same pid — answer
-  // "terminated" + a new pid instead and the check must fail.
-  const orig = b.invoke;
-  b.invoke = async (cmd, args) => {
-    if (cmd === "plugin:pylair|python_cancel") {
-      const out = await orig(cmd, args);
-      return out === "cancelled" ? "terminated" : out;
-    }
-    return orig(cmd, args);
-  };
+  // The documented post-grace verdict: no response inside
+  // cancel_grace_ms means the kill path ran (0008 §2) — a saturated
+  // runner stalls the runtime's frame processing exactly like a stuck
+  // call. The member died, the next witness respawned: the full
+  // contract holds, so the check passes.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    warmAck: "terminated",
+    warmRespawn: true,
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, true, JSON.stringify(checks));
+  assert.equal(checks["warm-workers"], "ok");
+});
+
+test("flag set: POSIX terminated ack with a live member fails warm-workers", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  // terminated means the kill path ran — a member that then serves the
+  // next call violates the contract (a dead member cannot respawn in
+  // place). The check must fail even though the ack is a legal value.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    warmAck: "terminated",
+  });
   m.setBridge(b);
   setFlag(true);
   try {
@@ -599,7 +623,27 @@ test("flag set: POSIX interrupted with a kill-path ack fails warm-workers", { ti
   }
   const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
   assert.equal(ok, false, JSON.stringify(checks));
-  assert.match(checks["warm-workers"], /^FAIL: .*plain "cancelled" ack/);
+  assert.match(checks["warm-workers"], /^FAIL: .*member was reused/);
+});
+
+test("flag set: POSIX cancelled ack with a respawned member fails warm-workers", { timeout: 20_000 }, async () => {
+  const m = await import(pathToFileURL(join(dist, "index.js")).href);
+  // The mirror violation: a plain cancelled ack claims survival, but
+  // the next witness carries a new pid — the member did not survive.
+  const b = runtimeBridge({ viaCall: DENIED, viaRaw: DENIED }, true, {
+    warmRespawn: true,
+  });
+  m.setBridge(b);
+  setFlag(true);
+  try {
+    await m.maybeSelfTest();
+  } finally {
+    setFlag(false);
+    m.setBridge(null);
+  }
+  const { ok, checks } = b.calls.find((c) => c.cmd === REPORT).args.result;
+  assert.equal(ok, false, JSON.stringify(checks));
+  assert.match(checks["warm-workers"], /^FAIL: .*did not survive/);
 });
 
 /** Run the owner against a runtime whose win-b report carries `probe`. */

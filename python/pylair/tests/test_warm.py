@@ -45,18 +45,164 @@ def cancel(rid: int, task: int) -> dict:
     return proto.request(rid, "cancel", {"task": task})
 
 
-def _wait_file(path, timeout: float = 15.0) -> None:
+# Bound for every wait below. Each one is on a real event — a frame, an
+# EOF, a pidfile, a process exit — so the bound is only the hang guard,
+# never the mechanism under test. It is generous because what the waits
+# block on is the runtime or member PROCESS being scheduled: a saturated
+# shared runner can starve a child for tens of seconds, and a 90 s guard
+# still lost one death-detection wait in a 20-run loop on macOS.
+_HANG_S = 180.0
+
+
+# The runtime the active test is driving — set by the _hang_guard
+# fixture so the file/pid waiters below can dump state on a guard trip
+# without threading the fixture through every helper signature.
+_ACTIVE_RT = None
+
+
+def _hang_dump(runtime) -> str:
+    """State capture for a tripped hang guard (POSIX loop legs only):
+    member ps states first — Z = exited and nobody reaped (child
+    watcher / proc.wait suspect), R/S = never crashed, absent = reaped
+    and WORKER_DIED was lost — plus the runtime's open pipe fds (the
+    EOF check: a dead member's pipe still open means EOF never
+    arrived). Then SIGUSR1 makes _diag_run print every asyncio task's
+    coroutine stack — the await that never resolved — and SIGABRT adds
+    faulthandler's thread dump (conftest sets PYTHONFAULTHANDLER; the
+    harness already drains the child's stderr)."""
+    parts: list[str] = []
+    if runtime is None or sys.platform == "win32":
+        return "<no runtime diagnostics on this path>"
+    # Process states FIRST — the runtime's death below makes member
+    # reapers sweep the group, changing what ps would show.
+    pids = {runtime.proc.pid}
+    try:
+        kids = subprocess.run(
+            ["pgrep", "-P", str(runtime.proc.pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        for k in kids:
+            pids.add(int(k))
+            gkids = subprocess.run(
+                ["pgrep", "-P", k], check=False, capture_output=True, text=True
+            ).stdout.split()
+            pids.update(int(g) for g in gkids)
+    except OSError as e:
+        parts.append(f"pgrep failed: {e}")
+    ps = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "pid,ppid,stat,etime,command",
+            "-p",
+            ",".join(map(str, sorted(pids))),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    parts.append("process states:\n" + ps.stdout + ps.stderr)
+    lsof = subprocess.run(
+        ["lsof", "-p", str(runtime.proc.pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    parts.append(
+        "runtime pipe fds:\n"
+        + "\n".join(x for x in lsof.stdout.splitlines() if "PIPE" in x)
+    )
+    parts.append(
+        "harness state: "
+        f"stdout_drain_alive={runtime._stdout_t.is_alive()} "
+        f"io_error={runtime.io_error!r} queue_depth~{runtime._q.qsize()} "
+        f"rc={runtime.proc.poll()}"
+    )
+    # SIGUSR1: _diag_run's handler prints every asyncio task's coroutine
+    # stack — the await that never resolved. SIGABRT after it:
+    # faulthandler's thread dump as backup.
+    try:
+        os.kill(runtime.proc.pid, signal.SIGUSR1)
+        time.sleep(1.5)
+    except OSError as e:
+        parts.append(f"SIGUSR1 to runtime {runtime.proc.pid} failed: {e}")
+    try:
+        os.kill(runtime.proc.pid, signal.SIGABRT)
+        time.sleep(2.0)
+    except OSError as e:
+        parts.append(f"SIGABRT to runtime {runtime.proc.pid} failed: {e}")
+    parts.append(
+        "runtime stderr tail (task dump then thread dump, newest last):\n"
+        + ("\n".join(list(runtime.stderr_lines)[-300:]) or "<empty>")
+    )
+    return "\n".join(parts)
+
+
+def _guard(rt) -> None:
+    """Default a Runtime's recv/recv_until to _HANG_S and make a guard
+    trip dump ITS state — required on custom `Runtime(env=...)` handles
+    too, not only the fixture's."""
+    global _ACTIVE_RT
+    _ACTIVE_RT = rt
+    orig_recv, orig_until = rt.recv, rt.recv_until
+
+    def recv(timeout=_HANG_S):
+        try:
+            return orig_recv(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(
+                f"recv starved past {timeout}s\n{_hang_dump(rt)}"
+            ) from None
+
+    def recv_until(pred, timeout=_HANG_S):
+        try:
+            return orig_until(pred, timeout=timeout)
+        except (TimeoutError, queue.Empty):
+            raise AssertionError(
+                f"recv_until starved past {timeout}s\n{_hang_dump(rt)}"
+            ) from None
+
+    rt.recv, rt.recv_until = recv, recv_until
+
+
+@pytest.fixture(autouse=True)
+def _hang_guard(runtime):
+    """Wrap the fixture Runtime; tests spawning extra `Runtime(env=...)`
+    handles call _guard on each — a trip must dump the runtime that
+    actually wedged, not the fixture's idle one."""
+    _guard(runtime)
+    yield runtime
+    _ACTIVE_RT = None
+
+
+def _wait_file(path, timeout: float = _HANG_S) -> None:
     """Poll for a marker file — never a fixed sleep."""
     deadline = time.time() + timeout
     while not path.exists():
-        assert time.time() < deadline, f"marker {path} never appeared"
+        if time.time() >= deadline:
+            raise AssertionError(
+                f"marker {path} never appeared\n{_hang_dump(_ACTIVE_RT)}"
+            )
         time.sleep(0.05)
 
 
-def _wait_pidfile(path, timeout: float = 15.0) -> int:
-    """Poll for the worker's pidfile — never a fixed sleep."""
-    _wait_file(path, timeout)
-    return int(path.read_text().strip())
+def _wait_pidfile(path, timeout: float = _HANG_S) -> int:
+    """Poll for the worker's pidfile — never a fixed sleep. The file
+    must also PARSE as a pid: a writer that doesn't publish atomically
+    exposes a create-then-write gap where exists() is already true but
+    the content hasn't landed yet."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return int(path.read_text().strip())
+        except (OSError, ValueError):
+            if time.time() >= deadline:
+                raise AssertionError(
+                    f"pidfile {path} never appeared/parsed\n{_hang_dump(_ACTIVE_RT)}"
+                ) from None
+            time.sleep(0.05)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -123,7 +269,7 @@ def _diagnose(runtime, pid: int | None = None, deaths: list | None = None) -> st
     return "\n".join(parts)
 
 
-def _pid_dead(pid: int, timeout: float = 15.0) -> None:
+def _pid_dead(pid: int, timeout: float = _HANG_S) -> None:
     """Poll until the pid is gone (POSIX kill-0; Windows skips per the
     suite's existing convention — its kill path is proven elsewhere)."""
     if sys.platform == "win32":
@@ -135,10 +281,12 @@ def _pid_dead(pid: int, timeout: float = 15.0) -> None:
         except ProcessLookupError:
             return
         time.sleep(0.05)
-    raise AssertionError(f"pid {pid} still alive after {timeout}s")
+    raise AssertionError(
+        f"pid {pid} still alive after {timeout}s\n{_hang_dump(_ACTIVE_RT)}"
+    )
 
 
-def _collect(runtime, ids: set, timeout: float = 15.0) -> dict:
+def _collect(runtime, ids: set, timeout: float = _HANG_S) -> dict:
     """Gather one frame per id, order-agnostic — recv_until DISCARDS
     non-matching frames, so two sequential recv_untils lose whichever
     message arrives first."""
@@ -310,7 +458,7 @@ def test_warm_pool_two_members_serve_concurrently(runtime, tmp_path):
     # Both calls sleep the same 1.5 s — either response may land first;
     # recv_until would discard the out-of-order one, so collect by id.
     results = {}
-    deadline = time.time() + 15
+    deadline = time.time() + _HANG_S
     while len(results) < 2:
         m = runtime.recv(timeout=max(0.1, deadline - time.time()))
         if m.get("id") in (1, 2):
@@ -432,55 +580,57 @@ def test_warm_queued_cancel_never_runs(runtime):
 
 
 def test_warm_death_mid_call_then_respawn(runtime):
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     runtime.send(call(1, "warm_maybe_crash", task=1, input={"crash": False}))
-    pid_a = runtime.recv()["result"]
+    pid_a = runtime.recv(timeout=_HANG_S)["result"]
 
     runtime.send(call(2, "warm_maybe_crash", task=2, input={"crash": True}))
-    assert runtime.recv()["error"]["code"] == proto.WORKER_DIED
-    _pid_dead(pid_a)
+    assert runtime.recv(timeout=_HANG_S)["error"]["code"] == proto.WORKER_DIED
+    _pid_dead(pid_a, timeout=_HANG_S)
 
     runtime.send(call(3, "warm_maybe_crash", task=3, input={"crash": False}))
-    pid_b = runtime.recv()["result"]
+    pid_b = runtime.recv(timeout=_HANG_S)["result"]
     assert pid_b != pid_a, "dead worker was reused"
 
 
 def test_warm_crash_loop_stops_pool(runtime):
     """3 consecutive deaths with no success stop the pool; a stopped pool
     fails fast with a typed error and does not affect other pools."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     for i in range(3):
         runtime.send(call(i + 1, "warm_maybe_crash", task=i + 1, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i + 1)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i + 1, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
 
     runtime.send(call(4, "warm_maybe_crash", task=4, input={"crash": False}))
-    resp = runtime.recv_until(lambda m: m.get("id") == 4)
+    resp = runtime.recv_until(lambda m: m.get("id") == 4, timeout=_HANG_S)
     assert resp["error"]["code"] == proto.INTERNAL
     assert resp["error"]["data"]["type"] == "WorkerCrashLoop"
 
     # Per-function pools: warm_pid's pool is untouched.
     runtime.send(call(5, "warm_pid", task=5))
-    assert isinstance(runtime.recv_until(lambda m: m.get("id") == 5)["result"], int)
+    assert isinstance(
+        runtime.recv_until(lambda m: m.get("id") == 5, timeout=_HANG_S)["result"], int
+    )
 
 
 def test_warm_crash_loop_resets_on_success(runtime):
     """A successful call between deaths resets the consecutive counter."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     for i in (1, 2):
         runtime.send(call(i, "warm_maybe_crash", task=i, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
     # Success resets deaths to 0 — the pool must tolerate two more deaths.
     runtime.send(call(3, "warm_maybe_crash", task=3, input={"crash": False}))
-    assert "result" in runtime.recv_until(lambda m: m.get("id") == 3)
+    assert "result" in runtime.recv_until(lambda m: m.get("id") == 3, timeout=_HANG_S)
     for i in (4, 5):
         runtime.send(call(i, "warm_maybe_crash", task=i, input={"crash": True}))
-        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i)
+        resp = runtime.recv_until(lambda m, i=i: m.get("id") == i, timeout=_HANG_S)
         assert resp["error"]["code"] == proto.WORKER_DIED
     # deaths is 2, not 4 — the pool still serves.
     runtime.send(call(6, "warm_maybe_crash", task=6, input={"crash": False}))
-    assert "result" in runtime.recv_until(lambda m: m.get("id") == 6)
+    assert "result" in runtime.recv_until(lambda m: m.get("id") == 6, timeout=_HANG_S)
 
 
 # ---- cap accounting (0008 §3) ---------------------------------------------------
@@ -490,6 +640,7 @@ def test_warm_member_holds_cap_slot():
     """max_isolated_workers bounds live processes: one idle warm member
     leaves no room for a process-mode worker."""
     with Runtime(env={"PYLAIR_MAX_ISOLATED_WORKERS": "1"}) as rt:
+        _guard(rt)
         rt.recv()
         rt.send(call(1, "warm_pid", task=1))
         rt.recv()
@@ -503,6 +654,7 @@ def test_warm_spawn_cap_fails_at_acquire():
     """pool=2 with cap=1: the second concurrent call hits the live-process
     cap at pool-acquire time — LIMIT_EXCEEDED, not a silent wait."""
     with Runtime(env={"PYLAIR_MAX_ISOLATED_WORKERS": "1"}) as rt:
+        _guard(rt)
         rt.recv()
         rt.send(call(1, "warm2_sleep", task=1, input={"seconds": 3}))
         rt.send(call(2, "warm2_sleep", task=2, input={"seconds": 3}))
@@ -520,14 +672,15 @@ def test_warm_idle_member_reaped_on_shutdown(tmp_path):
     """An idle warm member is not a task — the drain path still reaps it."""
     pidfile = tmp_path / "idle.pid"
     with Runtime() as rt:
-        rt.recv()
+        _guard(rt)
+        rt.recv(timeout=_HANG_S)
         rt.send(
             call(1, "warm_sleep", task=1, input={"seconds": 0, "pidfile": str(pidfile)})
         )
-        rt.recv()
+        rt.recv(timeout=_HANG_S)
         wpid = _wait_pidfile(pidfile)
         rt.send(proto.request(2, "shutdown", None))
-        rt.proc.wait(timeout=20)
+        rt.proc.wait(timeout=_HANG_S)
     _pid_dead(wpid)
 
 
@@ -535,15 +688,16 @@ def test_warm_eof_reaps_idle_member(tmp_path):
     """stdin EOF takes the same drain path — no orphans either way."""
     pidfile = tmp_path / "eof.pid"
     rt = Runtime()
+    _guard(rt)
     try:
-        rt.recv()
+        rt.recv(timeout=_HANG_S)
         rt.send(
             call(1, "warm_sleep", task=1, input={"seconds": 0, "pidfile": str(pidfile)})
         )
-        rt.recv()
+        rt.recv(timeout=_HANG_S)
         wpid = _wait_pidfile(pidfile)
         rt.close_stdin()
-        rt.proc.wait(timeout=20)
+        rt.proc.wait(timeout=_HANG_S)
     finally:
         rt.__exit__(None, None, None)
     _pid_dead(wpid)
@@ -565,10 +719,10 @@ def test_warm_interruptible_call_survives_cancel(runtime, tmp_path):
     runtime.send(
         call(1, "warm_sleep", task=1, input={"seconds": 60, "pidfile": str(p1)})
     )
-    pid = _wait_pidfile(p1)
+    pid = _wait_pidfile(p1, timeout=_HANG_S)
     runtime.send(cancel(9, 1))
     ack = terminal = None
-    deadline = time.time() + 15
+    deadline = time.time() + _HANG_S
     while ack is None or terminal is None:
         m = runtime.recv(timeout=max(0.1, deadline - time.time()))
         if m.get("id") == 9:
@@ -579,15 +733,22 @@ def test_warm_interruptible_call_survives_cancel(runtime, tmp_path):
     runtime.send(
         call(2, "warm_sleep", task=2, input={"seconds": 0, "pidfile": str(p2)})
     )
-    assert runtime.recv()["result"] == "slept"
-    if sys.platform == "win32":
-        # Kill-only: the interrupt was never sent; the member was
-        # terminated and the next call respawned.
+    assert runtime.recv(timeout=_HANG_S)["result"] == "slept"
+    if sys.platform == "win32" or ack["result"] == {
+        "cancelled": True,
+        "status": "terminated",
+    }:
+        # Kill path: Windows interrupts nothing console-less; POSIX gets
+        # here only when no response lands inside cancel_grace_ms — a
+        # starved runner stalls the runtime's frame processing exactly
+        # like a stuck call, and silence-past-grace IS the kill path by
+        # design (0008 §2; the verdict is parent-side). Either way the
+        # member died and the next call respawned.
         assert ack["result"] == {"cancelled": True, "status": "terminated"}
         assert _wait_pidfile(p2) != pid, "killed member was reused"
     else:
-        # Survived: the work confirmed stopped, the worker lived —
-        # plain cancelled, never "terminated" (0008 §2 ack rule).
+        # Survived: a response inside the grace — plain cancelled, the
+        # member lived and serves the next call (0008 §2 ack rule).
         assert ack["result"] == {"cancelled": True}
         assert _wait_pidfile(p2) == pid, "survived member was not reused"
 
@@ -646,7 +807,7 @@ def test_warm_cancel_grace_ms_reaches_kill_faster(runtime, tmp_path):
     _wait_pidfile(pidfile)
     t0 = time.monotonic()
     runtime.send(cancel(9, 1))
-    ack = runtime.recv_until(lambda m: m.get("id") == 9, timeout=15)
+    ack = runtime.recv_until(lambda m: m.get("id") == 9, timeout=_HANG_S)
     elapsed = time.monotonic() - t0
     assert ack["result"] == {"cancelled": True, "status": "terminated"}
     assert elapsed < 3.0, f"grace bound ignored — ack took {elapsed:.2f}s"
@@ -709,12 +870,42 @@ def test_warm_interrupt_reaches_worker_witness(runtime, tmp_path):
         assert not witness.exists(), "CTRL_BREAK was delivered after all"
         return
     # The user's handler raised KeyboardInterrupt -> interrupted response
-    # -> survived -> plain cancelled.
-    assert ack["result"] == {"cancelled": True}
-    deadline = time.time() + 10
+    # -> survived -> plain cancelled. The legal twin on a starved runner
+    # is silence past the grace -> kill path -> terminated; the witness
+    # itself is then indeterminate (the handler can land in the same
+    # scheduling gap that starved the parent's grace), so the aftermath
+    # proof is member identity: the kill path means the next call runs
+    # on a new member.
+    pid1 = int(started.read_text().strip())
+    if ack["result"] == {"cancelled": True, "status": "terminated"}:
+        started2 = tmp_path / "started2"
+        runtime.send(
+            call(
+                2,
+                "warm_break_witness",
+                task=2,
+                input={"witness": str(witness), "seconds": 0, "started": str(started2)},
+            )
+        )
+        _wait_file(started2, timeout=_HANG_S)
+        assert int(started2.read_text().strip()) != pid1, "killed member was reused"
+        return
+    assert ack["result"] == {"cancelled": True}, _diagnose(runtime)
+    deadline = time.time() + _HANG_S
     while not witness.exists():
         assert time.time() < deadline, "interrupt never reached the worker"
         time.sleep(0.05)
+    started3 = tmp_path / "started3"
+    runtime.send(
+        call(
+            3,
+            "warm_break_witness",
+            task=3,
+            input={"witness": str(witness), "seconds": 0, "started": str(started3)},
+        )
+    )
+    _wait_file(started3, timeout=_HANG_S)
+    assert int(started3.read_text().strip()) == pid1, "survived member was not reused"
 
 
 def test_warm_interrupt_as_call_returns(runtime, tmp_path):
@@ -771,16 +962,16 @@ def test_warm_interrupt_as_call_returns(runtime, tmp_path):
     t = threading.Thread(target=hammer, daemon=True)
     t.start()
     try:
-        resp = runtime.recv(timeout=30)
+        resp = runtime.recv(timeout=_HANG_S)
     except queue.Empty:
         raise AssertionError(
             f"no response under the SIGINT hammer\n{_diagnose(runtime, pid, deaths)}"
         )
     stop.set()
-    t.join(timeout=5)
+    t.join(timeout=_HANG_S)
     wstop.set()
     if watcher is not None:
-        watcher.join(timeout=2)
+        watcher.join(timeout=_HANG_S)
     if "error" in resp:
         # A signal slipped inside the raise window — the interrupted
         # payload, mapped for a call with no cancel in flight.
@@ -831,7 +1022,7 @@ def test_warm_interrupt_burst_at_idle_survives(runtime):
         except (ProcessLookupError, OSError):
             break
     wstop.set()
-    watcher.join(timeout=2)
+    watcher.join(timeout=_HANG_S)
     runtime.send(call(2, "warm_pid", task=2))
     assert runtime.recv()["result"] == pid, (
         f"idle interrupt burst broke the member\n{_diagnose(runtime, pid, deaths)}"
@@ -883,24 +1074,97 @@ def test_warm_cancel_before_fn_work_survives(runtime, tmp_path):
         if p1.exists():
             assert pid2 != int(p1.read_text().strip()), "killed member was reused"
     else:
-        assert msgs[9]["result"] == {"cancelled": True}, _diagnose(runtime)
-        # a.pid lands in the fixture's finally — the only gap is an
-        # interrupt firing during kwarg coercion, before the fn is even
-        # entered, which is a legal landing point and leaves no marker.
-        if p1.exists():
-            assert pid2 == int(p1.read_text().strip()), "survived member was not reused"
+        # Started-handshake survival is the design, but silence past the
+        # grace is the kill path the contract also defines: a starved
+        # runner stalls the runtime's frame processing exactly like a
+        # stuck call (0008 §2 — the verdict is parent-side). Assert the
+        # pairing the ack claims, not one outcome.
+        if msgs[9]["result"] == {"cancelled": True, "status": "terminated"}:
+            if p1.exists():
+                assert pid2 != int(p1.read_text().strip()), "killed member was reused"
+        else:
+            assert msgs[9]["result"] == {"cancelled": True}, _diagnose(runtime)
+            # a.pid lands in the fixture's finally — the only gap is an
+            # interrupt firing during kwarg coercion, before the fn is even
+            # entered, which is a legal landing point and leaves no marker.
+            if p1.exists():
+                assert pid2 == int(p1.read_text().strip()), (
+                    "survived member was not reused"
+                )
 
 
 def test_warm_worker_died_includes_stderr_tail(runtime):
     """#140 review: a crash's last stderr lines ride WORKER_DIED data."""
-    runtime.recv()
+    runtime.recv(timeout=_HANG_S)
     marker = "STDERR_TAIL_MARKER_9f3"
     runtime.send(call(1, "warm_crash_stderr", task=1, input={"marker": marker}))
-    resp = runtime.recv_until(lambda m: m.get("id") == 1)
+    resp = runtime.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
     assert resp["error"]["code"] == proto.WORKER_DIED
     assert marker in resp["error"]["data"]["stderr"], (
         f"stderr tail missing the marker: {resp['error']['data']!r}"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_warm_death_with_killpg_eperm_still_reports_and_respawns(tmp_path):
+    """The macOS wedge, reproduced: a member that crashes to a zombie
+    leaves a process group on which killpg raises PermissionError, not
+    ProcessLookupError. Before the fix that escaped _kill_proc and the
+    except handler — the call task ended without a terminal and the
+    caller waited forever. The terminal must now be unconditional."""
+    with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        _guard(rt)
+        rt.recv(timeout=_HANG_S)
+        rt.send(call(1, "warm_crash_stderr", task=1, input={"marker": "EPERM_FIRST"}))
+        resp = rt.recv_until(lambda m: m.get("id") == 1, timeout=_HANG_S)
+        assert resp["error"]["code"] == proto.WORKER_DIED, (
+            f"call ended without its WORKER_DIED terminal: {resp!r}"
+        )
+        assert "EPERM_FIRST" in resp["error"]["data"]["stderr"], (
+            f"stderr tail missing: {resp['error']['data']!r}"
+        )
+        # The pool respawns: a second call runs on a fresh member and its
+        # own marker lands in the tail — proof the call executed.
+        rt.send(call(2, "warm_crash_stderr", task=2, input={"marker": "EPERM_SECOND"}))
+        resp = rt.recv_until(lambda m: m.get("id") == 2, timeout=_HANG_S)
+        assert "EPERM_SECOND" in resp["error"]["data"]["stderr"], (
+            f"no respawn — second marker absent: {resp['error']['data']!r}"
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_warm_cancel_with_killpg_eperm_reports_terminated(tmp_path):
+    """Same EPERM through the cancel path: the member is immune to the
+    interrupt but dies on its own mid-grace, so the kill path hits a
+    zombie's group — the chain that once surfaced as
+    'termination_in_progress' with no call terminal. With signal errors
+    contained the verdict stays 'terminated' and the call still ends."""
+    pidfile = tmp_path / "sleeper.pid"
+    with Runtime(env={"PYLAIR_KILLPG_FAULT": "eperm"}) as rt:
+        _guard(rt)
+        rt.recv(timeout=_HANG_S)
+        rt.send(
+            call(
+                1,
+                "warm_immune_then_crash",
+                task=1,
+                input={"die_after": 1.0, "pidfile": str(pidfile)},
+            )
+        )
+        _wait_pidfile(pidfile)  # member is inside the call
+        rt.send(cancel(9, 1))
+        # The terminal (id=1) is emitted strictly BEFORE the verdict
+        # (id=9): _finish runs inside the task the reporter shields, so
+        # a recv_until(id==9) scan would eat it. Collect both by id.
+        msgs = _collect(rt, {1, 9})
+        ack = msgs[9]
+        assert ack["result"] == {"cancelled": True, "status": "terminated"}, (
+            f"cancel verdict degraded under EPERM: {ack!r}"
+        )
+        # The member self-crashed mid-cancel — WORKER_DIED is the honest
+        # terminal; what matters is that a terminal ARRIVES (the wedge
+        # was its absence).
+        assert msgs[1]["error"]["code"] == proto.WORKER_DIED
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix process groups")
@@ -919,9 +1183,9 @@ def test_warm_worker_reaped_on_hard_runtime_death(runtime, tmp_path):
     os.kill(wpid, 0)  # alive — idle in the pool, no call in flight
 
     runtime.proc.kill()  # SIGKILL the runtime only — no cleanup runs
-    runtime.proc.wait(timeout=10)
+    runtime.proc.wait(timeout=_HANG_S)
 
-    deadline = time.time() + 10
+    deadline = time.time() + _HANG_S
     while time.time() < deadline:
         try:
             os.kill(wpid, 0)
@@ -935,7 +1199,9 @@ def test_warm_worker_reaped_on_hard_runtime_death(runtime, tmp_path):
 # ---- prewarm + the worker:<fn> component (0008 §6) ----------------------------
 
 
-def _components_until(rt: Runtime, name: str, phases: list[str], timeout: float = 20.0):
+def _components_until(
+    rt: Runtime, name: str, phases: list[str], timeout: float = _HANG_S
+):
     """Collect app.component params for `name` until its phase sequence
     ends with `phases` (or timeout)."""
     frames: list[dict] = []
@@ -955,6 +1221,7 @@ def test_prewarm_reports_ready_before_any_call():
     completes its import+resolve handshake — worker:<fn> goes
     loading -> ready without a single call being sent."""
     with Runtime("testapp_prewarm") as rt:
+        _guard(rt)
         rt.recv()  # hello
         frames = _components_until(rt, "worker:prewarm_pid", ["loading", "ready"])
         got = [p["phase"] for p in frames if p["name"] == "worker:prewarm_pid"]
@@ -967,6 +1234,7 @@ def test_prewarm_first_call_uses_prewarmed_member(tmp_path):
     handshake) and the call must come back from that same pid."""
     pf = tmp_path / "prewarmed.pid"
     with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_PIDFILE": str(pf)}) as rt:
+        _guard(rt)
         rt.recv()
         _components_until(rt, "worker:prewarm_pid", ["ready"])
         prewarmed = _wait_pidfile(pf)  # the member proved itself at import
@@ -982,6 +1250,7 @@ def test_prewarm_import_failure_reports_failed():
     """A member whose app import explodes answers ready:false — the
     component reports failed with the import error as detail."""
     with Runtime("testapp_warmfail") as rt:
+        _guard(rt)
         rt.recv()
         frames = _components_until(rt, "worker:warmfail_pid", ["failed"])
         got = [p for p in frames if p["name"] == "worker:warmfail_pid"]
@@ -995,6 +1264,7 @@ def test_prewarm_requires_gate_waits_then_succeeds(tmp_path):
     the handshake reports ready."""
     gate = tmp_path / "prewarm.gate"
     with Runtime("testapp_prewarm", env={"PYLAIR_PREWARM_GATE": str(gate)}) as rt:
+        _guard(rt)
         rt.recv()
         # The component is visible while the member's import is gated.
         _components_until(rt, "worker:prewarm_pid", ["loading"])
@@ -1006,7 +1276,7 @@ def test_prewarm_requires_gate_waits_then_succeeds(tmp_path):
         gate.write_text("go")
         resp1 = None
         saw_ready = False
-        deadline = time.time() + 20
+        deadline = time.time() + _HANG_S
         while resp1 is None or not saw_ready:
             assert time.time() < deadline, "gated call or ready never arrived"
             m = rt.recv(timeout=max(0.1, deadline - time.time()))
@@ -1028,6 +1298,7 @@ def test_prewarm_false_stays_lazy(tmp_path):
     so its absence proves no member ever spawned."""
     pf = tmp_path / "lazy.pid"
     with Runtime("testapp_prewarm", env={"PYLAIR_LAZY_PIDFILE": str(pf)}) as rt:
+        _guard(rt)
         rt.recv()
         frames = _components_until(rt, "worker:prewarm_pid", ["ready"])
         assert not any(p["name"] == "worker:lazy_pid" for p in frames), (

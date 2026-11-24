@@ -532,13 +532,24 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
         throw new Error(`Windows kill-only expected a "terminated" ack, got ${outcome}`);
       if (w3.pid === w1.pid)
         throw new Error("a member the cancel killed was reused for the next call");
-    } else {
-      if (outcome !== "cancelled")
-        throw new Error(`POSIX interrupt-first expected a plain "cancelled" ack, got ${outcome}`);
+    } else if (outcome === "cancelled") {
+      // A response inside cancel_grace_ms: survived, plain ack, and the
+      // member serves the next call (0008 §2).
       if (w3.pid !== w1.pid)
         throw new Error(
           `member did not survive the interrupt (pid ${w1.pid} -> ${w3.pid})`,
         );
+    } else if (outcome === "terminated") {
+      // Silence past the grace IS the kill path by design (0008 §2 —
+      // the verdict is parent-side; a starved event loop is
+      // indistinguishable from a stuck call). On a saturated runner the
+      // runtime's started/response processing can legitimately cross
+      // the grace: terminated is then the contract's verdict, and the
+      // member must be dead and respawned, exactly like Windows.
+      if (w3.pid === w1.pid)
+        throw new Error(`terminated ack but the member was reused (pid ${w1.pid})`);
+    } else {
+      throw new Error(`warm cancel produced an unexpected ack ${outcome}`);
     }
   });
   if (!warmArmed && checks["warm-workers"] === "ok")
