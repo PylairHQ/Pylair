@@ -75,9 +75,11 @@ fn refuse_translocated() -> Result<(), ErrorObj> {
 
 /// The install location the watchdog will restore to (§2): the
 /// AppImage path when running from one, the `.app` bundle on macOS,
-/// the exe's directory elsewhere. `install_path` in pending.json must
-/// equal the watchdog's own resolution of this — a mismatch aborts the
-/// restore rather than writing into the wrong place.
+/// the exe itself on Windows (the unit NSIS reinstalls — the restore
+/// waits for it to reappear and the relaunch spawns it), the exe's
+/// directory elsewhere. `install_path` in pending.json must equal the
+/// watchdog's own resolution of this — a mismatch aborts the restore
+/// rather than writing into the wrong place.
 fn install_path() -> Result<PathBuf, ErrorObj> {
     if let Ok(appimage) = std::env::var("APPIMAGE") {
         if !appimage.is_empty() {
@@ -99,6 +101,11 @@ fn install_path() -> Result<PathBuf, ErrorObj> {
             return Ok(app.to_path_buf());
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(exe)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     exe.parent().map(Path::to_path_buf).ok_or_else(|| {
         err(
             codes::NOT_UPDATABLE,
@@ -239,9 +246,17 @@ async fn cache_current_artifact<R: Runtime>(
     })?;
     // restore_update takes the full manifest, re-validates it and
     // picks the entry for the current target; download() verifies
-    // signature + hash against it before returning bytes.
+    // signature + hash against it before returning bytes. The
+    // comparator MUST be equality: upstream's default is `version >
+    // current`, under which the running version's own manifest is
+    // never "an update" and the lookup returns None (found by the
+    // PR-4 acceptance leg). A comparator the app set is overridden
+    // here deliberately — the rollback manifest is defined as the
+    // current version's own latest.json (§6).
     let updater = app
-        .updater()
+        .updater_builder()
+        .version_comparator(|current, release| release.version == current)
+        .build()
         .map_err(|e| err(codes::CACHE, format!("updater unavailable: {e}")))?;
     let rollback = updater
         .restore_update(body)
