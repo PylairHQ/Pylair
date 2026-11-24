@@ -648,9 +648,11 @@ fn linux_rollback_replaces_the_appimage_and_relaunches() {
     };
     drop(hooks);
     // …but the REAL default restore is what this test exercises.
-    let mut hooks = Hooks::default();
-    hooks.sleep = Box::new(|ms| std::thread::sleep(Duration::from_millis(ms.min(4))));
-    hooks.platform = Platform::Posix;
+    let hooks = Hooks {
+        sleep: Box::new(|ms| std::thread::sleep(Duration::from_millis(ms.min(4)))),
+        platform: Platform::Posix,
+        ..Default::default()
+    };
     let v = run(&args(&f), &keys.pubkey_b64, &hooks);
     match v {
         Verdict::RolledBack { reason } => assert_eq!(reason, "no_sign_of_life"),

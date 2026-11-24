@@ -521,13 +521,16 @@ fn default_relaunch(target: &Path) -> Result<(), String> {
     let exe = relaunch_target(target);
     #[cfg(not(target_os = "macos"))]
     let exe = target;
+    // The error path names the resolved target — capture it before
+    // Command::new moves `exe` (an owned PathBuf on macOS).
+    let exe_disp = exe.display().to_string();
     std::process::Command::new(exe)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("relaunch {}: {e}", exe.display()))
+        .map_err(|e| format!("relaunch {exe_disp}: {e}"))
 }
 
 // ---- the verdict --------------------------------------------------------------
