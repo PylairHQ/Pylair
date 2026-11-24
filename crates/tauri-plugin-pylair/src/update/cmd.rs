@@ -77,9 +77,10 @@ fn refuse_translocated() -> Result<(), ErrorObj> {
 /// AppImage path when running from one, the `.app` bundle on macOS,
 /// the exe itself on Windows (the unit NSIS reinstalls — the restore
 /// waits for it to reappear and the relaunch spawns it), the exe's
-/// directory elsewhere. `install_path` in pending.json must equal the
-/// watchdog's own resolution of this — a mismatch aborts the restore
-/// rather than writing into the wrong place.
+/// directory elsewhere (macOS dev builds outside a bundle included).
+/// `install_path` in pending.json must equal the watchdog's own
+/// resolution of this — a mismatch aborts the restore rather than
+/// writing into the wrong place.
 fn install_path() -> Result<PathBuf, ErrorObj> {
     if let Ok(appimage) = std::env::var("APPIMAGE") {
         if !appimage.is_empty() {
@@ -93,25 +94,25 @@ fn install_path() -> Result<PathBuf, ErrorObj> {
         )
     })?;
     #[cfg(target_os = "macos")]
+    if let Some(app) = exe
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
     {
-        if let Some(app) = exe
-            .ancestors()
-            .find(|p| p.extension().is_some_and(|e| e == "app"))
-        {
-            return Ok(app.to_path_buf());
-        }
+        return Ok(app.to_path_buf());
     }
     #[cfg(target_os = "windows")]
-    {
-        Ok(exe)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    exe.parent().map(Path::to_path_buf).ok_or_else(|| {
-        err(
-            codes::NOT_UPDATABLE,
-            "cannot resolve install location from the running executable",
-        )
-    })
+    let install = exe;
+    #[cfg(not(target_os = "windows"))]
+    let install = exe
+        .parent()
+        .ok_or_else(|| {
+            err(
+                codes::NOT_UPDATABLE,
+                "cannot resolve install location from the running executable",
+            )
+        })?
+        .to_path_buf();
+    Ok(install)
 }
 
 /// The `Update` stashed by check is taken out while in use and put
