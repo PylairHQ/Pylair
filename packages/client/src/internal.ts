@@ -21,6 +21,10 @@ export const CMD = {
   state: "plugin:pylair|python_state",
   health: "plugin:pylair|python_health",
   shutdown: "plugin:pylair|python_shutdown",
+  updateCheck: "plugin:pylair|python_update_check",
+  updateDownload: "plugin:pylair|python_update_download",
+  updateInstall: "plugin:pylair|python_update_install",
+  updateRelaunch: "plugin:pylair|python_update_relaunch",
 } as const;
 
 // ---- bridge management -----------------------------------------------------
