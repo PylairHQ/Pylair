@@ -52,6 +52,7 @@ async fn self_test_call(spec: SpawnSpec, origin: &str) -> i32 {
                 RuntimeEvent::Exposes(_) => {}
                 RuntimeEvent::HealthChanged(_) => {}
                 RuntimeEvent::AppChanged(_) => {}
+                RuntimeEvent::AppProgress(_) => {}
             }
         }
     });

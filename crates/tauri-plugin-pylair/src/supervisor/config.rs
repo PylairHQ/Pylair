@@ -51,6 +51,11 @@ pub enum RuntimeEvent {
     /// §5): `{version, generation, name, phase}` — one emit per
     /// transition, never per progress tick.
     AppChanged(Value),
+    /// Every valid `app.component` report (decision 0011 §2): the
+    /// update gate turns these into `progress.json` heartbeats for the
+    /// watchdog — never emitted to webviews (AppChanged is their
+    /// surface).
+    AppProgress(Value),
 }
 
 #[derive(Debug, Clone, Default)]
