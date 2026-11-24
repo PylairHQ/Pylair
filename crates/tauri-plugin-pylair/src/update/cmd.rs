@@ -276,38 +276,15 @@ async fn cache_current_artifact<R: Runtime>(
     Ok((path, sha256, sig))
 }
 
-/// Copy the running exe into `updater-state/cache/` and spawn it
-/// detached in watchdog mode (argv only, never env — §1). The copy
-/// lives outside the install dir so an in-place install can't lock or
-/// replace it; it IS the app binary, so the trust anchor (compiled-in
-/// `plugins.updater.pubkey`) travels with it (§2). Stale copies from
-/// older windows are swept best-effort.
+/// Stage the watchdog binary outside the install dir and spawn it
+/// detached in watchdog mode (argv only, never env — §1). Windows and
+/// macOS run a state-dir copy of the running exe; Linux runs the
+/// cached rollback AppImage itself (self-contained libs — a bare exe
+/// copy could not start). Either way the watchdog IS the app binary,
+/// so the trust anchor (compiled-in `plugins.updater.pubkey`) travels
+/// with it (§2/§6).
 fn spawn_watchdog(gate: &UpdateGate, p: &PendingFile) -> Result<(), ErrorObj> {
-    let exe = std::env::current_exe()
-        .map_err(|e| err(codes::INSTALL, format!("resolve current exe: {e}")))?;
-    let ext = exe
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    let bin = gate
-        .dir
-        .join(CACHE_DIR)
-        .join(format!("upwatch-{}{ext}", p.session_id));
-    // Sweep stale watchdog copies — leftover exes from finished
-    // windows are dead weight (locked files just skip).
-    if let Ok(entries) = std::fs::read_dir(gate.dir.join(CACHE_DIR)) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("upwatch-") && e.path() != bin {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
-    std::fs::copy(&exe, &bin).map_err(|e| {
-        err(
-            codes::INSTALL,
-            format!("stage watchdog {} -> {}: {e}", exe.display(), bin.display()),
-        )
-    })?;
+    let bin = super::upwatch::stage_binary(&gate.dir, p).map_err(|e| err(codes::INSTALL, e))?;
     let args = super::upwatch::spawn_args(&gate.dir, &p.session_id, Path::new(&p.install_path));
     std::process::Command::new(&bin)
         .args(&args)

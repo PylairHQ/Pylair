@@ -1,18 +1,22 @@
 //! The update watchdog (decision 0011 §2) — the app binary re-entered
 //! in a hidden mode.
 //!
-//! `python_update_install` copies the running exe into the state dir
-//! and spawns the copy detached as
+//! `python_update_install` stages a watchdog binary outside the
+//! install dir and spawns it detached as
 //! `app --pylair-upwatch --state-dir <dir> --session-id <id>
 //! --install-path <path>` — argv only, never env (the §1 Windows
 //! finding). The template's `run()` calls [`entry`] before the Tauri
-//! builder, so watchdog mode never touches GUI machinery.
+//! builder, so watchdog mode never touches GUI machinery (no webview,
+//! no runtime init — argv + the embedded conf + file I/O only).
 //!
 //! Why the app binary doubles as the watchdog: the §2 trust anchor is a
 //! pubkey *compiled into the watchdog binary* — the app's own embedded
 //! `plugins.updater.pubkey` is exactly that, and the binary is already
-//! signed and shipped inside the bundle. The running copy lives outside
-//! the install dir so an in-place reinstall can't lock or replace it.
+//! signed and shipped inside the bundle. Windows/macOS stage a copy of
+//! the running exe; Linux runs the cached rollback AppImage itself,
+//! which bundles its own libs — a bare binary needs the system
+//! WebKitGTK (absent on an AppImage-only install) or the mount the
+//! install just replaced.
 //!
 //! ## What it decides
 //!
@@ -60,6 +64,57 @@ pub fn spawn_args(state_dir: &Path, session_id: &str, install_path: &Path) -> Ve
         INSTALL_PATH_ARG.to_string(),
         install_path.to_string_lossy().to_string(),
     ]
+}
+
+/// Host-side staging (cmd.rs): which binary runs the watchdog on
+/// Linux — the cached rollback artifact itself. That file IS the old
+/// AppImage: self-contained, it brings its own WebKitGTK. A copied bare
+/// Tauri binary links webkit dynamically against either system
+/// packages (absent on an AppImage-only install) or the old AppImage's
+/// FUSE mount — which the in-place install just replaced, so the copy
+/// cannot even start (§2 requires the watchdog to outlive the swap).
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn stage_binary(state_dir: &Path, pending: &PendingFile) -> Result<PathBuf, String> {
+    let _ = state_dir;
+    let bin = PathBuf::from(&pending.artifact);
+    // Downloaded bytes land without exec bits — AppImages run as ELFs.
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&bin)
+        .map_err(|e| format!("stat rollback artifact {}: {e}", bin.display()))?
+        .permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&bin, perms).map_err(|e| format!("chmod +x {}: {e}", bin.display()))?;
+    Ok(bin)
+}
+
+/// Host-side staging (cmd.rs): copy the running exe into
+/// `updater-state/cache/` — outside the install dir so an in-place
+/// install can't lock or replace it; it IS the app binary, so the §6
+/// trust anchor (compiled-in pubkey) travels with it. Stale copies
+/// from older windows are swept best-effort. (Linux stages the cached
+/// AppImage instead — see the target_gated variant above.)
+#[cfg(not(target_os = "linux"))]
+#[doc(hidden)]
+pub fn stage_binary(state_dir: &Path, pending: &PendingFile) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
+    let ext = exe
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let bin = state_dir
+        .join(super::CACHE_DIR)
+        .join(format!("upwatch-{}{ext}", pending.session_id));
+    if let Ok(entries) = fs::read_dir(state_dir.join(super::CACHE_DIR)) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with("upwatch-") && e.path() != bin {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+    fs::copy(&exe, &bin)
+        .map_err(|e| format!("stage watchdog {} -> {}: {e}", exe.display(), bin.display()))?;
+    Ok(bin)
 }
 
 /// `app --pylair-upwatch …` → the watchdog's contract. `None` for a

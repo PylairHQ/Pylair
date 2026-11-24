@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tauri_plugin_pylair::update::upwatch::{
-    parse_args, run, Hooks, Platform, RestorePlan, Verdict, WatchArgs, WATCH_FLAG,
+    parse_args, run, stage_binary, Hooks, Platform, RestorePlan, Verdict, WatchArgs, WATCH_FLAG,
 };
 use tauri_plugin_pylair::update::{
     self, write_pending, Knobs, PendingFile, APPROVAL_FILE, BOOTS_DIR, CACHE_DIR, PENDING_FILE,
@@ -398,6 +398,42 @@ fn hard_cap_is_the_only_wall_clock() {
         Verdict::RolledBack { reason } => assert_eq!(reason, "hard_cap"),
         other => panic!("expected rollback, got {other:?}"),
     }
+    let _ = fs::remove_dir_all(&f.dir);
+}
+
+// ---- host-side staging ----------------------------------------------------------
+
+/// Windows/macOS stage a state-dir copy of the running exe (the AppImage
+/// arm lives on the Linux leg).
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn staging_copies_the_running_exe_into_cache() {
+    let f = fixture(knobs(50, 3, 60_000));
+    let bin = stage_binary(&f.dir, &f.pending).unwrap();
+    assert!(bin.starts_with(f.dir.join(CACHE_DIR)));
+    assert!(bin
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("upwatch-sess-test"));
+    assert_eq!(
+        fs::read(&bin).unwrap(),
+        fs::read(std::env::current_exe().unwrap()).unwrap()
+    );
+    let _ = fs::remove_dir_all(&f.dir);
+}
+
+/// Linux runs the cached rollback artifact itself: the old AppImage is
+/// self-contained (bundled WebKitGTK) where a bare exe copy could not
+/// start outside the mount the install replaced.
+#[cfg(target_os = "linux")]
+#[test]
+fn staging_on_linux_is_the_cached_appimage_chmodded() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture(knobs(50, 3, 60_000));
+    let bin = stage_binary(&f.dir, &f.pending).unwrap();
+    assert_eq!(bin, PathBuf::from(&f.pending.artifact));
+    assert_ne!(fs::metadata(&bin).unwrap().permissions().mode() & 0o111, 0);
     let _ = fs::remove_dir_all(&f.dir);
 }
 
