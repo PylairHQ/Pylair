@@ -46,6 +46,7 @@ case "$(uname -s)" in
 esac
 
 cd "$SRC"
+rm -rf target/release/bundle   # stale-version artifacts would pollute dist/
 T0=$(date +%s)
 npx --yes @tauri-apps/cli@2 build --bundles "$BUNDLES"
 echo "[build] $VER tauri build: $(( $(date +%s) - T0 ))s" >&2
@@ -54,11 +55,11 @@ cd ../..
 # Collect updater artifacts + sigs.
 case "$BUNDLES" in
   appimage)
-    cp "$SRC"/target/release/bundle/appimage/*.AppImage "$SRC"/target/release/bundle/appimage/*.sig "$OUT"/ ;;
+    cp "$SRC"/target/release/bundle/appimage/*_${VER}_*.AppImage "$SRC"/target/release/bundle/appimage/*.AppImage.sig "$OUT"/ ;;
   app)
-    cp "$SRC"/target/release/bundle/macos/*.app.tar.gz "$SRC"/target/release/bundle/macos/*.sig "$OUT"/ ;;
+    cp "$SRC"/target/release/bundle/macos/*.app.tar.gz "$SRC"/target/release/bundle/macos/*.app.tar.gz.sig "$OUT"/ ;;
   nsis)
-    cp "$SRC"/target/release/bundle/nsis/*-setup.exe "$SRC"/target/release/bundle/nsis/*.sig "$OUT"/ ;;
+    cp "$SRC"/target/release/bundle/nsis/*_${VER}_*-setup.exe "$SRC"/target/release/bundle/nsis/*-setup.exe.sig "$OUT"/ ;;
 esac
-cp "$SRC"/target/release/upwatch* "$OUT"/ 2>/dev/null || true
+cp "$SRC"/target/release/upwatch "$SRC"/target/release/upwatch.exe "$OUT"/ 2>/dev/null || true
 ls -la "$OUT"

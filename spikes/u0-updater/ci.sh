@@ -19,7 +19,12 @@ export PYLAIR_ROLLBACK_DEADLINE_MS=25000
 export PYLAIR_MAX_BOOTS=3
 export PYTHONUTF8=1
 
-PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+# Pick a python that actually runs (windows git-bash sees MS Store stubs).
+PY=""
+for c in python3 python py; do
+  "$c" -c "import sys" >/dev/null 2>&1 && { PY=$c; break; }
+done
+[ -n "$PY" ] || { echo "no working python"; exit 1; }
 fail() { echo "FAIL: $*" | tee -a "$STATE/results.txt"; tail -60 "$STATE/log.txt" 2>/dev/null; exit 1; }
 wait_for() { # wait_for <file> <seconds>
   local f=$1 t=$2
@@ -47,7 +52,7 @@ bash ./build.sh 0.1.0
 bash ./build.sh 0.2.0
 bash ./build.sh 0.3.0 --broken
 { uname -m | sed 's/arm64/aarch64/'; } > dist/ARCH
-WATCHDOG=$(find "$PWD/dist/0.1.0" -name 'upwatch*' ! -name '*.d' | head -1)
+WATCHDOG=$(find "$PWD/dist/0.1.0" \( -name 'upwatch' -o -name 'upwatch.exe' \) | head -1)
 export PYLAIR_WATCHDOG_BIN=$WATCHDOG
 say "artifacts"
 du -h dist/*/* | sort -k2 | tee "$STATE/sizes.txt"
@@ -56,8 +61,10 @@ du -h dist/*/* | sort -k2 | tee "$STATE/sizes.txt"
 say "serve"
 "$PY" serve.py 8377 & SRV=$!
 echo 0.2.0 > dist/CHANNEL
-sleep 1
-curl -sf http://127.0.0.1:8377/latest.json | tee "$STATE/latest-v2.json" | head -c 400; echo
+ok=""
+for _ in $(seq 15); do curl -sf http://127.0.0.1:8377/latest.json -o "$STATE/latest-v2.json" && ok=1 && break; sleep 1; done
+[ -n "$ok" ] || fail "update server never answered"
+cat "$STATE/latest-v2.json" | head -c 400; echo
 
 # ---------- per-OS install + launch ----------
 APP=""
