@@ -8,6 +8,10 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.30 (unreleased)
+
+Crate `0.1.0-rc.23`, `pylair 0.1.0rc16` on PyPI, npm `0.1.0-rc.30`.
+
 - **Fix**: a warm worker crash on macOS could leave the call without a
   response. A member that exits to a zombie makes `killpg` on its group
   raise `PermissionError` (EPERM), not `ProcessLookupError` — it escaped
