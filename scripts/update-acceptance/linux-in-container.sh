@@ -18,9 +18,17 @@ sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; s|http://
 for _ in 1 2 3; do
   apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && break || sleep 10
 done
-# xvfb + python3 (http.server) only — deliberately no libwebkit2gtk.
+# xvfb + python3 (http.server) + the host baseline an AppImage never
+# bundles by convention (X/GL/font plumbing — linuxdeploy excludes it;
+# the bundled WebKitGTK stack is still the claim under test). The list
+# is exactly the sonames readelf shows as NEEDED-but-not-bundled.
 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq \
-  xvfb python3 ca-certificates curl >/dev/null
+  xvfb python3 ca-certificates curl \
+  libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 libexpat1 \
+  libgmp10 libgpg-error0 libcom-err2 \
+  libx11-6 libx11-xcb1 libxcb1 libwayland-client0 \
+  libegl1 libgl1 libgl1-mesa-dri libdrm2 libgbm1 \
+  fonts-dejavu-core >/dev/null
 
 export HOME=/work/home
 mkdir -p "$HOME"
