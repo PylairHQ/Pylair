@@ -130,6 +130,8 @@ fn restore(sd: &Path, p: &Pending) -> Result<(), String> {
         }
     }
     Command::new(&inst)
+        .arg("--state-dir")
+        .arg(sd)
         .envs(env::vars())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

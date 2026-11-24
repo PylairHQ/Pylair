@@ -17,9 +17,15 @@ use std::{
 };
 
 fn state_dir() -> PathBuf {
-    std::env::var("PYLAIR_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("u0-updater-state"))
+    // --state-dir argv beats env: on Windows the NSIS installer relaunches
+    // the app under the explorer environment (PYLAIR_* env is lost), but
+    // the updater forwards the app's own argv via /ARGS.
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--state-dir")
+        .map(|w| PathBuf::from(&w[1]))
+        .or_else(|| std::env::var("PYLAIR_STATE_DIR").ok().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("u0-updater-state"))
 }
 
 fn ts() -> u128 {

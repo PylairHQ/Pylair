@@ -76,14 +76,14 @@ case "$OS" in
     export DISPLAY=:99
     cp dist/0.1.0/*.AppImage "$STATE/app.AppImage"; chmod +x "$STATE/app.AppImage"
     APP="$STATE/app.AppImage"
-    launch() { APPIMAGE_EXTRACT_AND_RUN=1 "$APP" & }
+    launch() { APPIMAGE_EXTRACT_AND_RUN=1 "$APP" --state-dir "$STATE" & }
     ;;
   Darwin)
     mkdir -p "$STATE/appdir"
     tar xzf dist/0.1.0/*.app.tar.gz -C "$STATE/appdir"
     APP=$(find "$STATE/appdir" -name 'u0-updater-spike.app' -maxdepth 2)/Contents/MacOS/u0-updater-spike
     chmod +x "$APP" || true
-    launch() { "$APP" & }
+    launch() { "$APP" --state-dir "$STATE" & }
     ;;
   *)
     setup=$(find "$PWD/dist/0.1.0" -name '*-setup.exe' | head -1)
@@ -95,14 +95,16 @@ case "$OS" in
     done
     [ -n "${exe:-}" ] || fail "installed exe never appeared"
     APP=$exe
-    launch() { "$APP" & }
+    launch() { "$APP" --state-dir "$STATE" & }
     ;;
 esac
 
-assert_marker() { # assert_marker <ver>
-  grep -q "VERSION = \"$1\"" "$STATE/backend-marker.txt" || fail "backend marker not $1: $(cat "$STATE/backend-marker.txt" | head -5)"
-  grep -q "runtime-marker $1" "$STATE/backend-marker.txt" || fail "runtime marker not $1"
-  echo "PASS marker $1" >> "$STATE/results.txt"
+assert_marker() { # assert_marker <ver> — poll up to 30s for content
+  for _ in $(seq 30); do
+    [ -f "$STATE/backend-marker.txt" ]       && grep -q "VERSION = \"$1\"" "$STATE/backend-marker.txt"       && grep -q "runtime-marker $1" "$STATE/backend-marker.txt"       && { echo "PASS marker $1" >> "$STATE/results.txt"; return 0; }
+    sleep 1
+  done
+  fail "backend marker not $1: $(head -8 "$STATE/backend-marker.txt" 2>/dev/null)"
 }
 
 # ---------- proof 1: v1 -> v2 ----------
@@ -111,7 +113,6 @@ T0=$SECONDS
 launch
 wait_for "$STATE/ready-0.2.0" 300 || fail "v2 never reported ready after update"
 echo "v1->v2 update+ready: $((SECONDS-T0))s" | tee -a "$STATE/results.txt"
-sleep 8  # let the restarted v2 settle + write marker dump before it exits
 assert_marker 0.2.0
 echo "PASS v1->v2 update" >> "$STATE/results.txt"
 
@@ -125,8 +126,6 @@ echo "v2->v3->v2 rollback: $((SECONDS-T0))s" | tee -a "$STATE/results.txt"
 cat "$STATE/rollback-reason.txt" | tee -a "$STATE/results.txt"
 grep -q "restored 0.2.0" "$STATE/rollback-reason.txt" || fail "rollback did not restore 0.2.0"
 grep -q '"version": "0.3.0"' "$STATE/skipped.json" || fail "v3 not on skip list"
-wait_for "$STATE/ready-0.2.0" 5 || true
-sleep 8
 assert_marker 0.2.0
 echo "PASS rollback to v2 + skip list" >> "$STATE/results.txt"
 
