@@ -178,7 +178,9 @@ const KIND_FILE = {
 const relDir = join(out, "releases", tag);
 rmSync(relDir, { recursive: true, force: true });
 mkdirSync(relDir, { recursive: true });
-const bundleKinds = bundles.split(",");
+// Tauri bundle names vs the dirs they land in: `app` → bundle/macos.
+const DIR_FOR_KIND = { app: "macos" };
+const bundleKinds = bundles.split(",").map((k) => DIR_FOR_KIND[k] ?? k);
 let artifact;
 for (const kind of bundleKinds) {
   const dir = join(bundleDir, kind);
