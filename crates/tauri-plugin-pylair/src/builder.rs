@@ -46,6 +46,29 @@ pub struct Builder<R: Runtime = tauri::Wry> {
     wrap: bool,
 }
 
+/// `plugins.pylair` in tauri.conf.json. Tauri deserializes that map into
+/// the plugin's config type at `initialize` — registered as `()`, ANY
+/// map there panics the app at startup ("invalid type: map, expected
+/// unit"). Today it only carries the update watchdog knobs (decision
+/// 0011 §2); every field is optional and unknown keys are ignored.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PluginConfig {
+    pub update: UpdateKnobsConf,
+}
+
+/// `plugins.pylair.update` — the watchdog knobs the gate copies into
+/// pending.json (they're read from the raw conf because the watchdog
+/// path runs before plugin init; this type exists so Tauri accepts the
+/// map at all).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdateKnobsConf {
+    pub heartbeat_ms: Option<u64>,
+    pub max_boots: Option<u64>,
+    pub hard_cap_ms: Option<u64>,
+}
+
 impl<R: Runtime> Builder<R> {
     pub fn new(spec: SpawnSpec) -> Self {
         Self {
@@ -132,8 +155,8 @@ impl<R: Runtime> Builder<R> {
         self
     }
 
-    pub fn build(self) -> tauri::plugin::TauriPlugin<R> {
-        let mut plugin = tauri::plugin::Builder::<R>::new("pylair");
+    pub fn build(self) -> tauri::plugin::TauriPlugin<R, PluginConfig> {
+        let mut plugin = tauri::plugin::Builder::<R, PluginConfig>::new("pylair");
         // Installed-webview self-test: the client sees this flag and runs its
         // checks through the real bridge, then calls python_selftest_report.
         if std::env::var_os("PYLAIR_SELF_TEST_WEBVIEW").is_some() {
