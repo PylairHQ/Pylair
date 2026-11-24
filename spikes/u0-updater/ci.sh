@@ -70,9 +70,13 @@ cat "$STATE/latest-v2.json" | head -c 400; echo
 APP=""
 case "$OS" in
   Linux)
+    # Standalone Xvfb (NOT xvfb-run): the restarted app inherits DISPLAY,
+    # so the X server must outlive any single app process.
+    Xvfb :99 -screen 0 1024x768x24 & XVFB=$!
+    export DISPLAY=:99
     cp dist/0.1.0/*.AppImage "$STATE/app.AppImage"; chmod +x "$STATE/app.AppImage"
     APP="$STATE/app.AppImage"
-    launch() { APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "$APP" & }
+    launch() { APPIMAGE_EXTRACT_AND_RUN=1 "$APP" & }
     ;;
   Darwin)
     mkdir -p "$STATE/appdir"

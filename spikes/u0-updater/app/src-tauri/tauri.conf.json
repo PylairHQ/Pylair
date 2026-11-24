@@ -35,7 +35,8 @@
     "updater": {
       "endpoints": ["http://127.0.0.1:8377/latest.json"],
       "pubkey": "__PUBKEY__",
-      "dangerousInsecureTransportProtocol": true
+      "dangerousInsecureTransportProtocol": true,
+      "windows": { "installMode": "quiet" }
     }
   }
 }
