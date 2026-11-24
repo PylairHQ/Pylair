@@ -279,7 +279,9 @@ function Scenario-F {
   Stop-Apps
   Launch -PerMachine
   Wait-Log 300 "installed app is still 9.0.0 (no silent restore)" "boot" "9.0.0" | Out-Null
-  Assert-True "health().update surfaces rollback-pending-approval" { LogHas "health" "rollback-pending-approval" }
+  # The health tick lands on the driver's 2s interval — poll for it
+  # like every other health assert rather than one-shot grepping.
+  Wait-Log 60 "health().update surfaces rollback-pending-approval" "health" "rollback-pending-approval" | Out-Null
   NoteT ("scenario f {0}s" -f [int]((Get-Date) - $s).TotalSeconds)
   Snapshot "f-per-machine-approval"
 }
