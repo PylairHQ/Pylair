@@ -2,6 +2,7 @@
 name = "u0-updater-spike"
 version = "0.1.0"
 edition = "2021"
+default-run = "u0-updater-spike"
 rust-version = "1.85"
 publish = false
 

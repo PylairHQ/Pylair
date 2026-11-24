@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
       - name: spike proof
         shell: bash
-        run: ./spikes/u0-updater/ci.sh
+        run: bash spikes/u0-updater/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: spike proof
         shell: bash
-        run: ./spikes/u0-updater/ci.sh
+        run: bash spikes/u0-updater/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: spike proof
         shell: bash
-        run: ./spikes/u0-updater/ci.sh
+        run: bash spikes/u0-updater/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -43,9 +43,9 @@ echo "pubkey: $PUBKEY"
 
 # ---------- builds ----------
 say "build v1 v2 v3"
-./build.sh 0.1.0
-./build.sh 0.2.0
-./build.sh 0.3.0 --broken
+bash ./build.sh 0.1.0
+bash ./build.sh 0.2.0
+bash ./build.sh 0.3.0 --broken
 { uname -m | sed 's/arm64/aarch64/'; } > dist/ARCH
 WATCHDOG=$(find "$PWD/dist/0.1.0" -name 'upwatch*' ! -name '*.d' | head -1)
 export PYLAIR_WATCHDOG_BIN=$WATCHDOG
