@@ -13,6 +13,11 @@ pub mod transport;
 pub mod blobs;
 mod builder;
 mod commands;
+#[cfg(debug_assertions)]
+pub mod inspect;
+#[cfg(not(debug_assertions))]
+#[path = "inspect_stub.rs"]
+pub mod inspect;
 mod fn_scope;
 mod registry;
 mod selftest;

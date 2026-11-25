@@ -21,6 +21,18 @@ use super::{
 use crate::protocol::{self as proto, ErrorObj};
 
 impl Session<'_> {
+    /// The inspector's mode column — warm/isolated from the manifest,
+    /// inline otherwise.
+    pub(super) fn inspect_mode(&self, fn_name: &str, is_isolated: bool) -> &'static str {
+        if !is_isolated {
+            "inline"
+        } else if self.sup.fn_warm.contains(fn_name) {
+            "warm"
+        } else {
+            "isolated"
+        }
+    }
+
     pub(super) fn call(
         &mut self,
         fn_name: String,
@@ -71,6 +83,13 @@ impl Session<'_> {
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
+        // The inspector needs the input after `params` has consumed it —
+        // clone only when the tap is live (debug + PYLAIR_INSPECT=1).
+        let inspect_input = self
+            .sup
+            .inspect
+            .enabled()
+            .then(|| input.clone());
         let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {
@@ -80,6 +99,16 @@ impl Session<'_> {
         match send_frame(&self.io, &body, self.sup.config.max_frame) {
             Ok(()) => {
                 let _ = task_out.send(task);
+                if let Some(inp) = &inspect_input {
+                    self.sup.inspect.note_start(
+                        task,
+                        &fn_name,
+                        owner.as_deref(),
+                        self.inspect_mode(&fn_name, is_isolated),
+                        inp,
+                        false,
+                    );
+                }
                 self.pending.insert(id, PendingKind::Call(respond));
                 self.task_of_call.insert(id, task);
                 self.sup
@@ -202,6 +231,11 @@ impl Session<'_> {
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
+        let inspect_input = self
+            .sup
+            .inspect
+            .enabled()
+            .then(|| input.clone());
         let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {
@@ -236,6 +270,16 @@ impl Session<'_> {
         match send_frame(&self.io, &body, self.sup.config.max_frame) {
             Ok(()) => {
                 let _ = task_out.send(Ok(task));
+                if let Some(inp) = &inspect_input {
+                    self.sup.inspect.note_start(
+                        task,
+                        &fn_name,
+                        owner.as_deref(),
+                        self.inspect_mode(&fn_name, is_isolated),
+                        inp,
+                        is_stream,
+                    );
+                }
                 self.pending.insert(id, PendingKind::Stream(items));
                 self.task_of_call.insert(id, task);
                 self.sup

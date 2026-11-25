@@ -540,6 +540,15 @@ impl Session<'_> {
                         out = Err(self.blob_reject_err(rej));
                     }
                 }
+                // Inspector end-tap (docs/inspector.md): classify while
+                // `out` is still whole, record at the removal below.
+                let inspect_end = if self.sup.inspect.enabled() {
+                    let (outcome, _) = crate::inspect::classify(&out);
+                    let resp = out.as_ref().ok().cloned();
+                    Some((outcome, resp))
+                } else {
+                    None
+                };
                 let mut delivered = false;
                 if let Some(kind) = self.pending.remove(&id) {
                     delivered = true;
@@ -571,6 +580,11 @@ impl Session<'_> {
                     }
                 }
                 if let Some(task) = self.task_of_call.remove(&id) {
+                    if let Some((outcome, resp)) = inspect_end {
+                        self.sup
+                            .inspect
+                            .note_end(task, outcome, resp.as_ref());
+                    }
                     if let Some(meta) = self.tasks.remove(&task) {
                         self.sup.fair.lock().unwrap().note_finished(
                             &meta.owner,
@@ -693,6 +707,9 @@ impl Session<'_> {
                                 self.finish_task(call_id, task);
                             }
                             return ControlFlow::Continue(());
+                        }
+                        if self.sup.inspect.enabled() {
+                            self.sup.inspect.note_chunk(task, &value);
                         }
                         // The ids this chunk ships — needed only when a
                         // pending registration exists; scanned before

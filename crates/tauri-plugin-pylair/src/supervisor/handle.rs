@@ -150,6 +150,7 @@ pub struct Handle {
     /// (docs/decisions/0006 §1) plus the three config constants its
     /// schema publishes.
     pub(super) health: HealthRef,
+    pub(crate) inspect: crate::inspect::InspectRef,
     pub(super) missed_pongs_to_kill: u32,
     pub(super) breaker_crashes: usize,
     pub(super) breaker_window: Duration,
@@ -555,6 +556,12 @@ impl Handle {
 
     /// The shared fairness map, for `WindowRegistry` to maintain the
     /// live set (builder wiring).
+    /// The dev-only inspector tap (docs/inspector.md) — inert unless
+    /// debug + PYLAIR_INSPECT=1; a no-op shell in release builds.
+    pub fn inspect(&self) -> crate::inspect::InspectRef {
+        self.inspect.clone()
+    }
+
     pub(crate) fn fairness(&self) -> FairnessRef {
         self.fair.clone()
     }
