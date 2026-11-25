@@ -58,7 +58,7 @@ describe("create-pylair --with-updater", () => {
     assert.match(cargo, /tauri-plugin-updater = "2"/);
     // pylair pin kept, now carrying the `updater` cargo feature so the
     // host compiles its update machinery (decision 0011 §8 PR 2).
-    assert.match(cargo, /tauri-plugin-pylair = \{ version = "=0\.1\.0-rc\.23", features = \["updater"\] \}/);
+    assert.match(cargo, /tauri-plugin-pylair = \{ version = "=0\.1\.0-rc\.24", features = \["updater"\] \}/);
 
     const cap = JSON.parse(readFileSync(join(app, "src-tauri/capabilities/default.json"), "utf-8"));
     assert.ok(cap.permissions.includes("updater:default"));

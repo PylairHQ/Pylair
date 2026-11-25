@@ -14,10 +14,10 @@ const BINARY = new Set([".png", ".ico", ".icns"]);
 /** The registry versions a scaffolded app pins. Bump together with the
  * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
 export const PINS = {
-  py: "pylair==0.1.0rc16",
-  js: "0.1.0-rc.30",
-  cli: "0.1.0-rc.30",
-  rs: `tauri-plugin-pylair = "=0.1.0-rc.23"`,
+  py: "pylair==0.1.0rc17",
+  js: "0.1.0-rc.31",
+  cli: "0.1.0-rc.31",
+  rs: `tauri-plugin-pylair = "=0.1.0-rc.24"`,
   /** tauri-plugin-updater for `--with-updater` scaffolds (0011). Major-
    * pinned like `tauri = "2"`; the resolved version lands in the app's own
    * Cargo.lock on first build. */
