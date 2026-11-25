@@ -1,11 +1,8 @@
 # Auto-update for Pylair apps
 
-> **Not available yet.** This doc ships ahead of the feature: the commands
-> below land across the auto-update series (decision
-> [0011](decisions/0011-auto-update.md)) and nothing is released until
-> the series lands — keys, manifest tooling, the `pylair.update` client
-> and Python surface, the readiness-gated rollback watchdog, and
-> end-to-end acceptance.
+Auto-update (decision [0011](decisions/0011-auto-update.md)) needs
+`tauri-plugin-pylair` >= `0.1.0-rc.24`, `pylair` >= `0.1.0rc17`, and
+`create-pylair` / `@pylair/client` / `pylair` CLI >= `0.1.0-rc.31`.
 
 Pylair apps ship as installers; without update machinery every release is
 a manual reinstall. Auto-update adds three things on top of
