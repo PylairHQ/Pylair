@@ -144,8 +144,8 @@ fn test_hooks() -> TestHooks {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0)
             }),
-            // ~4ms polls: heartbeat/hard-cap knobs in the 50-200ms
-            // range resolve in well under a second of real time.
+            // ~4ms polls: the hooks' real-ms clock means the ~1s
+            // heartbeats below still resolve in about a second.
             sleep: Box::new(|ms| std::thread::sleep(Duration::from_millis(ms.min(4)))),
             pid_alive: Box::new(|_| false),
             restore: Box::new(move |plan: &RestorePlan| {
@@ -274,7 +274,7 @@ fn confirm_writes_update_ok_and_clears_pending() {
 
 #[test]
 fn stale_session_ready_marker_is_ignored() {
-    let f = fixture(knobs(80, 3, 10_000));
+    let f = fixture(knobs(1_000, 3, 10_000));
     write_ready(&f, "sess-older-generation");
     let h = test_hooks();
     let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
@@ -288,7 +288,7 @@ fn stale_session_ready_marker_is_ignored() {
 
 #[test]
 fn stale_session_watchdog_exits_without_touching() {
-    let f = fixture(knobs(80, 3, 10_000));
+    let f = fixture(knobs(1_000, 3, 10_000));
     let mut a = args(&f);
     a.session_id = "sess-superseded".into();
     let h = test_hooks();
@@ -333,7 +333,7 @@ fn crash_loop_at_max_boots() {
 
 #[test]
 fn silence_past_heartbeat_rolls_back() {
-    let f = fixture(knobs(60, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let h = test_hooks();
     let t = Instant::now();
     let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
@@ -342,13 +342,20 @@ fn silence_past_heartbeat_rolls_back() {
         Verdict::RolledBack { reason } => assert_eq!(reason, "no_sign_of_life"),
         other => panic!("expected rollback, got {other:?}"),
     }
-    assert!(elapsed >= Duration::from_millis(60));
+    // The verdict must wait out the heartbeat — but last_life counts
+    // from the pending write (fixture time, slightly BEFORE t), so the
+    // floor leaves headroom for a starved runner's fixture gap.
+    assert!(elapsed >= Duration::from_millis(500));
     let _ = fs::remove_dir_all(&f.dir);
 }
 
 #[test]
 fn live_progress_keeps_the_window_open() {
-    let f = fixture(knobs(120, 3, 60_000));
+    // 1s heartbeat: a loaded runner can stall the writer past a
+    // shorter heartbeat and produce REAL silence — the watchdog would
+    // be right to fire then (it did, 355ms early, on a starved macOS
+    // runner at hb=120ms). At 1s a writer stall that large is rare.
+    let f = fixture(knobs(1_000, 3, 60_000));
     // run() blocks until a verdict, so the writer owns the clock: it
     // keeps progress.json fresh for ~3 heartbeat windows WHILE the
     // watchdog watches, then goes silent and stamps its stop instant.
@@ -358,10 +365,10 @@ fn live_progress_keeps_the_window_open() {
     let stopped = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
     let stopped_w = stopped.clone();
     let writer = std::thread::spawn(move || {
-        let end = Instant::now() + Duration::from_millis(350);
+        let end = Instant::now() + Duration::from_millis(3_000);
         while Instant::now() < end {
             let _ = fs::write(dir.join(PROGRESS_FILE), "{\"tick\":1}");
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(40));
         }
         *stopped_w.lock().unwrap() = Instant::now();
     });
@@ -382,7 +389,7 @@ fn live_progress_keeps_the_window_open() {
     // (c) …and fired within ~one heartbeat of real silence (slack for
     // poll granularity and loaded runners).
     assert!(
-        verdict_at < stop_at + Duration::from_millis(120 + 1_000),
+        verdict_at < stop_at + Duration::from_millis(1_000 + 1_000),
         "rollback at {verdict_at:?} is >1s past heartbeat after silence began ({stop_at:?})"
     );
     let _ = fs::remove_dir_all(&f.dir);
@@ -419,7 +426,7 @@ fn hard_cap_is_the_only_wall_clock() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn staging_copies_the_running_exe_into_cache() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let bin = stage_binary(&f.dir, &f.pending).unwrap();
     assert!(bin.starts_with(f.dir.join(CACHE_DIR)));
     assert!(bin
@@ -441,7 +448,7 @@ fn staging_copies_the_running_exe_into_cache() {
 #[test]
 fn staging_on_linux_is_the_cached_appimage_chmodded() {
     use std::os::unix::fs::PermissionsExt;
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let bin = stage_binary(&f.dir, &f.pending).unwrap();
     assert_eq!(bin, PathBuf::from(&f.pending.artifact));
     assert_ne!(fs::metadata(&bin).unwrap().permissions().mode() & 0o111, 0);
@@ -452,7 +459,7 @@ fn staging_on_linux_is_the_cached_appimage_chmodded() {
 
 #[test]
 fn tampered_cache_fails_verify_and_never_restores() {
-    let mut f = fixture(knobs(50, 3, 60_000));
+    let mut f = fixture(knobs(1_000, 3, 60_000));
     // Re-sign the artifact so sha256 still matches but the minisign is
     // from a DIFFERENT key — the watchdog's compiled-in pubkey rejects.
     let other = keys();
@@ -473,7 +480,7 @@ fn tampered_cache_fails_verify_and_never_restores() {
 
 #[test]
 fn corrupted_bytes_fail_sha256_before_verify() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     fs::write(&f.pending.artifact, b"tampered bytes").unwrap();
     let h = test_hooks();
     let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
@@ -487,7 +494,7 @@ fn corrupted_bytes_fail_sha256_before_verify() {
 
 #[test]
 fn install_path_mismatch_refuses_the_restore() {
-    let mut f = fixture(knobs(50, 3, 60_000));
+    let mut f = fixture(knobs(1_000, 3, 60_000));
     f.pending.install_path = "C:\\elsewhere\\evil".into();
     update::write_pending(&f.dir, &f.pending).unwrap();
     let h = test_hooks();
@@ -504,7 +511,7 @@ fn install_path_mismatch_refuses_the_restore() {
 
 #[test]
 fn skip_list_is_written_before_restore_and_relaunch() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let order = Rc::new(RefCell::new(Vec::<String>::new()));
     let rec = order.clone();
     let dir = f.dir.clone();
@@ -549,7 +556,7 @@ fn skip_list_is_written_before_restore_and_relaunch() {
 
 #[test]
 fn single_instance_lock_blocks_a_second_watchdog() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     fs::write(
         f.dir.join("upwatch.lock"),
         json!({"pid": 424242, "at_ms": 1}).to_string(),
@@ -572,7 +579,7 @@ fn single_instance_lock_blocks_a_second_watchdog() {
 
 #[test]
 fn per_machine_windows_records_approval_without_restoring() {
-    let mut f = fixture(knobs(50, 3, 60_000));
+    let mut f = fixture(knobs(1_000, 3, 60_000));
     f.pending.install_mode = Some("per-machine".into());
     update::write_pending(&f.dir, &f.pending).unwrap();
     let mut h = test_hooks();
@@ -590,7 +597,7 @@ fn per_machine_windows_records_approval_without_restoring() {
 
 #[test]
 fn per_user_windows_still_restores_silently() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let mut h = test_hooks();
     h.hooks.platform = Platform::Windows;
     let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
@@ -629,7 +636,7 @@ fn linux_rollback_replaces_the_appimage_and_relaunches() {
     // The fake installed app + artifact are real executables so the
     // default restore's exec bit + the default relaunch's spawn both
     // work end to end.
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     let real = Path::new("/bin/true");
     let artifact = f.dir.join(CACHE_DIR).join("rollback-artifact");
     fs::copy(real, &artifact).unwrap();
@@ -675,7 +682,7 @@ fn linux_rollback_replaces_the_appimage_and_relaunches() {
 #[cfg(windows)]
 #[test]
 fn windows_rollback_runs_the_silent_installer_then_relaunches() {
-    let f = fixture(knobs(50, 3, 60_000));
+    let f = fixture(knobs(1_000, 3, 60_000));
     // The "installer" is a copy of the running test exe — invoked as
     // `<exe> /S` it exits without recreating install_path, so the real
     // default restore reports the reappear timeout after
