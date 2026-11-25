@@ -1,0 +1,33 @@
+# __APP_NAME__
+
+A [Pylair](https://github.com/PylairHQ/Pylair) app: a Tauri shell, a managed
+bundled Python, and a typed bridge between them.
+
+## Develop
+
+```
+npm install
+uv sync
+npx pylair dev
+```
+
+`pylair dev` supervises the Python runtime, hot-restarts it when
+`backend/app.py` changes, and regenerates the typed client stubs on every
+save.
+
+## The typed bridge
+
+`src/api.generated.ts` is **generated, ephemeral, and never committed** (it
+is gitignored on purpose): `pylair dev` and `pylair build` both regenerate
+it from the `@expose`d signatures in `backend/app.py`. Edit the Python
+functions, not the stubs. Because it is regenerated, a fresh clone has no
+copy of it - `pylair build` runs codegen before the frontend typecheck, so
+nothing needs the file to exist beforehand.
+
+## Build an installer
+
+```
+npx pylair build
+```
+
+`npx pylair doctor` diagnoses the environment any time.

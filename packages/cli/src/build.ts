@@ -29,7 +29,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ import {
 } from "./config.js";
 import { assertCapabilities, checkPatterns, formatFinding, loadCapabilities } from "./capabilities.js";
 import { loadManifest } from "./manifest.js";
+import { emit } from "./codegen.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
 import { findArtifacts } from "./build/artifacts.js";
 import { compileBytecode } from "./build/bytecode.js";
@@ -100,6 +101,50 @@ export interface BuildOptions {
 const UNSIGNED_WARNING =
   "UNSIGNED BUILD: Gatekeeper and SmartScreen will warn users (see docs/build.md#signing)";
 
+/**
+ * The typed stubs are a build artifact of the BACKEND, owned by
+ * `pylair build` (docs/codegen.md): a fresh clone has no api.generated.ts,
+ * so the frontend typecheck inside `tauri build` can only pass if the
+ * stubs are regenerated first. Same codegen `pylair dev` runs — import the
+ * app module, emit typed wrappers — but against the bundled interpreter
+ * with the staged site-packages, because a build machine has no venv and
+ * the deps are exactly what the app will ship. A import failure is a build
+ * failure with the python error named: shipping an installer whose
+ * frontend compiled against stale or absent stubs is never right.
+ */
+export function runBuildCodegen(
+  appDir: string,
+  cfg: { appModule: string; source: string },
+  python: string,
+  resources: string,
+): string {
+  const sep = isWin ? ";" : ":";
+  const out = join(appDir, "src", "api.generated.ts");
+  mkdirSync(join(appDir, "src"), { recursive: true });
+  let manifest;
+  try {
+    manifest = loadManifest({
+      python,
+      module: cfg.appModule,
+      cwd: tmpdir(),
+      env: {
+        PYTHONPATH: `${importRoot(appDir, cfg.source)}${sep}${join(resources, "site-packages")}`,
+        PYTHONNOUSERSITE: "1",
+        PYTHONDONTWRITEBYTECODE: "1",
+      },
+    });
+  } catch (e) {
+    throw new Error(
+      `pylair build: codegen failed to import '${cfg.appModule}' with the bundled python: ` +
+        `${(e as Error).message}. The typed stubs are required - the frontend typecheck ` +
+        `inside the installer build cannot pass without them (docs/codegen.md)`,
+    );
+  }
+  const ts = emit(manifest, cfg.appModule);
+  if (!existsSync(out) || readFileSync(out, "utf-8") !== ts) writeFileSync(out, ts);
+  return out;
+}
+
 export async function build(opts: BuildOptions): Promise<void> {
   const { appDir } = opts;
   const verbose = opts.verbose ?? false;
@@ -154,6 +199,7 @@ export async function build(opts: BuildOptions): Promise<void> {
   const stages = [
     "bundle python",
     "install deps",
+    ...(wrap ? [] : ["codegen"]),
     "stage app",
     "prune",
     "compile bytecode",
@@ -174,6 +220,13 @@ export async function build(opts: BuildOptions): Promise<void> {
   await ui.step("install deps", (s) =>
     stageEnv(resources, bundled, appDir, join(appDir, cfg.requirements), cacheDir, { step: s, verbose }),
   );
+
+  if (!wrap) {
+    await ui.step("codegen", (s) => {
+      runBuildCodegen(appDir, cfg, bundled, resources);
+      s.detail("src/api.generated.ts");
+    });
+  }
 
   // Stage app source so resources/ mirrors the installed layout.
   // Wrap mode stages the app as `app/` whatever the source dir is called, so
