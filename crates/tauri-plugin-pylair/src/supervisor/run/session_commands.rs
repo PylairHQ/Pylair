@@ -71,7 +71,7 @@ impl Session<'_> {
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
-        let mut params = serde_json::json!({"fn": fn_name, "task": task,
+        let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {
             params["stream"] = serde_json::json!(s);
@@ -91,6 +91,7 @@ impl Session<'_> {
                     task,
                     TaskMeta {
                         call_id: id,
+                        fn_name,
                         owner,
                         is_stream: false,
                         is_isolated,
@@ -201,7 +202,7 @@ impl Session<'_> {
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
-        let mut params = serde_json::json!({"fn": fn_name, "task": task,
+        let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {
             params["stream"] = serde_json::json!(s);
@@ -246,6 +247,7 @@ impl Session<'_> {
                     task,
                     TaskMeta {
                         call_id: id,
+                        fn_name,
                         owner,
                         is_stream,
                         is_isolated,

@@ -397,7 +397,10 @@ deadlock) never crashes, so it never restarts.
   not proof of a wedge — legitimate blocking work (loading a multi-GB
   model inside an `async def`) can stall it for minutes. The host
   therefore reports stalls past ~1s as a diagnostic (`Unresponsive`
-  state + a stderr note) and keeps serving once the loop frees. Only a
+  state), warns once per stall episode past `loop_stall_warn` (default
+  5s — naming the likely cause and fix, plus a matching "recovered"
+  line when the loop frees; suppressed while `health().app` reports a
+  component `loading`) and keeps serving once the loop frees. Only a
   configured `loop_stall_kill` (**off by default**) treats a stall at or
   beyond that duration as wedged: in-flight calls fail with
   `RUNTIME_WEDGED` and the runtime is killed and restarted. The field is

@@ -861,6 +861,153 @@ async fn pong_stall_below_kill_limit_is_diagnostic_and_recovers() {
     stop(&h).await;
 }
 
+/// Count of `loop_stall_warn` warnings emitted so far. State-event
+/// details can contain the same words — count Stderr lines only.
+fn stall_warns(rec: &Rec) -> usize {
+    rec.snapshot()
+        .iter()
+        .filter(|e| matches!(e, Ev::Stderr(l) if l.contains("event loop blocked")))
+        .count()
+}
+
+/// Count of "recovered" lines — one per warned episode's end.
+fn stall_recoveries(rec: &Rec) -> usize {
+    rec.snapshot()
+        .iter()
+        .filter(|e| matches!(e, Ev::Stderr(l) if l.contains("event loop recovered")))
+        .count()
+}
+
+/// Push one `app.component` notification out of the fake. `emit` writes
+/// the frame but never replies, so the call task only proves the frame
+/// was dispatched — its result receiver is left pending on purpose.
+async fn emit_app_component(h: &Handle, params: Value) {
+    let frame = serde_json::to_string(&json!({
+        "jsonrpc": "2.0", "method": "app.component", "params": params
+    }))
+    .unwrap();
+    let ct = h
+        .call_task("emit", json!({"frames": [frame]}), None, Some(false))
+        .unwrap();
+    let _ = timeout(T, ct.task).await.unwrap().unwrap();
+}
+
+/// d: a stall past `loop_stall_warn` logs ONE warning per episode —
+/// never one per stale pong — plus a matching "recovered" line when the
+/// loop frees; a second episode warns again. The warning names the
+/// cause, the fix and the in-flight call's fn.
+#[tokio::test(flavor = "current_thread")]
+async fn stall_warns_once_per_episode_then_recovers() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.loop_stall_warn = Some(Duration::from_millis(500));
+    let (h, rec, _ready_at) = ready(json!({}), c).await;
+    let (_task, _result) = hold(&h, None).await; // in-flight fn: "hold"
+
+    h.call("set", json!({"stale": 2000}), None, Some(false))
+        .await
+        .unwrap();
+    let i = rec.stderr("event loop blocked for 2s").await;
+    let Ev::Stderr(line) = &rec.snapshot()[i] else {
+        panic!("the wait index was not the warning")
+    };
+    assert!(line.contains("`async def`"), "{line}");
+    assert!(line.contains("asyncio.to_thread"), "{line}");
+    assert!(line.contains("in flight: hold"), "{line}");
+
+    // More stale pongs in the same episode stay silent — ~3 ticks.
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(stall_warns(&rec), 1, "a later stale pong warned again");
+
+    // The loop frees -> exactly one recovery line naming the blocked
+    // duration the runtime last reported.
+    h.call("set", json!({"stale": 0}), None, Some(false))
+        .await
+        .unwrap();
+    rec.stderr("event loop recovered after 2s blocked").await;
+    assert_eq!(stall_recoveries(&rec), 1);
+
+    // A NEW episode warns once more — warn-once is per episode.
+    h.call("set", json!({"stale": 2000}), None, Some(false))
+        .await
+        .unwrap();
+    rec.wait("a second episode warning", |log| {
+        log.iter()
+            .filter(|e| matches!(e, Ev::Stderr(l) if l.contains("event loop blocked")))
+            .nth(1)
+            .map(|_| ())
+    })
+    .await;
+    stop(&h).await;
+}
+
+/// d: a stall under `loop_stall_warn` — but past the ~1s diagnostic
+/// floor — still surfaces the Unresponsive diagnostic, yet logs no
+/// warning: the configured threshold is what gates the warning.
+#[tokio::test(flavor = "current_thread")]
+async fn stall_below_the_warn_threshold_stays_quiet() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.loop_stall_warn = Some(Duration::from_secs(30));
+    let (h, rec, ready_at) = ready(json!({}), c).await;
+    h.call("set", json!({"stale": 2000}), None, Some(false))
+        .await
+        .unwrap();
+    // The diagnostic still fires (pongs carried the stale report)...
+    rec.state(
+        ready_at,
+        State::Unresponsive,
+        "event loop blocked for 2s (diagnostic)",
+    )
+    .await;
+    // ...but a few more stale pongs produce no warning and no recovery.
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(stall_warns(&rec), 0, "an under-threshold stall warned");
+    assert_eq!(stall_recoveries(&rec), 0);
+    stop(&h).await;
+}
+
+/// d: while `health().app` reports a component `loading`, a stall warning
+/// is held (on_startup blocking is legitimate). A stall that began during
+/// the load warns once the app reports ready — and says it began then.
+#[tokio::test(flavor = "current_thread")]
+async fn stall_warn_is_held_while_app_loads_then_notes_it() {
+    let _children = CHILDREN.read().await;
+    let mut c = cfg();
+    c.loop_stall_warn = Some(Duration::from_millis(500));
+    let (h, rec, _ready_at) = ready(json!({}), c).await;
+
+    // Startup load begins, then the loop stalls inside it.
+    emit_app_component(&h, json!({"name": "app", "phase": "loading"})).await;
+    h.call("set", json!({"stale": 2000}), None, Some(false))
+        .await
+        .unwrap();
+    // Several stale pongs later: still quiet — the load suppresses it.
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(stall_warns(&rec), 0, "warned while a component was loading");
+
+    // The component reports ready; the stall outlasted the load, so the
+    // warning lands — noting it began during startup.
+    emit_app_component(&h, json!({"name": "app", "phase": "ready"})).await;
+    let i = rec.stderr("event loop blocked for 2s").await;
+    let Ev::Stderr(line) = &rec.snapshot()[i] else {
+        panic!("the wait index was not the warning")
+    };
+    assert!(line.contains("began during app startup"), "{line}");
+
+    // And a stall that ends during the load never warned at all.
+    stop(&h).await;
+}
+
+/// d: `loop_stall_kill` stays opt-in — the shipped default warns, never
+/// kills (a legitimate block must not become a restart loop).
+#[test]
+fn stall_kill_is_off_and_warn_on_by_default() {
+    let c = SupervisorConfig::default();
+    assert!(c.loop_stall_kill.is_none());
+    assert_eq!(c.loop_stall_warn, Some(Duration::from_secs(5)));
+}
+
 // ---- e. stream.chunk ----
 
 /// e: each delivered chunk consumes one credit, and a chunk with zero

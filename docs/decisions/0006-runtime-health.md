@@ -178,6 +178,18 @@ Kill paths untouched: `missed_pongs_to_kill` (default 3,
 the same. A stall past a configured kill limit reads `loop:"busy"`
 briefly before the generation dies — correct, not a third verdict.
 
+`loop_stall_kill` stays off on purpose: legitimate blocking (a
+multi-GB model load inside `async def`) stalls the loop for minutes,
+so killing there turns a healthy-but-slow app into a restart loop —
+and a restart mid-update reads as a bad update to the auto-update
+watchdog, which would roll a good update back. Visibility without the
+kill is `loop_stall_warn` (default 5s): one stderr warning per stall
+episode — cause, fix (plain `def` / `asyncio.to_thread` /
+`worker="isolated"/"warm"`), in-flight fn names — a "recovered" line
+when the loop frees, and silence while `health().app` reports a
+component `loading` (`on_startup` blocking is legitimate; a stall that
+began during load and outlasts it warns and says so).
+
 ## 3. Permissions: `pylair:default`, deniable, self-scoped
 
 - **In `pylair:default` — yes.** `python_health` is the same class as

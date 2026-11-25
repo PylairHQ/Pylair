@@ -366,8 +366,10 @@ Two more bounded paths matter:
   are emitted by the runtime's reader thread (not the event loop), so a
   missed pong means the *process* is truly hung. Three consecutive misses
   → killed as `crashed`. Event-loop stalls are reported separately via
-  `loop_stale_ms` as a diagnostic; `loop_stall_kill` (off by default)
-  makes a long stall fatal for apps that prefer it.
+  `loop_stale_ms` as a diagnostic plus a per-episode warning past
+  `loop_stall_warn` (default 5 s); `loop_stall_kill` (off by default —
+  a legitimate long block must not become a restart loop) makes a long
+  stall fatal for apps that prefer it.
 
 Four of those caps are additionally split per caller (per-window
 fairness, decisions 0005): each live window — a window that has called

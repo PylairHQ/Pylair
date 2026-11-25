@@ -97,6 +97,30 @@ pub(super) struct Session<'a> {
     /// released there rather than holding slots and disk until the
     /// window closes — which is exactly when limits are near.
     pub(super) blob_pending: HashMap<u64, Vec<String>>,
+    /// The open loop-stall episode, if any pong reported `loop_stale_ms`
+    /// at or past the episode floor since the last clean one — `None`
+    /// outside an episode. Carries the warn-once state so an episode
+    /// logs exactly one warning and one recovery line.
+    pub(super) stall_episode: Option<StallEpisode>,
+}
+
+/// One contiguous blocked period — `loop_stale_ms` climbs while the
+/// loop is stalled and only drops once it makes progress again, so an
+/// episode ends at the first pong back under the floor (`loop_stall_warn`,
+/// or `LOOP_STALL_WARN` when the configured threshold is higher — low
+/// enough that a stall beginning during app load is already an episode
+/// by the time it crosses the warn threshold).
+pub(super) struct StallEpisode {
+    /// The warning already went out — later stale pongs in the same
+    /// episode stay silent.
+    pub(super) warned: bool,
+    /// The episode began while `health().app` had a component still
+    /// `loading` — `on_startup` blocking is expected then, so the
+    /// warning (if it ever fires) says the stall began during startup.
+    pub(super) began_loading: bool,
+    /// Largest `loop_stale_ms` seen this episode — the recovery line's
+    /// "blocked for Ns".
+    pub(super) peak: Duration,
 }
 
 impl<'a> Session<'a> {
@@ -121,6 +145,7 @@ impl<'a> Session<'a> {
             blob_dir,
             blob_rejects: HashMap::new(),
             blob_pending: HashMap::new(),
+            stall_episode: None,
         }
     }
 
@@ -255,6 +280,79 @@ impl<'a> Session<'a> {
             self.pending
                 .insert(cid, PendingKind::Cancel { respond: ack });
         }
+    }
+
+    /// The warn-without-kill half of stall handling (`loop_stall_warn`):
+    /// one `pylair` stderr line per stall episode, a matching recovery
+    /// line when the loop frees, and nothing at all while `health().app`
+    /// still reports a component `loading` — `on_startup` blocking is
+    /// legitimate. Called for every non-StallKill pong; a configured
+    /// kill is fatal before a warning could matter.
+    fn note_loop_stall(&mut self, stale: Duration, app_loading: bool) {
+        let Some(warn_at) = self.sup.config.loop_stall_warn else {
+            return;
+        };
+        // An episode is one contiguous blocked period — `loop_stale_ms`
+        // only drops when the loop makes progress. It starts at the
+        // diagnostic floor (or the configured threshold when that is
+        // lower) so a stall that began during app load and crosses the
+        // warn threshold once the app is ready still carries
+        // `began_loading`.
+        let floor = warn_at.min(super::LOOP_STALL_WARN);
+        if stale < floor {
+            // Episode over (or never began): a warned episode earns its
+            // recovery line; an unwarned one ends silently.
+            if let Some(ep) = self.stall_episode.take() {
+                if ep.warned {
+                    let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                        "pylair: event loop recovered after {:?} blocked",
+                        ep.peak
+                    )));
+                }
+            }
+            return;
+        }
+        let ep = self.stall_episode.get_or_insert(StallEpisode {
+            warned: false,
+            began_loading: app_loading,
+            peak: stale,
+        });
+        ep.peak = ep.peak.max(stale);
+        if ep.warned || stale < warn_at {
+            return; // one warning per episode, not one per pong
+        }
+        if app_loading {
+            // Suppressed — on_startup may legitimately block the loop
+            // for minutes (a model load). If the stall outlasts the
+            // load, the next pong warns and says it began then.
+            return;
+        }
+        ep.warned = true;
+        let mut msg = format!(
+            "pylair: event loop blocked for {stale:?} — every call waits. \
+             Blocking work inside an `async def` stalls the whole loop; use a plain \
+             `def` (Pylair runs it in a worker thread), `await asyncio.to_thread(...)`, \
+             or worker=\"isolated\"/\"warm\" for heavy CPU or model work"
+        );
+        // The call(s) in flight when the stall began are the likeliest
+        // holders — name up to three so the warning points at the code.
+        if !self.tasks.is_empty() {
+            let mut names: Vec<&str> = self.tasks.values().map(|m| m.fn_name.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            let more = names.len().saturating_sub(3);
+            let shown: Vec<&str> = names.into_iter().take(3).collect();
+            msg.push_str(&format!(" — in flight: {}", shown.join(", ")));
+            if more > 0 {
+                msg.push_str(&format!(" (+{more} more)"));
+            }
+        }
+        if ep.began_loading {
+            msg.push_str(
+                " (the stall began during app startup, when on_startup blocking is expected)",
+            );
+        }
+        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(msg));
     }
 }
 
@@ -495,13 +593,16 @@ impl Session<'_> {
                         self.pongs_received += 1;
                         // Transport is alive. Is the loop SERVING?
                         let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
-                        let health_ev = {
+                        let (health_ev, app_loading) = {
                             let mut h = self.sup.health.lock().unwrap();
                             h.note_pong(p["seq"].as_u64(), stale, self.sup.config.ping_interval);
-                            h.health_event(
-                                self.sup.config.kind,
-                                true,
-                                self.sup.config.missed_pongs_to_kill,
+                            (
+                                h.health_event(
+                                    self.sup.config.kind,
+                                    true,
+                                    self.sup.config.missed_pongs_to_kill,
+                                ),
+                                h.app.values().any(|c| c.phase == AppPhase::Loading),
                             )
                         };
                         if let Some(payload) = health_ev {
@@ -533,11 +634,16 @@ impl Session<'_> {
                             // Diagnostic only (P1-7): the loop
                             // cannot serve calls right now, but a
                             // long stall is not proof of a wedge.
-                            PongVerdict::StallWarn => self.sup.set_state(
-                                State::Unresponsive,
-                                format!("event loop blocked for {stale:?} (diagnostic)"),
-                            ),
-                            PongVerdict::Ready => self.sup.set_state(State::Ready, "pong received"),
+                            verdict => {
+                                self.note_loop_stall(stale, app_loading);
+                                match verdict {
+                                    PongVerdict::StallWarn => self.sup.set_state(
+                                        State::Unresponsive,
+                                        format!("event loop blocked for {stale:?} (diagnostic)"),
+                                    ),
+                                    _ => self.sup.set_state(State::Ready, "pong received"),
+                                }
+                            }
                         }
                     }
                     "stream.chunk" => {

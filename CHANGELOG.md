@@ -89,6 +89,19 @@ the series is released until all PRs land._
   is unchanged (numbers in range, clear error outside, now naming
   `pylair.BigInt`). Decode is defensive like the other tags
   (canonical decimal only, else plain data) with a 4096-digit cap.
+- Event-loop stalls warn instead of only showing a diagnostic: a pong
+  reporting `loop_stale_ms` past `loop_stall_warn` (new
+  `SupervisorConfig` knob, default 5 s, `None` to silence) logs one
+  stderr line per stall episode — the likely cause (blocking work in an
+  `async def` stalls every call), the fix (plain `def` → worker thread,
+  `asyncio.to_thread`, `worker="isolated"/"warm"` for heavy loads), how
+  long the loop has been stalled and the in-flight call's fn name —
+  plus a matching "recovered after Ns" line when the loop frees. Warnings
+  are held while `health().app` reports a component `loading`
+  (`on_startup` blocking is legitimate) and a stall that began then says
+  so when it warns. `loop_stall_kill` stays opt-in: killing on a
+  legitimate long block would become a restart loop and roll back good
+  auto-updates.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 

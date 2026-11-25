@@ -171,6 +171,22 @@ at `@expose` time, not at cancel time.
 - **Cancel ack timeout:** if the runtime doesn't confirm within 5s
   (`cancel_timeout`), `cancel()` rejects with `RUNTIME_WEDGED`; a
   blocked runtime cannot be relied on to answer.
+- **A blocked event loop is warned about, not killed, by default.**
+  `loop_stale_ms` in each pong reports how long the runtime's asyncio
+  loop has made no progress. Blocking work inside an `async def` stalls
+  *every* call — the fix is a plain `def` (runs in a worker thread),
+  `await asyncio.to_thread(...)`, or `worker="isolated"/"warm"` for
+  heavy CPU or model work. The host logs one warning per stall episode
+  past `loop_stall_warn` (default 5s) and a matching "recovered" line
+  when the loop frees — suppressed while `health().app` reports a
+  component still `loading`, since `on_startup` blocking is legitimate
+  (a stall that began then and outlasts the load warns and says so).
+  `loop_stall_kill` stays **off by default**: legitimate blocking — a
+  multi-GB model load — can stall the loop for minutes, so killing on
+  a stall turns a healthy-but-slow app into a restart loop, and a
+  restart mid-update would look like a bad update to the auto-update
+  watchdog and get a good update rolled back. Opt in only when a
+  blocked loop is truly unrecoverable for your app.
 - **Cancel is one-way and idempotent:** re-cancel on a live task is a
   no-op (`cancelled` again); on a finished task it reports `completed`.
   There is no un-cancel.
