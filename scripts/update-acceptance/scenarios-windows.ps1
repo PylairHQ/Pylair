@@ -171,6 +171,20 @@ function Boots-Count {
   if (Test-Path $b) { @(Get-ChildItem $b).Count } else { 0 }
 }
 
+function Boots-Version-Count([string]$Ver) {
+  # Product evidence: the host writes one boots/<nanos>-<pid>.json per
+  # launch of the pending version (update/mod.rs) with "version" inside
+  # — immune to the fixture's own log-line loss (the scenario-e flake:
+  # v3 booted and proved it through update.state, yet its fixture "boot"
+  # line never landed).
+  $b = Join-Path $StateDir "boots"
+  if (-not (Test-Path $b)) { return 0 }
+  $pat = '"version":\s*"' + [regex]::Escape($Ver) + '"'
+  @(Get-ChildItem $b -File -Filter *.json | Where-Object {
+    (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -match $pat
+  }).Count
+}
+
 # ---- scenarios --------------------------------------------------------------
 
 function Scenario-A {
@@ -260,7 +274,9 @@ function Scenario-E {
   $reason = Join-Path $StateDir "rollback-reason.txt"
   Wait-File 300 "rollback reason written" $reason | Out-Null
   Assert-True "restore refused (verify_failed)" { (Get-Content $reason -Raw) -match "verify_failed" }
-  Wait-Log 300 "v3 booted (still installed)" "boot" "3.0.0" | Out-Null
+  # v3's boot is product evidence, not the fixture's own log line: the
+  # host writes a boots/ marker for every launch of the pending version.
+  Wait-For 300 "v3 booted (still installed) — boots/ marker" { (Boots-Version-Count "3.0.0") -ge 1 } | Out-Null
   Wait-Log 300 "app reports verify_failed via health().update" "health" "verify_failed" | Out-Null
   NoteT ("scenario e {0}s" -f [int]((Get-Date) - $s).TotalSeconds)
   Snapshot "e-tamper-abort"
