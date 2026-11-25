@@ -105,7 +105,7 @@ describe("non-interactive behaviour is unchanged", () => {
     assert.ok(!existsSync(join(cwd, "w-app", "app", "main.py")));
   });
 
-  test("missing prerequisites warn after the Next block, scaffold still succeeds", async () => {
+  test("missing prerequisites warn on stderr; stdout stays byte-exact", async () => {
     const cwd = tmp();
     const p = io({
       cwd,
@@ -115,12 +115,13 @@ describe("non-interactive behaviour is unchanged", () => {
       ],
     });
     assert.equal(await run(["my-app"], p), 0);
-    const shown = p.plain();
-    assert.match(shown, /Missing prerequisites/);
-    assert.match(shown, /uv: not found - install uv: https:\/\/docs\.astral\.sh\/uv\//);
-    assert.match(shown, /native toolchain: no MSVC C\+\+ build tools found - install Build Tools/);
-    // The warning is a suffix: the Next block still ends in `pylair doctor`.
-    assert.ok(shown.indexOf("npx pylair doctor") < shown.indexOf("Missing prerequisites"));
+    // Scripted callers see stable stdout whatever the machine lacks;
+    // the warning is diagnostics, so it goes to stderr.
+    assert.equal(p.text(), EXPECTED_BRIDGE);
+    const warn = p.err();
+    assert.match(warn, /Missing prerequisites/);
+    assert.match(warn, /uv: not found - install uv: https:\/\/docs\.astral\.sh\/uv\//);
+    assert.match(warn, /native toolchain: no MSVC C\+\+ build tools found - install Build Tools/);
     assert.ok(existsSync(join(cwd, "my-app", "pyproject.toml")));
   });
 
