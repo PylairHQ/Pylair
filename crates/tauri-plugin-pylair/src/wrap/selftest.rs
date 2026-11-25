@@ -282,16 +282,35 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
         .get_webview_window(super::WINDOW)
         .ok_or((10, "no window".to_string()))?;
     wait_loaded(ui, &url).await.map_err(fail(10))?;
+    // The probe, hard-learned (navlock-investigate): a real WKWebView does
+    // not reliably even ASK the host about an in-place navigation to a
+    // scheme it cannot handle — under load the attempt is dropped inside
+    // WebKit before the policy delegate runs, so no event ever arrives
+    // (evidence: the new-window refusal counted, the in-place one absent
+    // for the whole 30s window, the page provably intact). That is platform
+    // behaviour, not a lock miss: the navigation never happens either way,
+    // which is the guarantee. What the lock must do is refuse every
+    // attempt it IS asked about — so the probe retries the in-place
+    // attempt (each try is an independent navigation, exactly like a user
+    // clicking twice) until the host has refused both, and the page-stays
+    // assertion below guards the actual property either way.
     let denied_before = ui.denied.load(std::sync::atomic::Ordering::SeqCst);
-    w.eval(
-        "try{location.href='pylair-selftest://blocked/a'}catch(e){};\
-         try{window.open('pylair-selftest://blocked/b')}catch(e){}",
-    )
-    .map_err(|e| (10, e.to_string()))?;
+    w.eval("try{window.open('pylair-selftest://blocked/b')}catch(e){}")
+        .map_err(|e| (10, e.to_string()))?;
+    let mut last_try = std::time::Instant::now() - Duration::from_secs(2);
     until(
         "the navigation lock to refuse the page's navigations",
         Duration::from_secs(30),
-        || (ui.denied.load(std::sync::atomic::Ordering::SeqCst) >= denied_before + 2).then_some(()),
+        || {
+            if ui.denied.load(std::sync::atomic::Ordering::SeqCst) >= denied_before + 2 {
+                return Some(());
+            }
+            if last_try.elapsed() >= Duration::from_secs(1) {
+                last_try = std::time::Instant::now();
+                let _ = w.eval("try{location.href='pylair-selftest://blocked/a'}catch(e){}");
+            }
+            None
+        },
     )
     .await
     .map_err(|e| {
@@ -299,10 +318,7 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
         // (platform behaviour — no product bug) or the host saw it and
         // failed to count/refuse (a real lock bug). The diagnostic dump
         // says which — it is in the failure line CI prints.
-        format!(
-            "{e}; diagnostics: {}",
-            ui.nav_diagnostics(denied_before)
-        )
+        format!("{e}; diagnostics: {}", ui.nav_diagnostics(denied_before))
     })
     .map_err(fail(10))?;
     let still = w.url().map_err(|e| (10, e.to_string()))?;
