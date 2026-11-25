@@ -46,6 +46,10 @@ fn pending(from: &str, to: &str) -> PendingFile {
 }
 
 fn gate(dir: &Path, version: &str) -> Arc<UpdateGate> {
+    gate_grace(dir, version, 20)
+}
+
+fn gate_grace(dir: &Path, version: &str, grace_ms: u64) -> Arc<UpdateGate> {
     UpdateGate::with_dir(GateOpts {
         dir: dir.to_path_buf(),
         version: version.into(),
@@ -54,7 +58,7 @@ fn gate(dir: &Path, version: &str) -> Arc<UpdateGate> {
         endpoints: vec!["https://u.example.com/latest.json".into()],
         rollback_url: Some("https://u.example.com/v{{version}}/latest.json".into()),
         session_id: Some("sess-1".into()),
-        grace_ms: 20,
+        grace_ms,
     })
 }
 
@@ -229,8 +233,16 @@ fn non_instrumented_app_confirms_after_grace() {
     update::write_pending(&dir, &pending("1.0.0", "1.1.0")).unwrap();
     let g = gate(&dir, "1.1.0");
     g.note_ready_pub();
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    assert!(dir.join("ready-1.1.0.json").exists());
+    // Poll, don't sleep: the grace timer is a real thread and a
+    // starved CI runner can schedule it arbitrarily late.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !dir.join("ready-1.1.0.json").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ready marker not written within 5s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -238,13 +250,17 @@ fn non_instrumented_app_confirms_after_grace() {
 fn grace_abandoned_when_component_reports_or_generation_dies() {
     let dir = tmp();
     update::write_pending(&dir, &pending("1.0.0", "1.1.0")).unwrap();
-    let g = gate(&dir, "1.1.0");
+    // A 2s grace makes the ordering deterministic: the component
+    // report lands first no matter how either thread is scheduled
+    // (a fixed sleep before the report raced the 20ms timer on CI).
+    let g = gate_grace(&dir, "1.1.0", 2_000);
     g.note_ready_pub();
     // A component arrives inside the grace window: the grace path
     // must not fire — the component rule now owns confirmation.
-    std::thread::sleep(std::time::Duration::from_millis(5));
     g.note_component_pub("ui", "loading");
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    // Past the grace deadline the suppressed timer must not have
+    // written a marker.
+    std::thread::sleep(std::time::Duration::from_millis(2_600));
     assert!(!dir.join("ready-1.1.0.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
