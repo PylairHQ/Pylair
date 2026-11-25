@@ -27,7 +27,7 @@ after(() => {
 /** A fake terminal for run(): PassThrough stdin/stdout/stderr, stdin marked
  * as a TTY only when asked. caps is injected so tests decide the console
  * mode; env defaults to CI-less. */
-function io({ tty = false, caps = PLAIN, env = {}, cwd } = {}) {
+function io({ tty = false, caps = PLAIN, env = {}, cwd, preflight = () => [] } = {}) {
   const input = new PassThrough();
   if (tty) input.isTTY = true;
   const output = new PassThrough();
@@ -36,8 +36,11 @@ function io({ tty = false, caps = PLAIN, env = {}, cwd } = {}) {
   let err = "";
   output.on("data", (d) => (text += String(d)));
   error.on("data", (d) => (err += String(d)));
+  // preflight defaults to an empty list: the real probe answers differ
+  // per machine (CI runners lack cargo/MSVC), so only tests that inject
+  // missing tools see the warning block.
   return {
-    input, output, error, env, cwd, caps,
+    input, output, error, env, cwd, caps, preflight,
     text: () => text,
     err: () => err,
     plain: () => stripAnsi(text),
@@ -100,6 +103,31 @@ describe("non-interactive behaviour is unchanged", () => {
     assert.match(shown, /Created w-app\/ \(wrap, streamlit\)/);
     assert.ok(existsSync(join(cwd, "w-app", "app", "app.py")));
     assert.ok(!existsSync(join(cwd, "w-app", "app", "main.py")));
+  });
+
+  test("missing prerequisites warn after the Next block, scaffold still succeeds", async () => {
+    const cwd = tmp();
+    const p = io({
+      cwd,
+      preflight: () => [
+        { name: "uv", ok: false, detail: "not found", fix: "install uv: https://docs.astral.sh/uv/" },
+        { name: "native toolchain", ok: false, detail: "no MSVC C++ build tools found", fix: "install Build Tools" },
+      ],
+    });
+    assert.equal(await run(["my-app"], p), 0);
+    const shown = p.plain();
+    assert.match(shown, /Missing prerequisites/);
+    assert.match(shown, /uv: not found - install uv: https:\/\/docs\.astral\.sh\/uv\//);
+    assert.match(shown, /native toolchain: no MSVC C\+\+ build tools found - install Build Tools/);
+    // The warning is a suffix: the Next block still ends in `pylair doctor`.
+    assert.ok(shown.indexOf("npx pylair doctor") < shown.indexOf("Missing prerequisites"));
+    assert.ok(existsSync(join(cwd, "my-app", "pyproject.toml")));
+  });
+
+  test("a clean preflight prints no warning and keeps the exact outro", async () => {
+    const p = io({ cwd: tmp() });
+    assert.equal(await run(["my-app"], p), 0);
+    assert.equal(p.text(), EXPECTED_BRIDGE);
   });
 
   test("--into prints only its JSON line: no wordmark, no prompts", async () => {

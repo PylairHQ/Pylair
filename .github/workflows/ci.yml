@@ -63,6 +63,9 @@ jobs:
         with:
           node-version-file: .nvmrc
       - run: node scripts/check-action-pins.mjs --remote
+      # docs/README.md is the documentation index: every decision record
+      # and every docs/*.md guide must be covered/linked from it.
+      - run: node scripts/check-docs-index.mjs
       # actionlint, downloaded as a release tarball pinned by version and
       # sha256 (not a GitHub Action, so no uses: pin). -shellcheck= silences
       # shellcheck findings for now; expression and syntax errors still fail.

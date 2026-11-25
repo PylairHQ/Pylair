@@ -9,6 +9,3 @@ from this file — promote to a milestone or a decision doc first.
   external Ollama — owner question, section 12.
 - Unix socket / Windows named pipe transport behind the transport trait.
 - Svelte template (`packages/create-pylair/templates/svelte-ts`).
-- Temp-file-handle transport for bulk binary payloads (images, audio)
-  to replace base64-in-JSON (+33% wire cost) — protocol note §2 —
-  designed as blob URLs in docs/decisions/0010-blob-urls.md.

@@ -40,6 +40,12 @@ Commands:
   keys      Update signing keys (pylair keys init)
   update    Auto-update artifacts (pylair update manifest)
 
+dev options:
+  --dir <path>          App directory (default: cwd)
+  --inspect             Open the dev inspector window (docs/inspector.md)
+  --inspect-payloads    Also show call payload previews in the inspector
+  --skip-preflight      Skip the toolchain check before the Rust build
+
 wrap options:
   [entry]               The app's entry file (gradio / streamlit), e.g. app.py
   --framework <name>    command | gradio | streamlit (default: from your
@@ -395,6 +401,7 @@ export function main(rawArgv: string[]): number | Promise<number> {
       appDir: dir,
       inspect: rest.includes("--inspect"),
       inspectPayloads: rest.includes("--inspect-payloads"),
+      skipPreflight: rest.includes("--skip-preflight"),
     }).then(
       (code) => code,
       (e) => failed("dev", e),

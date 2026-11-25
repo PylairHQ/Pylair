@@ -42,7 +42,7 @@ at `@expose` time, not at cancel time.
 ### Isolated sync functions (`isolated=True`)
 
 - Each call runs in a dedicated worker subprocess (spawned per call),
-  or — with `worker={"mode": "warm"}` — on a long-lived pool member
+  or — with `worker=warm()` — on a long-lived pool member
   that serves one call at a time (see the warm-worker note below).
 - Cancel → `terminate()` (SIGTERM/SIGKILL-equivalent), 3s grace →
   `kill()`. Wire result: `TASK_CANCELLED` (or `WORKER_DIED` if the worker
@@ -64,7 +64,7 @@ at `@expose` time, not at cancel time.
 > every call*. With torch-class imports that is seconds per call, and
 > for anything holding a loaded model it makes `isolated=True`
 > effectively unusable. The fix is a **warm worker** (decision 0008):
-> `@expose(worker={"mode": "warm", "pool": N})` runs calls on a
+> `@expose(worker=warm(pool=N))` runs calls on a
 > persistent, lazily-spawned per-function pool that keeps its
 > imports/model resident — `pool` sizes the pool (default 1), `N >= 1`.
 > A warm call cancelled while running is interrupted first on POSIX
@@ -175,7 +175,7 @@ at `@expose` time, not at cancel time.
   `loop_stale_ms` in each pong reports how long the runtime's asyncio
   loop has made no progress. Blocking work inside an `async def` stalls
   *every* call — the fix is a plain `def` (runs in a worker thread),
-  `await asyncio.to_thread(...)`, or `worker="isolated"/"warm"` for
+  `await asyncio.to_thread(...)`, or `worker=isolated()`/`warm()` for
   heavy CPU or model work. The host logs one warning per stall episode
   past `loop_stall_warn` (default 5s) and a matching "recovered" line
   when the loop frees — suppressed while `health().app` reports a

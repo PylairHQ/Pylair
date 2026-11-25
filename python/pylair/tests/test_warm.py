@@ -466,6 +466,121 @@ def test_warm_option_accepts_defaults_and_process_mode():
     _with_clean_registry(go)
 
 
+# ---- warm()/isolated() config helpers ------------------------------------------
+
+
+def test_warm_helper_and_dict_form_are_equivalent():
+    """pylair.warm(...) builds the same normalized config the dict form
+    validates to — both land the identical ExposedFn.worker."""
+    from pylair import warm
+
+    def go():
+        @expose(worker=warm(pool=2, prewarm=True, cancel_grace_ms=250))
+        def helper() -> int:
+            return 1
+
+        @expose(
+            worker={"mode": "warm", "pool": 2, "prewarm": True, "cancel_grace_ms": 250}
+        )
+        def dictform() -> int:
+            return 1
+
+        a = exposed_functions()["helper"]
+        b = exposed_functions()["dictform"]
+        assert a.worker == b.worker
+        assert a.kind == b.kind == "isolated"
+        assert a.signature["meta"]["worker"] == a.worker
+
+    _with_clean_registry(go)
+
+
+def test_warm_helper_defaults_match_the_dict_defaults():
+    from pylair import warm
+
+    def go():
+        @expose(worker=warm())
+        def helper() -> int:
+            return 1
+
+        @expose(worker={"mode": "warm"})
+        def dictform() -> int:
+            return 1
+
+        assert exposed_functions()["helper"].worker == {
+            "mode": "warm",
+            "pool": 1,
+            "cancel_grace_ms": 3000,
+        }
+        assert (
+            exposed_functions()["helper"].worker
+            == exposed_functions()["dictform"].worker
+        )
+
+    _with_clean_registry(go)
+
+
+def test_isolated_helper_matches_process_mode():
+    from pylair import isolated
+
+    def go():
+        @expose(worker=isolated())
+        def helper() -> int:
+            return 1
+
+        @expose(worker={"mode": "process"})
+        def dictform() -> int:
+            return 1
+
+        assert exposed_functions()["helper"].worker == {"mode": "process"}
+        assert (
+            exposed_functions()["helper"].worker
+            == exposed_functions()["dictform"].worker
+        )
+        assert exposed_functions()["helper"].kind == "isolated"
+
+    _with_clean_registry(go)
+
+
+def test_worker_helpers_raise_the_same_validation_errors():
+    """The helpers run the same validation as the dict path — the error
+    type and message are identical, raised at the warm() call itself."""
+    from pylair import warm
+
+    with pytest.raises(ValueError, match="pool"):
+        warm(pool=0)
+    with pytest.raises(ValueError, match="pool"):
+        warm(pool=1.5)
+    with pytest.raises(TypeError, match="prewarm"):
+        warm(prewarm="yes")
+    with pytest.raises(ValueError, match="cancel_grace_ms"):
+        warm(cancel_grace_ms=3001)
+    with pytest.raises(ValueError, match="idle_ttl_s"):
+        warm(idle_ttl_s=0)
+    with pytest.raises(ValueError, match="idle_ttl_s"):
+        warm(idle_ttl_s="soon")
+
+
+def test_worker_dict_form_unchanged():
+    """A hand-written dict still works exactly as before — it is not
+    required to be a WorkerConfig and unknown keys still reject."""
+
+    def go():
+        @expose(worker={"mode": "warm", "idle_ttl_s": 60})
+        def dictform() -> int:
+            return 1
+
+        assert exposed_functions()["dictform"].worker == {
+            "mode": "warm",
+            "pool": 1,
+            "idle_ttl_s": 60,
+            "cancel_grace_ms": 3000,
+        }
+        with pytest.raises(ValueError, match="unknown worker option"):
+            expose(worker={"mode": "warm", "ttl": 5})(lambda: 1)
+
+    _with_clean_registry(go)
+
+
 # ---- pool behavior ------------------------------------------------------------
 
 

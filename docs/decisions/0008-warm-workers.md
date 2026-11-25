@@ -9,7 +9,9 @@ per call (`_tasks.py:345-352`), which re-imports the app module, runs
 once and exits (`_worker.py:108-184`). For an app holding a loaded
 model that is seconds of import+init per call — `docs/cancellation.md`
 already calls `isolated=True` "effectively unusable" for it and reserves
-`worker={"mode": "warm"}` (`_expose.py:112-115`, `ideas.md:14-18`).
+`worker=warm()` — the typed config helper; the dict form
+`{"mode": "warm"}` it validates to stays accepted
+(`_expose.py:112-115`, `ideas.md:14-18`).
 
 Should warm workers exist as a per-function pool of long-lived workers
 serving one call at a time over a private framed loop, and exactly what

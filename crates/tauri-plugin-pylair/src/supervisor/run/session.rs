@@ -332,7 +332,7 @@ impl<'a> Session<'a> {
             "pylair: event loop blocked for {stale:?} — every call waits. \
              Blocking work inside an `async def` stalls the whole loop; use a plain \
              `def` (Pylair runs it in a worker thread), `await asyncio.to_thread(...)`, \
-             or worker=\"isolated\"/\"warm\" for heavy CPU or model work"
+             or worker=isolated()/warm() for heavy CPU or model work"
         );
         // The call(s) in flight when the stall began are the likeliest
         // holders — name up to three so the warning points at the code.
