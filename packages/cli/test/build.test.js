@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { matchGlob } from "../dist/glob.js";
 import { stageNotices, download, downloadWithRetry, downloadTimeoutMs, ensureTarball, uvExportArgs, uvPipInstallArgs, requirementsHaveHashes, PYC_INVALIDATION_MODE } from "../dist/build.js";
@@ -1318,5 +1319,59 @@ describe("windowsSigningConfigured", () => {
     assert.ok(!windowsSigningConfigured(appWithConf(JSON.stringify({ bundle: {} }))));
     assert.ok(!windowsSigningConfigured(appWithConf("not json")));
     assert.ok(!windowsSigningConfigured(mkdtempSync(join(tmpdir(), "x-")))); // no file
+  });
+});
+
+describe("runBuildCodegen", async () => {
+  const { runBuildCodegen } = await import("../dist/build.js");
+  const py = (() => {
+    for (const c of ["python3", "python"]) {
+      const r = spawnSync(c, ["-c", "import sys;sys.exit(0 if sys.version_info>=(3,12) else 1)"]);
+      if (r.status === 0) return c;
+    }
+    return null;
+  })();
+  const REPO = fileURLToPath(new URL("../../..", import.meta.url));
+
+  /** A tmp app: backend/ exposes one function; resources/site-packages
+   * carries the repo's pylair package (pure python, no install needed). */
+  const fixture = () => {
+    const dir = mkdtempSync(join(tmpdir(), "pylair-build-codegen-"));
+    mkdirSync(join(dir, "backend"), { recursive: true });
+    writeFileSync(join(dir, "backend", "__init__.py"), "");
+    writeFileSync(
+      join(dir, "backend", "app.py"),
+      "from pylair import expose\n\n@expose\ndef hello(name: str = \"world\") -> str:\n    return f\"hi {name}\"\n",
+    );
+    const sp = join(dir, "resources", "site-packages");
+    mkdirSync(sp, { recursive: true });
+    fsModule.cpSync(join(REPO, "python", "pylair", "src", "pylair"), join(sp, "pylair"), { recursive: true });
+    return dir;
+  };
+
+  test("writes typed stubs for a bridge app, headed as ephemeral", { skip: !py }, () => {
+    const dir = fixture();
+    try {
+      const out = runBuildCodegen(dir, { appModule: "backend.app", source: "backend" }, py, join(dir, "resources"));
+      assert.equal(out, join(dir, "src", "api.generated.ts"));
+      const ts = readFileSync(out, "utf-8");
+      assert.match(ts, /export function hello\(/);
+      assert.match(ts, /do not edit/);
+      assert.match(ts, /never committed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unimportable app module fails the build, naming it", { skip: !py }, () => {
+    const dir = fixture();
+    try {
+      assert.throws(
+        () => runBuildCodegen(dir, { appModule: "backend.missing", source: "backend" }, py, join(dir, "resources")),
+        /pylair build: codegen failed to import 'backend\.missing'[\s\S]*docs\/codegen\.md/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
