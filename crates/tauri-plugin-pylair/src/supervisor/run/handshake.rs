@@ -103,6 +103,17 @@ impl Supervisor {
                     .collect()
             })
             .unwrap_or_default();
+        // Warm-pool membership (decision 0008) rides the manifest as
+        // `worker: "warm"` — the inspector's mode column needs it.
+        self.fn_warm = hello["exposes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| e["worker"].as_str() == Some("warm"))
+                    .filter_map(|e| e["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         let _ = self
             .events
             .try_send(RuntimeEvent::Exposes(hello["exposes"].clone()));

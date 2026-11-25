@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pylair inspector</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; background: #14161a; color: #d7dae0;
+         font: 12px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 10px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+       color: #8b919c; margin: 14px 0 6px; }
+  .panel { background: #1c1f26; border: 1px solid #2a2e38; border-radius: 6px;
+           padding: 8px 10px; margin-bottom: 10px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: #8b919c; font-weight: 600; padding: 3px 8px 3px 4px;
+       position: sticky; top: 0; background: #1c1f26; cursor: default; }
+  td { padding: 2px 8px 2px 4px; border-top: 1px solid #23262e; white-space: nowrap;
+       max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  tr.err td { color: #ff7d7d; }
+  tr.cancel td { color: #f0b454; }
+  tr.limit td { color: #e38de8; }
+  tr.inflight td { color: #6fb6ff; }
+  tr:hover td { background: #232733; }
+  .pill { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10px;
+          background: #2a2e38; margin-right: 4px; }
+  .pill.ok { background: #1e3a28; color: #6fd390; }
+  .pill.bad { background: #3a1e1e; color: #ff7d7d; }
+  .pill.busy { background: #3a331e; color: #f0b454; }
+  button { background: #2a2e38; color: #d7dae0; border: 1px solid #3a3e48;
+           border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; }
+  button.on { background: #20405e; border-color: #3a6a9e; }
+  input, select { background: #14161a; color: #d7dae0; border: 1px solid #3a3e48;
+                  border-radius: 4px; padding: 2px 6px; font: inherit; }
+  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 6px 14px; }
+  .kv b { color: #8b919c; font-weight: 600; margin-right: 5px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  .scroll { max-height: 46vh; overflow-y: auto; }
+  .comp { display: inline-block; margin: 2px 8px 2px 0; }
+  #paused-note { color: #f0b454; display: none; }
+</style>
+</head>
+<body>
+<h1>pylair inspector
+  <button id="pause">pause</button>
+  <span id="paused-note">paused — data frozen</span>
+  <span id="clock" class="mono" style="color:#8b919c"></span>
+</h1>
+
+<div class="panel" id="health"><h2>health</h2><div class="grid" id="healthgrid"></div>
+  <div id="components" style="margin-top:6px"></div>
+  <div id="updatestate"></div>
+</div>
+
+<div class="panel" id="pools" style="display:none"><h2>warm pools</h2>
+  <table id="pooltable"><thead><tr>
+    <th>function</th><th>size</th><th>live</th><th>busy</th><th>idle</th>
+    <th>queued</th><th>deaths</th><th>crash loop</th><th>idle ttl</th><th>reaps</th>
+  </tr></thead><tbody></tbody></table>
+</div>
+
+<div class="panel" id="stats"><h2>per-function latency</h2>
+  <table id="stattable"><thead><tr>
+    <th>function</th><th>calls</th><th>errors</th><th>p50 ms</th><th>p95 ms</th>
+  </tr></thead><tbody></tbody></table>
+</div>
+
+<div class="panel">
+  <h2>calls</h2>
+  <div class="filters">
+    <input id="ffn" placeholder="function filter" size="14">
+    <select id="fout">
+      <option value="">any outcome</option><option value="ok">ok</option>
+      <option value="error">error</option><option value="cancelled">cancelled</option>
+      <option value="limit">limit</option><option value="in_flight">in flight</option>
+    </select>
+    <input id="fwin" placeholder="window filter" size="10">
+    <span class="mono" id="rowcount" style="color:#8b919c"></span>
+  </div>
+  <div class="scroll"><table id="calltable"><thead><tr>
+    <th>seq</th><th>function</th><th>window</th><th>mode</th><th>started</th>
+    <th>ms</th><th>outcome</th><th>req B</th><th>resp B</th><th>chunks</th><th></th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<script>
+"use strict";
+let paused = false, frozen = null;
+const $ = (id) => document.getElementById(id);
+$("pause").onclick = () => {
+  paused = !paused;
+  $("pause").className = paused ? "on" : "";
+  $("pause").textContent = paused ? "resume" : "pause";
+  $("paused-note").style.display = paused ? "inline" : "none";
+};
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function outcomeText(o) {
+  if (!o) return "?";
+  if (o.kind === "ok") return "ok";
+  if (o.kind === "error") return "error " + o.code;
+  if (o.kind === "cancelled") return "cancelled" + (o.verdict ? " (" + o.verdict + ")" : "");
+  if (o.kind === "limit") return "limit " + (o.limit || "");
+  if (o.kind === "in_flight") return "in flight";
+  return o.kind;
+}
+function outcomeClass(o) {
+  if (!o) return "";
+  if (o.kind === "error") return "err";
+  if (o.kind === "cancelled") return "cancel";
+  if (o.kind === "limit") return "limit";
+  if (o.kind === "in_flight") return "inflight";
+  return "";
+}
+function pct(sorted, p) {
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+function render(data) {
+  $("clock").textContent = new Date().toLocaleTimeString();
+  const h = data.health || {};
+  const liv = h.liveness || {};
+  const pillFor = (v) => v === "ok" ? "ok" : (v === "unknown" ? "busy" : "bad");
+  let hg = "";
+  hg += `<div class="kv"><b>state</b>${esc(h.state)} (gen ${h.generation ?? "?"})</div>`;
+  hg += `<div class="kv"><b>transport</b><span class="pill ${pillFor(liv.transport)}">${esc(liv.transport)}</span></div>`;
+  hg += `<div class="kv"><b>loop</b><span class="pill ${pillFor(liv.loop)}">${esc(liv.loop)}</span>`;
+  if (liv.loop_stale_ms != null) hg += ` ${esc(liv.loop_stale_ms)}ms`;
+  hg += `</div>`;
+  hg += `<div class="kv"><b>missed pongs</b>${liv.missed_pongs ?? 0}/${liv.missed_pongs_to_kill ?? "?"}</div>`;
+  hg += `<div class="kv"><b>rtt</b>${liv.rtt_ms ?? "—"} ms</div>`;
+  if (h.load) hg += `<div class="kv"><b>load</b>${h.load.tasks} tasks, ${h.load.streams} streams, ${h.load.isolated} isolated, ${h.load.queued} queued</div>`;
+  if (h.restarts) hg += `<div class="kv"><b>restarts</b>${h.restarts.crashes_in_window}/${h.restarts.breaker?.crashes ?? "?"} in window</div>`;
+  if (h.uptime_ms != null) hg += `<div class="kv"><b>uptime</b>${Math.round(h.uptime_ms / 1000)}s</div>`;
+  $("healthgrid").innerHTML = hg;
+  let comps = "";
+  if (h.app && h.app.components) {
+    for (const [name, c] of Object.entries(h.app.components)) {
+      const cls = c.phase === "ready" ? "ok" : (c.phase === "failed" ? "bad" : "busy");
+      comps += `<span class="comp"><span class="pill ${cls}">${esc(c.phase)}</span> ${esc(name)}`;
+      if (c.progress != null) comps += ` ${Math.round(c.progress * 100)}%`;
+      comps += `</span>`;
+    }
+  }
+  $("components").innerHTML = comps;
+  $("updatestate").innerHTML = h.update
+    ? `<div class="kv" style="margin-top:4px"><b>update</b><span class="mono">${esc(JSON.stringify(h.update))}</span></div>` : "";
+
+  const pools = h.pools;
+  const poolNames = pools ? Object.keys(pools) : [];
+  $("pools").style.display = poolNames.length ? "block" : "none";
+  if (poolNames.length) {
+    let rows = "";
+    for (const fn of poolNames.sort()) {
+      const p = pools[fn];
+      rows += `<tr><td>${esc(fn)}</td><td>${p.size}</td><td>${p.live}</td><td>${p.busy}</td>` +
+        `<td>${p.idle}</td><td>${p.queued}</td><td>${p.deaths}</td>` +
+        `<td>${p.crash_loop ? '<span class="pill bad">yes</span>' : "no"}</td>` +
+        `<td>${p.idle_ttl_s ?? "—"}</td><td>${p.reaps}</td></tr>`;
+    }
+    $("pooltable").querySelector("tbody").innerHTML = rows;
+  }
+
+  const recs = (data.records || []).concat(data.in_flight || []);
+  const byFn = {};
+  for (const r of recs) {
+    if (r.outcome?.kind === "in_flight") continue;
+    const st = byFn[r.function] = byFn[r.function] || { n: 0, err: 0, lat: [] };
+    st.n++; st.lat.push(r.latency_ms);
+    if (r.outcome?.kind !== "ok") st.err++;
+  }
+  let sr = "";
+  for (const fn of Object.keys(byFn).sort()) {
+    const st = byFn[fn];
+    st.lat.sort((a, b) => a - b);
+    sr += `<tr><td>${esc(fn)}</td><td>${st.n}</td><td>${st.err}</td>` +
+      `<td>${pct(st.lat, 0.5)}</td><td>${pct(st.lat, 0.95)}</td></tr>`;
+  }
+  $("stattable").querySelector("tbody").innerHTML = sr;
+
+  const ffn = $("ffn").value.toLowerCase(), fout = $("fout").value,
+        fwin = $("fwin").value.toLowerCase();
+  const rows = recs.filter((r) =>
+    (!ffn || r.function.toLowerCase().includes(ffn)) &&
+    (!fout || r.outcome?.kind === fout) &&
+    (!fwin || (r.window || "").toLowerCase().includes(fwin)));
+  rows.sort((a, b) => b.seq - a.seq);
+  $("rowcount").textContent = rows.length + " rows";
+  let tr = "";
+  for (const r of rows.slice(0, 500)) {
+    const t = new Date(r.start_unix_ms);
+    const hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0"),
+          ss = String(t.getSeconds()).padStart(2, "0"), ms = String(t.getMilliseconds()).padStart(3, "0");
+    tr += `<tr class="${outcomeClass(r.outcome)}">` +
+      `<td>${r.seq}</td><td title="${esc(r.function)}">${esc(r.function)}</td>` +
+      `<td>${esc(r.window ?? "")}</td><td>${esc(r.mode)}</td>` +
+      `<td class="mono">${hh}:${mm}:${ss}.${ms}</td><td>${r.latency_ms}</td>` +
+      `<td title="${esc(outcomeText(r.outcome))}">${esc(outcomeText(r.outcome))}</td>` +
+      `<td>${r.req_bytes}</td><td>${r.resp_bytes}</td>` +
+      `<td>${r.stream ? r.stream.chunks : ""}</td>` +
+      `<td><button data-seq="${r.seq}" class="copybtn" title="copy row as JSON">⧉</button></td></tr>`;
+  }
+  const tbody = $("calltable").querySelector("tbody");
+  tbody.innerHTML = tr;
+  tbody.querySelectorAll(".copybtn").forEach((b) => {
+    b.onclick = () => {
+      const row = rows.find((x) => String(x.seq) === b.dataset.seq);
+      if (row) navigator.clipboard.writeText(JSON.stringify(row, null, 2));
+    };
+  });
+}
+
+async function poll() {
+  if (!paused) {
+    try {
+      const r = await fetch("snapshot", { cache: "no-store" });
+      if (r.ok) frozen = await r.json();
+    } catch (e) { /* window closing or scheme hiccup — next tick retries */ }
+  }
+  if (frozen) render(frozen);
+  setTimeout(poll, 250);
+}
+$("ffn").oninput = $("fout").onchange = $("fwin").oninput = () => frozen && render(frozen);
+poll();
+</script>
+</body>
+</html>

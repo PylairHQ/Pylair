@@ -391,7 +391,11 @@ export function main(rawArgv: string[]): number | Promise<number> {
   }
   if (command === "dev") {
     const dir = resolveAppDir(argValue(rest, "--dir"));
-    return dev({ appDir: dir }).then(
+    return dev({
+      appDir: dir,
+      inspect: rest.includes("--inspect"),
+      inspectPayloads: rest.includes("--inspect-payloads"),
+    }).then(
       (code) => code,
       (e) => failed("dev", e),
     );

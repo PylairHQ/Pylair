@@ -255,6 +255,9 @@ def exposes_manifest() -> list[dict]:
             "kind": ex.kind,
             "signature": ex.signature,
             "doc": inspect.getdoc(ex.fn),
+            # 0008 worker mode, flattened: lets the host tell a warm-pooled
+            # fn from a per-call isolated one (inspector mode column).
+            "worker": (ex.worker or {}).get("mode"),
         }
         for name, ex in sorted(_registry.items())
     ]

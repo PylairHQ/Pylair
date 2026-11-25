@@ -150,6 +150,7 @@ pub struct Handle {
     /// (docs/decisions/0006 §1) plus the three config constants its
     /// schema publishes.
     pub(super) health: HealthRef,
+    pub(crate) inspect: crate::inspect::InspectRef,
     pub(super) missed_pongs_to_kill: u32,
     pub(super) breaker_crashes: usize,
     pub(super) breaker_window: Duration,
@@ -218,6 +219,7 @@ impl Handle {
             missed_pongs,
             loop_stale_ms,
             app_map,
+            pools_map,
         ) = {
             let h = self.health.lock().unwrap();
             (
@@ -252,6 +254,7 @@ impl Handle {
                     })
                 },
                 h.app.clone(),
+                h.pools.clone(),
             )
         };
         // Same rule the pylair://health event emits on
@@ -357,6 +360,15 @@ impl Handle {
                         })
                         .collect(),
                 })
+            },
+            // Per-generation mirror of the runtime's pong-reported pool
+            // status (decision 0008 §health): null until the first pong
+            // of a live generation carries it, absent on the web kind
+            // (a launcher cannot see the wrapped server's pools).
+            pools: if self.kind == RuntimeKind::Web || !live {
+                None
+            } else {
+                Some(pools_map)
             },
         }
     }
@@ -555,6 +567,12 @@ impl Handle {
 
     /// The shared fairness map, for `WindowRegistry` to maintain the
     /// live set (builder wiring).
+    /// The dev-only inspector tap (docs/inspector.md) — inert unless
+    /// debug + PYLAIR_INSPECT=1; a no-op shell in release builds.
+    pub fn inspect(&self) -> crate::inspect::InspectRef {
+        self.inspect.clone()
+    }
+
     pub(crate) fn fairness(&self) -> FairnessRef {
         self.fair.clone()
     }

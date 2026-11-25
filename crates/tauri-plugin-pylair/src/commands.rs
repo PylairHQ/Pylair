@@ -351,6 +351,59 @@ pub fn python_health_impl<R: Runtime>(
     Ok(v)
 }
 
+/// The dev-only inspector snapshot (docs/inspector.md): the tap's call
+/// records plus a health snapshot, read-only. The inspector window is
+/// the ONLY window it answers — the tap is dev tooling, never a data
+/// channel into app windows. Not compiled into release builds.
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn python_inspect_snapshot<R: Runtime>(
+    window: tauri::WebviewWindow<R>,
+    rt: tauri::State<'_, PyRuntime>,
+) -> Result<Value, ErrorObj> {
+    python_inspect_snapshot_impl(&window, &rt)
+}
+
+/// Release builds carry no inspector — the command shell exists only so
+/// the handler list stays uniform; it errors before doing anything.
+#[cfg(not(debug_assertions))]
+#[tauri::command]
+fn python_inspect_snapshot<R: Runtime>(
+    // Same signature as the debug command — the macro infers R from
+    // the argument types; the params themselves go unused in release.
+    _window: tauri::WebviewWindow<R>,
+    _rt: tauri::State<'_, PyRuntime>,
+) -> Result<Value, ErrorObj> {
+    Err(ErrorObj {
+        code: protocol::INVALID_REQUEST,
+        message: "the inspector is a dev-only debug-build feature".into(),
+        data: None,
+    })
+}
+
+/// `python_inspect_snapshot`'s body, callable in tests.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn python_inspect_snapshot_impl<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    rt: &PyRuntime,
+) -> Result<Value, ErrorObj> {
+    if window.label() != crate::inspect::WINDOW_LABEL {
+        return Err(ErrorObj {
+            code: protocol::INVALID_REQUEST,
+            message: "python_inspect_snapshot is restricted to the inspector window".into(),
+            data: None,
+        });
+    }
+    let mut snap = rt.0.inspect().snapshot();
+    snap["health"] = serde_json::to_value(rt.0.health(None)).map_err(|e| ErrorObj {
+        code: protocol::INTERNAL,
+        message: format!("health snapshot failed to serialize: {e}"),
+        data: None,
+    })?;
+    Ok(snap)
+}
+
 #[tauri::command]
 async fn python_shutdown<R: Runtime>(
     window: tauri::WebviewWindow<R>,
@@ -378,6 +431,8 @@ pub(super) fn invoke_handler<R: Runtime>(
             python_selftest_report,
             python_selftest_b_report,
             python_bench_report,
+            python_inspect_snapshot,
+            python_inspect_snapshot,
             crate::update::cmd::python_update_check,
             crate::update::cmd::python_update_download,
             crate::update::cmd::python_update_install,
@@ -399,6 +454,7 @@ pub(super) fn invoke_handler<R: Runtime>(
             python_selftest_report,
             python_selftest_b_report,
             python_bench_report,
+            python_inspect_snapshot,
         ]
     }
 }

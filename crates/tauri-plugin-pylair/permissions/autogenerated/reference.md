@@ -180,6 +180,32 @@ Denies the python_health command without any pre-configured scope.
 <tr>
 <td>
 
+`pylair:allow-python-inspect-snapshot`
+
+</td>
+<td>
+
+Enables the python_inspect_snapshot command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pylair:deny-python-inspect-snapshot`
+
+</td>
+<td>
+
+Denies the python_inspect_snapshot command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pylair:allow-python-release-blob`
 
 </td>

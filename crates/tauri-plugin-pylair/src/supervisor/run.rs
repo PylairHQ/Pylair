@@ -175,6 +175,13 @@ pub fn spawn(
     // the fairness map; written only at bookkeeping points, never on
     // a hot path.
     let health = health::new(config.backoff_base);
+    // The dev-only inspector tap (docs/inspector.md): compiled to a
+    // no-op shell in release, inert in debug unless PYLAIR_INSPECT=1.
+    // Never feeds the events channel — the page polls it directly.
+    let inspect = crate::inspect::InspectRef::new(
+        std::env::var_os("PYLAIR_INSPECT").is_some_and(|v| v == "1"),
+        std::env::var_os("PYLAIR_INSPECT_PAYLOADS").is_some_and(|v| v == "1"),
+    );
     let (cmd_tx, cmd_rx) = mpsc::channel(limits.max_queued_commands);
     let (state_tx, state_rx) = watch::channel(State::Starting);
     let (ready_url_tx, ready_url_rx) = watch::channel(None::<String>);
@@ -198,7 +205,9 @@ pub fn spawn(
         next_task: next_task.clone(),
         fair: fair.clone(),
         health: health.clone(),
+        inspect: inspect.clone(),
         fn_kinds: HashMap::new(),
+        fn_warm: std::collections::HashSet::new(),
         ready_since: None,
         shutdown_acks: Vec::new(),
         shutdown_outcome: None,
@@ -223,6 +232,7 @@ pub fn spawn(
             limits,
             fair,
             health,
+            inspect,
             blobs,
         },
         actor,
@@ -250,11 +260,15 @@ struct Supervisor {
     /// Host-observed health mirrors shared with `Handle`
     /// (docs/decisions/0006 §1) — written only at bookkeeping points.
     health: HealthRef,
+    /// The dev-only inspector tap (docs/inspector.md) — see `inspect.rs`.
+    pub(super) inspect: crate::inspect::InspectRef,
     /// The current generation's `fn_name -> kind` map, parsed out of
     /// `hello["exposes"]` when the handshake succeeds and replaced on
     /// every new generation (a dev reload's manifest can differ). An
     /// absent name counts as non-isolated.
     fn_kinds: HashMap<String, String>,
+    /// Warm-pooled fns of the current generation (0008) — inspector mode.
+    pub(super) fn_warm: std::collections::HashSet<String>,
     /// When the current generation reached Ready — a crash after a sustained
     /// ready period is a fresh incident, not a boot loop.
     ready_since: Option<Instant>,

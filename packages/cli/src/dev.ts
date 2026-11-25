@@ -107,7 +107,11 @@ function devHeader(appDir: string, cfg: PylairConfig): void {
  * runtime file named by PYLAIR_WRAP_CONFIG, starts the launcher with the
  * project venv, and shows the server in the window. A change to a .py file
  * restarts the server (new port, the window follows). */
-async function devWrap(appDir: string, cfg: PylairConfig): Promise<number> {
+async function devWrap(
+  appDir: string,
+  cfg: PylairConfig,
+  inspectEnv: Record<string, string>,
+): Promise<number> {
   for (const w of wrapWarnings(cfg.wrap!)) ui.warn(w, { plain: `pylair: warning: ${w}` });
   const srcDir = join(appDir, cfg.source);
   if (!existsSync(srcDir))
@@ -138,6 +142,7 @@ async function devWrap(appDir: string, cfg: PylairConfig): Promise<number> {
       PYLAIR_PYTHON: venvPython(appDir),
       PYLAIR_RESTART_TRIGGER: trigger,
       PYLAIR_DEV: "1",
+      ...inspectEnv,
     },
   });
   return new Promise((resolve) => {
@@ -147,8 +152,26 @@ async function devWrap(appDir: string, cfg: PylairConfig): Promise<number> {
   });
 }
 
-export async function dev(opts: { appDir: string }): Promise<number> {
+export async function dev(opts: {
+  appDir: string;
+  inspect?: boolean;
+  inspectPayloads?: boolean;
+}): Promise<number> {
   const { appDir } = opts;
+  // Inspector (docs/inspector.md): dev-only, compiled into debug builds
+  // only — the env flags reach the plugin through the dev child. The
+  // window opens once the app is up; payloads are a second opt-in.
+  const inspectEnv: Record<string, string> = {};
+  if (opts.inspect) {
+    inspectEnv.PYLAIR_INSPECT = "1";
+    ui.info("pylair: inspector window will open (PYLAIR_INSPECT=1)");
+  }
+  if (opts.inspectPayloads) {
+    inspectEnv.PYLAIR_INSPECT = "1";
+    inspectEnv.PYLAIR_INSPECT_PAYLOADS = "1";
+    if (!opts.inspect)
+      ui.info("pylair: inspector window will open (payload previews on)");
+  }
   const cfg = loadConfig(appDir);
 
   // Sync so the venv exists before codegen/dev need the interpreter.
@@ -163,7 +186,7 @@ export async function dev(opts: { appDir: string }): Promise<number> {
     );
   }
 
-  if (cfg.mode === "wrap") return devWrap(appDir, cfg);
+  if (cfg.mode === "wrap") return devWrap(appDir, cfg, inspectEnv);
 
   const srcDir = join(appDir, cfg.source);
   const stateDir = join(appDir, ".pylair");
@@ -197,6 +220,7 @@ export async function dev(opts: { appDir: string }): Promise<number> {
     PYLAIR_PYTHONPATH: importRoot(appDir, cfg.source),
     PYLAIR_RESTART_TRIGGER: trigger,
     PYLAIR_DEV: "1",
+    ...inspectEnv,
   };
   // tauri.conf.json maps resources/* paths that only exist after
   // `pylair build` stages them; `tauri dev` validates them eagerly and

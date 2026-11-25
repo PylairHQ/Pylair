@@ -8,6 +8,20 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Live inspector for `pylair dev`** (dev builds only):
+  `pylair dev --inspect` opens a separate read-only window with a live
+  table of the last 1000 calls (function, window, mode, latency,
+  outcome — ok / error / cancelled with verdict / limit with cap —
+  request/response sizes, stream chunk counts), per-function p50/p95
+  latency and error counts, the health panel and warm-pool status.
+  `--inspect-payloads` adds truncated payload previews (never blob
+  bytes). Compiled only into debug builds behind `PYLAIR_INSPECT=1`;
+  release builds contain no inspector code. See docs/inspector.md.
+- `health()` now carries `pools`: per-function warm-pool status
+  (size, live/busy/idle members, queue depth, consecutive deaths,
+  crash-loop state, `idle_ttl_s`, reaps) reported by the runtime on
+  each pong — for every app, no inspector needed.
+
 ## npm-v0.1.0-rc.31 (2026-11-25)
 
 Crate `0.1.0-rc.24`, `pylair 0.1.0rc17` on PyPI, npm `0.1.0-rc.31`.

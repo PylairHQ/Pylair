@@ -206,6 +206,30 @@ impl<R: Runtime> Builder<R> {
                 });
             },
         );
+        // Dev-only inspector (docs/inspector.md): the scheme serves the
+        // bundled page and the snapshot, both gated to the inspector
+        // window's label. Compiled out of release builds entirely.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("PYLAIR_INSPECT").is_some_and(|v| v == "1") {
+            plugin = plugin.register_asynchronous_uri_scheme_protocol(
+                crate::inspect::SCHEME,
+                |ctx, req, responder| {
+                    let app = ctx.app_handle().clone();
+                    let label = ctx.webview_label().to_string();
+                    std::thread::spawn(move || {
+                        let path = req.uri().path().to_string();
+                        let (status, mime, body) = crate::inspect::serve(&app, &label, &path);
+                        responder.respond(
+                            tauri::http::Response::builder()
+                                .status(status)
+                                .header("content-type", mime)
+                                .body(body)
+                                .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+                        );
+                    });
+                },
+            );
+        }
         plugin
             .setup(move |app, _api| {
                 let wrap_rt = if self.wrap {
@@ -326,6 +350,37 @@ impl<R: Runtime> Builder<R> {
                 // Wrap mode: the window is built here, once the loop is running
                 // (see wrap::install_window), never in `setup`.
                 if let tauri::RunEvent::Ready = event {
+                    // Dev-only inspector window (docs/inspector.md) —
+                    // debug builds + PYLAIR_INSPECT=1 only. Off the main
+                    // thread, same as win-b above: create_window
+                    // dispatches to the loop and blocks on the ack.
+                    #[cfg(debug_assertions)]
+                    if std::env::var_os("PYLAIR_INSPECT").is_some_and(|v| v == "1") {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // Same platform split as the blob scheme
+                            // (decision 0010): Windows/Android serve
+                            // custom schemes at http://<scheme>.localhost.
+                            let url = if cfg!(windows) || cfg!(target_os = "android") {
+                                format!("http://{}.localhost/", crate::inspect::SCHEME)
+                            } else {
+                                format!("{}://localhost/", crate::inspect::SCHEME)
+                            };
+                            if let Err(e) = tauri::WebviewWindowBuilder::new(
+                                &app,
+                                crate::inspect::WINDOW_LABEL,
+                                tauri::WebviewUrl::External(
+                                    url.parse().expect("inspector url parses"),
+                                ),
+                            )
+                            .title("pylair inspector")
+                            .inner_size(1100.0, 700.0)
+                            .build()
+                            {
+                                eprintln!("pylair: inspector window failed: {e}");
+                            }
+                        });
+                    }
                     if let Some(st) = app.try_state::<wrap::WrapState<R>>() {
                         let (app, ui) = (app.clone(), st.0.clone());
                         tauri::async_runtime::spawn(async move {

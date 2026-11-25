@@ -143,6 +143,7 @@ class _WarmPool:
         "members",
         "prewarm",
         "queue",
+        "reaps",
         "size",
         "spawning",
         "stopped",
@@ -163,6 +164,7 @@ class _WarmPool:
         self.queue: deque[tuple[Task, asyncio.Future]] = deque()
         self.deaths = 0  # consecutive member deaths with no success
         self.stopped = False  # crash-loop limit hit — calls fail fast
+        self.reaps = 0  # idle-TTL reaps so far (health/inspector)
         # Prewarmed pools own the `worker:<fn>` readiness component —
         # every fresh member handshakes so ready/failed always means a
         # live member passed import+resolve (0008 §6).
@@ -595,6 +597,44 @@ class TaskRegistry:
                 ),
             )
 
+    def warm_pool_stats(self) -> dict:
+        """Per-function warm-pool status for the host's health() (0008,
+        docs/inspector.md): piggybacked on the pong so the host never
+        needs a round trip. Small and bounded — one entry per warm fn,
+        each a flat dict of ints.
+
+        Called from the READER thread (the pong is answered off-loop,
+        protocol §5) while the loop mutates pools — every collection is
+        copied before iteration and any residual race degrades to a
+        missing entry, never an exception: a diagnostics read must not
+        be able to kill the liveness thread that carries it.
+        """
+        out = {}
+        try:
+            items = list(self._pools.items())
+        except RuntimeError:
+            return out
+        for fn_name, pool in items:
+            try:
+                members = list(pool.members)
+                queue_len = len(pool.queue)
+                live = [m for m in members if m.proc.returncode is None]
+                busy = sum(1 for m in live if m.busy)
+                out[fn_name] = {
+                    "size": pool.size,
+                    "live": len(live),
+                    "busy": busy,
+                    "idle": len(live) - busy,
+                    "queued": queue_len,
+                    "deaths": pool.deaths,
+                    "crash_loop": pool.stopped,
+                    "idle_ttl_s": pool.idle_ttl_s,
+                    "reaps": pool.reaps,
+                }
+            except (RuntimeError, AttributeError):
+                continue  # pool mid-mutation — the next pong catches it
+        return out
+
     # ---- warm pools (decision 0008) ----------------------------------------
     #
     # A warm call is a normal isolated task until it reaches a pool member:
@@ -1006,6 +1046,7 @@ class TaskRegistry:
         t.add_done_callback(self._reap_tasks.discard)
 
     async def _reap_idle(self, pool: _WarmPool, m: _WarmMember) -> None:
+        pool.reaps += 1
         """Drop the condemned member — no call is waiting on this reap,
         so a failure is logged, never raised."""
         try:

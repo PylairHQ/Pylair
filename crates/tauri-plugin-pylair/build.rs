@@ -14,6 +14,9 @@ const COMMANDS: &[&str] = &[
     "python_selftest_report",
     "python_selftest_b_report",
     "python_bench_report",
+    // Dev-only inspector (docs/inspector.md) — declared unconditionally
+    // like the updater commands; on release builds invoking it errors.
+    "python_inspect_snapshot",
     // Declared unconditionally so the permission files exist for
     // --with-updater scaffolds; on a feature-off build the commands are
     // absent and invoking them simply fails "command not found".

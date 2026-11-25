@@ -464,3 +464,16 @@ and it interacts with §5's event design. Do not design it in this PR.
    webview; `protocol-v1.md` §5 cross-reference (host observability
    surface — the wire is untouched, so a doc *note*, not a contract
    change) and README capability list.
+
+## Addendum (0008 §health): `pools`
+
+The v1 snapshot carries one more additive, non-exhaustive field:
+`pools` — the runtime's warm-pool status per function (`{size, live,
+busy, idle, queued, deaths, crash_loop, idle_ttl_s, reaps}`), reported
+on each pong and mirrored per-generation exactly like `app` (cleared at
+teardown, `null` outside a live generation, absent on the `web` kind).
+It is runtime-wide, not caller-scoped — pool state is not
+window-attributable. Reporting rides the pong precisely so `health()`
+never needs a host→runtime round trip; the §1 rule stands (nothing is
+written on the per-call hot path — the pong arm is a bookkeeping
+point). See `docs/inspector.md` for the consumer-facing shape.
