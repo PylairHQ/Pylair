@@ -9,7 +9,6 @@ use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
     spawn, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const T: Duration = Duration::from_secs(15);
@@ -19,7 +18,7 @@ const T: Duration = Duration::from_secs(15);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -207,7 +206,7 @@ async fn wait_state_within(h: &Handle, want: State, limit: Duration) {
 
 #[tokio::test]
 async fn hello_echo_pong_shutdown() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_READY), fast_config(), ev);
     wait_state(&h, State::Ready).await;
     let out = h
@@ -221,7 +220,7 @@ async fn hello_echo_pong_shutdown() {
 
 #[tokio::test]
 async fn shutdown_sends_grace_ms_inside_host_budget() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.shutdown_grace = Duration::from_secs(3);
     let h = spawn_h(spec(FAKE_ECHO_SHUTDOWN), cfg, ev);
@@ -244,7 +243,7 @@ async fn shutdown_sends_grace_ms_inside_host_budget() {
 
 #[tokio::test]
 async fn startup_hang_is_killed_and_fails() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     // breaker_crashes = 2 -> after two failed startups, state Failed
     let h = spawn_h(spec(FAKE_HANG), fast_config(), ev);
     wait_state(&h, State::Failed).await;
@@ -252,7 +251,7 @@ async fn startup_hang_is_killed_and_fails() {
 
 #[tokio::test]
 async fn stray_stdout_is_protocol_violation() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_STRAY_STDOUT), fast_config(), ev);
     wait_state(&h, State::Failed).await;
     // drain events: expect a Restarting transition (first crash) at least
@@ -271,14 +270,14 @@ async fn stray_stdout_is_protocol_violation() {
 
 #[tokio::test]
 async fn malformed_frame_is_protocol_violation() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_MALFORMED), fast_config(), ev);
     wait_state(&h, State::Failed).await;
 }
 
 #[tokio::test]
 async fn wedged_runtime_killed_on_missed_pongs() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_WEDGED), fast_config(), ev);
     wait_state(&h, State::Ready).await;
     // wedged: hello sent, never pongs -> Unresponsive -> killed -> restart cycle
@@ -308,7 +307,7 @@ while True:
 
 #[tokio::test]
 async fn pings_survive_data_lane_backpressure() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(512);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(512);
     let mut cfg = fast_config();
     // Let the flood reach the frame lanes instead of tripping the
     // command-queue or task-count limits first.
@@ -380,7 +379,7 @@ async fn pings_survive_data_lane_backpressure() {
 
 #[tokio::test]
 async fn kill_during_call_fails_caller_with_crashed() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_DIE_ON_CALL), fast_config(), ev);
     wait_state(&h, State::Ready).await;
     let err = h
@@ -392,7 +391,7 @@ async fn kill_during_call_fails_caller_with_crashed() {
 
 #[tokio::test]
 async fn crash_loop_breaker_trips() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_EXIT_NOW), fast_config(), ev);
     wait_state(&h, State::Failed).await;
     let mut restarts = 0;
@@ -426,7 +425,7 @@ async fn crash_loop_breaker_trips() {
 
 #[tokio::test]
 async fn e2e_real_runtime_full_flow() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), fast_config(), ev);
 
     wait_state(&h, State::Ready).await;
@@ -517,7 +516,7 @@ async fn e2e_real_runtime_full_flow() {
 
 #[tokio::test]
 async fn version_mismatch_goes_straight_to_failed() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_BAD_VERSION), fast_config(), ev);
     wait_state(&h, State::Failed).await;
     // Fatal is not a crash: zero Restarting transitions must have occurred.
@@ -539,7 +538,7 @@ async fn version_mismatch_goes_straight_to_failed() {
 
 #[tokio::test]
 async fn retry_respawns_after_failed() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_EXIT_NOW), fast_config(), ev);
     wait_state(&h, State::Failed).await;
     h.retry().await.unwrap();
@@ -565,7 +564,7 @@ async fn retry_respawns_after_failed() {
 
 #[tokio::test]
 async fn healthy_runtime_never_flaps_unresponsive() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_READY), fast_config(), ev);
     wait_state(&h, State::Ready).await;
     // sit through several ping intervals with a pinging runtime
@@ -592,7 +591,7 @@ b = json.dumps({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes
 sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
 time.sleep(0.3)
 "#;
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(NOISY), fast_config(), ev);
     wait_state(&h, State::Ready).await;
     sleep(Duration::from_millis(400)).await;
@@ -615,7 +614,7 @@ async fn restart_trigger_respawns_cleanly() {
     let trigger = dir.join("trigger");
     std::fs::write(&trigger, "0").unwrap();
 
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.restart_trigger = Some(trigger.clone());
     let h = spawn_h(spec(FAKE_READY), cfg, ev);
@@ -666,7 +665,7 @@ async fn produced(h: &Handle) -> i64 {
 /// terminal error (not hang), and the producer must be stopped.
 #[tokio::test]
 async fn stalled_consumer_gets_terminal_error_and_producer_stops() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.initial_stream_credit = 100_000;
     cfg.stream_buffer = 4;
@@ -709,7 +708,7 @@ async fn stalled_consumer_gets_terminal_error_and_producer_stops() {
 /// Receiver dropped (consumer vanished): the producer must be cancelled.
 #[tokio::test]
 async fn vanished_consumer_cancels_the_producer() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.initial_stream_credit = 100_000;
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -822,7 +821,7 @@ fn beat_file(tag: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn shutdown_resolves_only_after_the_whole_tree_is_gone() {
     let beat = beat_file("shutdown");
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(
         spec(&runtime_with_grandchild(&beat, false)),
         grandchild_config(),
@@ -848,7 +847,7 @@ async fn shutdown_resolves_only_after_the_whole_tree_is_gone() {
 #[tokio::test]
 async fn runtime_exiting_on_its_own_does_not_leave_descendants() {
     let beat = beat_file("crash");
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = grandchild_config();
     cfg.breaker_crashes = 2;
     let h = spawn_h(spec(&runtime_with_grandchild(&beat, true)), cfg, ev);
@@ -860,7 +859,7 @@ async fn runtime_exiting_on_its_own_does_not_leave_descendants() {
 
 #[tokio::test]
 async fn shutdown_during_restart_backoff_does_not_wait_out_the_backoff() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.breaker_crashes = 100; // stay in Restarting, never Failed
     cfg.backoff_base = Duration::from_secs(30);
@@ -881,7 +880,7 @@ async fn shutdown_during_restart_backoff_does_not_wait_out_the_backoff() {
 /// with RUNTIME_WEDGED instead of hanging forever behind healthy pongs.
 #[tokio::test]
 async fn blocked_event_loop_is_killed_and_the_call_fails_wedged() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.ping_interval = Duration::from_millis(100);
     cfg.loop_stall_kill = Some(Duration::from_millis(1500));
@@ -902,7 +901,7 @@ async fn blocked_event_loop_is_killed_and_the_call_fails_wedged() {
 /// A cancel the runtime cannot acknowledge must not hang the caller forever.
 #[tokio::test]
 async fn cancel_ack_is_bounded() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.cancel_timeout = Duration::from_millis(600);
     // loop_stall_kill stays off (the default): only the cancel deadline can save us.
@@ -929,7 +928,7 @@ async fn cancel_ack_is_bounded() {
 /// complete once the loop frees.
 #[tokio::test]
 async fn blocked_loop_warns_but_does_not_kill_by_default() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.ping_interval = Duration::from_millis(100);
     // A blocked loop must not starve reader-thread pongs — but on a loaded CI
@@ -995,7 +994,7 @@ async fn blocked_loop_warns_but_does_not_kill_by_default() {
 /// Ready, with the prints arriving as stderr events.
 #[tokio::test]
 async fn user_prints_neither_corrupt_nor_spoof_readiness() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut noisy = real_runtime_spec();
     noisy.args[2] = "testapp_noisy".into();
     let h = spawn_h(noisy, fast_config(), ev);

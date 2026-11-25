@@ -8,10 +8,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::protocol as proto;
-use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, Limits, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
-};
-use tokio::sync::mpsc;
+use tauri_plugin_pylair::supervisor::{spawn, Handle, Limits, SpawnSpec, State, SupervisorConfig};
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -19,7 +16,7 @@ const T: Duration = Duration::from_secs(20);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -131,7 +128,7 @@ async fn wait_state(h: &Handle, want: State) {
 /// refused `window_share` and win-b's call is admitted and answered.
 #[tokio::test]
 async fn one_owner_can_no_longer_starve_the_other_of_task_slots() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
     h.fairness_join_window("win-a");
     h.fairness_join_window("win-b");
@@ -191,7 +188,7 @@ async fn one_owner_can_no_longer_starve_the_other_of_task_slots() {
 /// victim see the same `max_concurrent_tasks` error.
 #[tokio::test]
 async fn one_owner_starves_the_other_when_fairness_is_off() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_per_window_fairness(false);
     let h = spawn_h(spec(FAKE_HOLDS_TASKS), c, ev);
@@ -355,7 +352,7 @@ async fn eventually(cond: impl Fn() -> bool) -> bool {
 /// in_flight.
 #[tokio::test]
 async fn in_queue_returns_to_zero_after_a_burst() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HOLDS_TASKS), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -379,7 +376,7 @@ async fn in_queue_returns_to_zero_after_a_burst() {
 /// not at dispatch).
 #[tokio::test]
 async fn in_queue_returns_to_zero_after_restart_fail_fast() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     // A long backoff holds the Restarting state open deterministically;
     // shutdown() below cuts the sleep short.
@@ -415,7 +412,7 @@ async fn in_queue_returns_to_zero_after_restart_fail_fast() {
 /// parks the supervisor, calls fail fast and owe nothing.
 #[tokio::test]
 async fn in_queue_returns_to_zero_after_failed_park() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.breaker_crashes = 2;
     let h = spawn_h(spec(FAKE_DIES_AFTER_HELLO), c, ev);
@@ -438,7 +435,7 @@ async fn in_queue_returns_to_zero_after_failed_park() {
 /// map, so the next Ready reports the owner idle again.
 #[tokio::test]
 async fn in_flight_resets_across_a_crash() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.backoff_base = Duration::from_millis(50);
     let h = spawn_h(spec(FAKE_DIES_AFTER_THREE), c, ev);
@@ -485,7 +482,7 @@ async fn in_flight_resets_across_a_crash() {
 #[tokio::test]
 async fn queue_flood_is_refused_at_window_share_not_the_global_cap() {
     let gate = temp_gate();
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.hello_timeout = Duration::from_secs(30);
     c.limits = Limits::default().with_max_queued_commands(8);
@@ -554,7 +551,7 @@ async fn queue_flood_is_refused_at_window_share_not_the_global_cap() {
 #[tokio::test]
 async fn single_window_fills_the_global_cap_and_sees_max_queued_commands() {
     let gate = temp_gate();
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.hello_timeout = Duration::from_secs(30);
     c.limits = Limits::default().with_max_queued_commands(8);
@@ -593,7 +590,7 @@ async fn single_window_fills_the_global_cap_and_sees_max_queued_commands() {
 #[tokio::test]
 async fn host_bucket_shares_while_busy_and_stops_reserving_when_idle() {
     let gate = temp_gate();
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.hello_timeout = Duration::from_secs(30);
     c.limits = Limits::default().with_max_queued_commands(8);
@@ -640,7 +637,7 @@ async fn host_bucket_shares_while_busy_and_stops_reserving_when_idle() {
 #[tokio::test]
 async fn fairness_off_is_exactly_todays_outcome() {
     let gate = temp_gate();
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.hello_timeout = Duration::from_secs(30);
     c.limits = Limits::default()
@@ -687,7 +684,7 @@ async fn fairness_off_is_exactly_todays_outcome() {
 /// never `window_share`.
 #[tokio::test]
 async fn a_lone_window_fills_all_task_slots_and_sees_the_global_cap() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
     h.fairness_join_window("win-a");
     wait_state(&h, State::Ready).await;
@@ -725,7 +722,7 @@ async fn a_lone_window_fills_all_task_slots_and_sees_the_global_cap() {
 /// all `max_concurrent_streams` and the refusal is the global error.
 #[tokio::test]
 async fn a_lone_window_fills_all_stream_slots_and_sees_the_global_cap() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_concurrent_streams(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
@@ -766,7 +763,7 @@ async fn a_lone_window_fills_all_stream_slots_and_sees_the_global_cap() {
 /// refused `window_share` while win-b's stream is admitted.
 #[tokio::test]
 async fn stream_slots_are_shared_across_windows() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_concurrent_streams(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
@@ -822,7 +819,7 @@ async fn stream_slots_are_shared_across_windows() {
 /// its own share ceiling.
 #[tokio::test]
 async fn cancelled_slots_are_claimable_by_the_other_window() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
     h.fairness_join_window("win-a");
     h.fairness_join_window("win-b");
@@ -896,7 +893,7 @@ async fn cancelled_slots_are_claimable_by_the_other_window() {
 /// then reaches the full global cap in the next generation.
 #[tokio::test]
 async fn a_crash_zeroes_tasks_and_streams_and_the_cap_reopens() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
     h.fairness_join_window("win-a");
     wait_state(&h, State::Ready).await;
@@ -969,7 +966,7 @@ async fn a_crash_zeroes_tasks_and_streams_and_the_cap_reopens() {
 /// full cap.
 #[tokio::test]
 async fn host_bucket_shares_task_slots_only_while_busy() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), fast_config(), ev);
     h.fairness_join_window("win-a");
     wait_state(&h, State::Ready).await;
@@ -1058,7 +1055,7 @@ async fn host_bucket_shares_task_slots_only_while_busy() {
 /// unaffected, and win-b's isolated call is admitted.
 #[tokio::test]
 async fn isolated_workers_are_shared_across_windows() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_isolated_workers(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
@@ -1124,7 +1121,7 @@ async fn isolated_workers_are_shared_across_windows() {
 /// isolated calls at any count.
 #[tokio::test]
 async fn a_lone_window_never_sees_window_share_for_isolated_workers() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_isolated_workers(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
@@ -1160,7 +1157,7 @@ async fn a_lone_window_never_sees_window_share_for_isolated_workers() {
 async fn a_new_manifest_relabels_the_fn_across_generations() {
     let flag = temp_gate();
     std::fs::write(&flag, b"1").unwrap();
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_isolated_workers(2);
     let h = spawn_h(spec_argv(FAKE_FAIRNESS_RUNTIME, &flag), c, ev);
@@ -1234,7 +1231,7 @@ async fn a_new_manifest_relabels_the_fn_across_generations() {
 /// same as tasks and streams.
 #[tokio::test]
 async fn a_crash_zeroes_isolated_counts() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_isolated_workers(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);
@@ -1283,7 +1280,7 @@ async fn a_crash_zeroes_isolated_counts() {
 /// window: null; once drained it stops being live.
 #[tokio::test]
 async fn host_bucket_shares_isolated_slots_only_while_busy() {
-    let (ev, _rx) = mpsc::channel(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.limits = c.limits.with_max_isolated_workers(2);
     let h = spawn_h(spec(FAKE_FAIRNESS_RUNTIME), c, ev);

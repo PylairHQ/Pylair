@@ -37,7 +37,7 @@ async fn self_test_call(spec: SpawnSpec, origin: &str) -> i32 {
         "self-test({origin}): interpreter {}",
         spec.program.display()
     );
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let (tx, mut rx) = crate::eventbus::pair(256);
     let (h, actor) = spawn_supervisor(spec, SupervisorConfig::default(), tx);
     tokio::spawn(actor);
     // Surface the runtime's stderr and lifecycle: a self-test that only says

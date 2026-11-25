@@ -9,7 +9,6 @@ use std::time::Duration;
 use tauri_plugin_pylair::supervisor::{
     spawn, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const T: Duration = Duration::from_secs(15);
@@ -35,7 +34,7 @@ fn python() -> PathBuf {
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -61,7 +60,10 @@ fn spec(script: &str) -> SpawnSpec {
     }
 }
 
-async fn stderr_events(rx: &mut mpsc::Receiver<RuntimeEvent>, within: Duration) -> Vec<String> {
+async fn stderr_events(
+    rx: &mut tauri_plugin_pylair::supervisor::EventDrain,
+    within: Duration,
+) -> Vec<String> {
     let mut out = Vec::new();
     let deadline = std::time::Instant::now() + within;
     while let Ok(Some(ev)) = timeout(deadline - std::time::Instant::now(), rx.recv()).await {
@@ -97,7 +99,7 @@ while True:
 /// hello never arrives.
 #[tokio::test]
 async fn bad_utf8_and_huge_line_do_not_kill_the_drain() {
-    let (tx, mut rx) = mpsc::channel(256);
+    let (tx, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let script = r#"
 import sys, os
 os.write(2, b'\xff\xfe not utf-8 \x80\x80\x80\n')
@@ -150,7 +152,7 @@ os.write(2, b'sentinel-after-garbage\n')
 /// queue must drop OLDEST and report the count — the tail survives.
 #[tokio::test]
 async fn flood_drops_oldest_and_reports_count() {
-    let (tx, mut rx) = mpsc::channel(256);
+    let (tx, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let script = r#"
 import sys, os
 for i in range(20000):

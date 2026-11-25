@@ -9,8 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-
 use super::config::{clamp_hello_timeout_ms, parse_hello_timeout_ms};
 use super::run::{classify_pong, PongVerdict, LOOP_STALL_WARN};
 use super::stream::{stream_pair, ChunkFail};
@@ -95,7 +93,7 @@ async fn stderr_sink_drops_oldest_with_marker() {
         sink.push(format!("line-{i}"));
     }
     sink.finish();
-    let (tx, mut rx) = mpsc::channel(STDERR_QUEUE_CAP * 2);
+    let (tx, mut rx) = crate::eventbus::pair(STDERR_QUEUE_CAP * 2);
     let fwd = tokio::spawn({
         let s = sink.clone();
         async move { s.forward(tx).await }

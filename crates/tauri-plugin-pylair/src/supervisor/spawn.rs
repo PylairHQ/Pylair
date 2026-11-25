@@ -15,7 +15,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
-use super::config::{RuntimeEvent, SpawnSpec, SupervisorConfig};
+#[cfg(windows)]
+use super::config::RuntimeEvent;
+use super::config::{SpawnSpec, SupervisorConfig};
 #[cfg(not(windows))]
 use super::platform_unix::monitor_child;
 #[cfg(target_os = "linux")]
@@ -43,7 +45,7 @@ pub(super) const CTRL_OUT_CAPACITY: usize = 16;
 pub(super) async fn spawn_child(
     spec: &SpawnSpec,
     config: &SupervisorConfig,
-    events: &mpsc::Sender<RuntimeEvent>,
+    events: &crate::eventbus::EventBus,
     #[cfg(target_os = "linux")] pdeath_anchor: &mut Option<PdeathAnchor>,
 ) -> io::Result<ChildIo> {
     // Simplify a canonicalized (Windows \\?\-prefixed) program path so the
@@ -114,7 +116,7 @@ pub(super) async fn spawn_child(
     let job = assign_to_job_object(pid);
     #[cfg(windows)]
     if job.is_none() {
-        let _ = events.try_send(RuntimeEvent::Stderr(
+        events.emit(RuntimeEvent::Stderr(
             "pylair: could not place the runtime in a Job Object; falling back to \
              taskkill /T for cleanup (descendants may survive a hard host exit)"
                 .into(),

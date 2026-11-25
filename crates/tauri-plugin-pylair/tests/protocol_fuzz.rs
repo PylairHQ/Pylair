@@ -23,9 +23,8 @@ use std::time::Duration;
 use serde_json::json;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, RuntimeEvent, ShutdownOutcome, SpawnSpec, State, SupervisorConfig,
+    spawn, Handle, ShutdownOutcome, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -75,7 +74,11 @@ fn cfg() -> SupervisorConfig {
     c
 }
 
-fn spawn_h(spec: SpawnSpec, c: SupervisorConfig, ev: mpsc::Sender<RuntimeEvent>) -> Handle {
+fn spawn_h(
+    spec: SpawnSpec,
+    c: SupervisorConfig,
+    ev: tauri_plugin_pylair::supervisor::EventBus,
+) -> Handle {
     let (h, actor) = spawn(spec, c, ev);
     tokio::spawn(actor);
     h
@@ -201,7 +204,7 @@ time.sleep(600)
 /// resolves exactly once, forged ids/tasks change nothing observable.
 #[tokio::test]
 async fn hostile_valid_frames_never_panic_or_corrupt_state() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_HOSTILE), cfg(), ev);
     wait_ready(&h).await;
 
@@ -231,7 +234,7 @@ async fn hostile_valid_frames_never_panic_or_corrupt_state() {
 /// call gets a typed failure and the runtime is reaped — no hang.
 #[tokio::test]
 async fn malformed_frame_from_child_is_typed_violation() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_MALFORMED), cfg(), ev);
     wait_ready(&h).await;
 
@@ -263,7 +266,7 @@ async fn malformed_frame_from_child_is_typed_violation() {
 /// the session fails typed and nobody waits for 4 GiB that never comes.
 #[tokio::test]
 async fn oversized_declared_length_is_rejected_fast() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_HUGE_LEN), cfg(), ev);
 
     // The hello parses, then the poisoned length prefix kills the
@@ -318,7 +321,7 @@ while True:
 /// directions, exactly like $b64/$blob tags.
 #[tokio::test]
 async fn bigint_tag_crosses_the_host_untouched() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_ECHO), cfg(), ev);
     wait_ready(&h).await;
 

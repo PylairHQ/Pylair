@@ -16,9 +16,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn, Handle, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(15);
@@ -85,7 +84,11 @@ fn cfg() -> SupervisorConfig {
     c
 }
 
-fn spawn_h(spec: SpawnSpec, c: SupervisorConfig, ev: mpsc::Sender<RuntimeEvent>) -> Handle {
+fn spawn_h(
+    spec: SpawnSpec,
+    c: SupervisorConfig,
+    ev: tauri_plugin_pylair::supervisor::EventBus,
+) -> Handle {
     let (h, actor) = spawn(spec, c, ev);
     tokio::spawn(actor);
     h
@@ -124,7 +127,7 @@ async fn terminal(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_hundred_window_generations_no_leaks_no_stale_events() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_ready(&h).await;
 
@@ -219,7 +222,7 @@ b = json.dumps({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes
 sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
 sys.exit(3)
 "#;
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = cfg();
     c.breaker_crashes = 50; // let generations cycle; never park in Failed
     let before = pdeath_anchor_threads();

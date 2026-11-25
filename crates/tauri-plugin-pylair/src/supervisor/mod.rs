@@ -76,6 +76,7 @@ mod stream;
 mod tests;
 mod wire;
 
+pub use crate::eventbus::{pair as event_pair, EventBus, EventDrain};
 pub use config::{Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, SupervisorConfig};
 #[doc(hidden)]
 pub use fairness::{FairnessSnapshot, OwnerUsage};

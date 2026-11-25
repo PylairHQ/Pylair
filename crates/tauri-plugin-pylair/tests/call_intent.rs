@@ -7,9 +7,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn, Handle, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(30);
@@ -17,7 +16,7 @@ const T: Duration = Duration::from_secs(30);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -100,7 +99,7 @@ while True:
 
 #[tokio::test]
 async fn plain_call_sends_stream_false_and_call_stream_sends_true() {
-    let (ev, rx) = mpsc::channel(64);
+    let (ev, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(ECHO_STREAM_FLAG), cfg(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -221,7 +220,7 @@ async fn collect_terminal(
 /// `stream: false` declared. The runtime must run it.
 #[tokio::test]
 async fn plain_call_through_call_stream_succeeds() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -247,7 +246,7 @@ async fn plain_call_through_call_stream_succeeds() {
 /// stream() intent on a generator: unchanged path, chunks arrive.
 #[tokio::test]
 async fn stream_intent_on_generator_delivers_chunks() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -280,7 +279,7 @@ async fn stream_intent_on_generator_delivers_chunks() {
 /// must name the API the caller should have used.
 #[tokio::test]
 async fn mismatch_intents_fail_with_actionable_errors() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -334,7 +333,7 @@ async fn mismatch_intents_fail_with_actionable_errors() {
 /// function still runs through the channel path without a flag.
 #[tokio::test]
 async fn legacy_no_intent_skips_validation() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -362,7 +361,7 @@ async fn legacy_no_intent_skips_validation() {
 /// only. Afterwards, real streams are still bounded at 32.
 #[tokio::test]
 async fn plain_calls_take_no_stream_slots_and_streams_stay_bounded() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = cfg();
     c.limits.max_concurrent_streams = 32;
     let h = spawn_h(real_runtime_spec(), c, ev);
@@ -460,7 +459,7 @@ async fn plain_calls_take_no_stream_slots_and_streams_stay_bounded() {
 /// is ambiguous, so conservative accounting is unchanged.
 #[tokio::test]
 async fn legacy_no_intent_still_counts_as_stream() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = cfg();
     c.limits.max_concurrent_streams = 1;
     let h = spawn_h(real_runtime_spec(), c, ev);
@@ -496,7 +495,7 @@ async fn legacy_no_intent_still_counts_as_stream() {
 /// arrive exactly as for streams.
 #[tokio::test]
 async fn cancel_still_works_on_a_plain_intent_call() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_state(&h, State::Ready).await;
 

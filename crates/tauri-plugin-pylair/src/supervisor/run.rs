@@ -95,42 +95,42 @@ enum PendingKind {
 pub fn spawn(
     spec: SpawnSpec,
     mut config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: crate::eventbus::EventBus,
 ) -> (
     Handle,
     impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     let (limits, warns) = config.limits.validated();
     for w in &warns {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
+        events.emit(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
     }
     // hello_timeout: surface a malformed knob (the value was already
     // resolved inside SupervisorConfig::default()) and clamp whatever
     // source the millis came from — env, Builder, or a hand-built config.
     if let (_, Some(w)) = parse_hello_timeout_ms(std::env::var("PYLAIR_HELLO_TIMEOUT_MS").ok()) {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair config: {w}")));
+        events.emit(RuntimeEvent::Stderr(format!("pylair config: {w}")));
     }
     let (hello_ms, warn) = clamp_hello_timeout_ms(config.hello_timeout.as_millis() as u64);
     config.hello_timeout = Duration::from_millis(hello_ms);
     if let Some(w) = warn {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair config: {w}")));
+        events.emit(RuntimeEvent::Stderr(format!("pylair config: {w}")));
     }
     // ready_timeout only matters for the Web kind, but a bad value is
     // clamped (and reported) whichever kind is configured.
     let (ready_ms, warn) = clamp_ready_timeout_ms(config.ready_timeout.as_millis() as u64);
     config.ready_timeout = Duration::from_millis(ready_ms);
     if let Some(w) = warn {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair config: {w}")));
+        events.emit(RuntimeEvent::Stderr(format!("pylair config: {w}")));
     }
     // An initial grant above the cap would violate the cap immediately.
     if config.initial_stream_credit > limits.max_stream_credit {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!(
+        events.emit(RuntimeEvent::Stderr(format!(
             "pylair limits: initial_stream_credit={} exceeds max_stream_credit={} — clamped",
             config.initial_stream_credit, limits.max_stream_credit
         )));
         config.initial_stream_credit = limits.max_stream_credit;
     }
-    let _ = events.try_send(RuntimeEvent::Stderr(format!(
+    events.emit(RuntimeEvent::Stderr(format!(
         "pylair limits: tasks={} streams={} queue={} stream_bytes={}/{} credit={} workers={} frame={} window_share={}",
         limits.max_concurrent_tasks,
         limits.max_concurrent_streams,
@@ -158,14 +158,14 @@ pub fn spawn(
             .unwrap_or_else(BlobLimits::from_env),
     );
     for w in blob_warns {
-        let _ = events.try_send(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
+        events.emit(RuntimeEvent::Stderr(format!("pylair limits: {w}")));
     }
     // Crash residue from a previous boot: no generation owns the
     // `gen-*` dirs under the root yet (decision 0010 §6 startup sweep).
     if let Some(root) = &config.blob_root {
         let removed = BlobRegistry::sweep(root);
         if removed > 0 {
-            let _ = events.try_send(RuntimeEvent::Stderr(format!(
+            events.emit(RuntimeEvent::Stderr(format!(
                 "pylair: swept {removed} stale blob generation dir(s) under {}",
                 root.display()
             )));
@@ -242,7 +242,7 @@ pub fn spawn(
 struct Supervisor {
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: crate::eventbus::EventBus,
     cmd_rx: mpsc::Receiver<Command>,
     state_tx: watch::Sender<State>,
     /// The current generation's validated `ready` url (Web kind): set just
@@ -353,7 +353,7 @@ impl Supervisor {
         if from != to {
             self.health.lock().unwrap().note_transition();
             let _ = self.state_tx.send(to);
-            let _ = self.events.try_send(RuntimeEvent::StateChanged {
+            self.events.emit(RuntimeEvent::StateChanged {
                 from,
                 to,
                 detail: detail.into(),
@@ -432,7 +432,7 @@ impl Supervisor {
                 }
                 None => {
                     if self.config.blob_root.is_some() {
-                        let _ = self.events.try_send(RuntimeEvent::Stderr(format!(
+                        self.events.emit(RuntimeEvent::Stderr(format!(
                             "pylair: could not create blob dir for gen {} — PYLAIR_BLOB_DIR unset",
                             self.generation
                         )));

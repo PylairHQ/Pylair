@@ -255,7 +255,7 @@ impl<R: Runtime> Builder<R> {
                     (None, Some(f)) => f(app)?,
                     (None, None) => self.spec.clone(),
                 };
-                let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<RuntimeEvent>(256);
+                let (ev_tx, mut ev_rx) = crate::eventbus::pair(256);
                 // setup runs on the main thread with no reactor entered —
                 // spawn the actor via tauri's runtime, not bare tokio::spawn.
                 let (handle, actor) = spawn_supervisor(spec, config, ev_tx);

@@ -17,10 +17,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, CancelOutcome, Handle, RuntimeEvent, ShutdownOutcome, SpawnSpec, State, StreamItem,
-    SupervisorConfig,
+    spawn, CancelOutcome, Handle, ShutdownOutcome, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const T: Duration = Duration::from_secs(20);
@@ -118,7 +116,11 @@ fn cfg() -> SupervisorConfig {
     c
 }
 
-fn spawn_h(spec: SpawnSpec, c: SupervisorConfig, ev: mpsc::Sender<RuntimeEvent>) -> Handle {
+fn spawn_h(
+    spec: SpawnSpec,
+    c: SupervisorConfig,
+    ev: tauri_plugin_pylair::supervisor::EventBus,
+) -> Handle {
     let (h, actor) = spawn(spec, c, ev);
     tokio::spawn(actor);
     h
@@ -140,7 +142,7 @@ async fn wait_ready(h: &Handle) {
 ///    error, not a silent drop and not "cancelled".
 #[tokio::test]
 async fn cancel_with_data_lane_saturated_is_wedged_error() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_WEDGED), cfg(), ev);
     wait_ready(&h).await;
 
@@ -194,7 +196,7 @@ async fn cancel_with_data_lane_saturated_is_wedged_error() {
 ///    answer must also be a named outcome, never a hang.
 #[tokio::test]
 async fn cancel_after_pipe_dies_is_delivery_failed() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_PIPE_CLOSER), cfg(), ev);
     wait_ready(&h).await;
 
@@ -254,7 +256,7 @@ async fn cancel_after_pipe_dies_is_delivery_failed() {
 ///    never reported Completed.
 #[tokio::test]
 async fn cancel_that_outruns_registration_still_terminates_stream() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_ready(&h).await;
 
@@ -302,7 +304,7 @@ async fn cancel_that_outruns_registration_still_terminates_stream() {
 ///    come. The bounded outcome is the wedge error at cancel_timeout.
 #[tokio::test]
 async fn cancel_while_python_loop_blocked_is_wedged_error() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_ready(&h).await;
 
@@ -334,7 +336,7 @@ async fn cancel_while_python_loop_blocked_is_wedged_error() {
 ///    a crash or a hang.
 #[tokio::test]
 async fn shutdown_mid_stream_reports_terminated_and_cancelled() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), ev);
     wait_ready(&h).await;
 

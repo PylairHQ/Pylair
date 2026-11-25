@@ -17,7 +17,6 @@ use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
     spawn, CancelOutcome, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(30);
@@ -25,7 +24,7 @@ const T: Duration = Duration::from_secs(30);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -106,7 +105,7 @@ async fn wait_state(h: &Handle, want: State) {
 
 /// Wait for a stderr diagnostic line containing `needle` — event-driven
 /// synchronization with the fake runtime's own progress report.
-async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
+async fn wait_for_diag(rx: &mut tauri_plugin_pylair::supervisor::EventDrain, needle: &str) {
     timeout(T, async {
         while let Some(e) = rx.recv().await {
             if let RuntimeEvent::Stderr(l) = e {
@@ -128,7 +127,7 @@ fn read_no(line: &str) -> Option<u64> {
 
 /// Fold every diagnostic already waiting in the channel into `seen`, the
 /// highest `READ <n>` reported so far. Never blocks.
-fn drain_reads(rx: &mut mpsc::Receiver<RuntimeEvent>, seen: &mut u64) {
+fn drain_reads(rx: &mut tauri_plugin_pylair::supervisor::EventDrain, seen: &mut u64) {
     while let Ok(e) = rx.try_recv() {
         if let RuntimeEvent::Stderr(l) = e {
             if let Some(n) = read_no(&l) {
@@ -140,7 +139,7 @@ fn drain_reads(rx: &mut mpsc::Receiver<RuntimeEvent>, seen: &mut u64) {
 
 /// Wait until the fake runtime reports a read numbered above `after`;
 /// returns that number.
-async fn wait_read_after(rx: &mut mpsc::Receiver<RuntimeEvent>, after: u64) -> u64 {
+async fn wait_read_after(rx: &mut tauri_plugin_pylair::supervisor::EventDrain, after: u64) -> u64 {
     timeout(T, async {
         while let Some(e) = rx.recv().await {
             if let RuntimeEvent::Stderr(l) = e {
@@ -240,7 +239,10 @@ while True:
 /// all 64 pending frames (the OS pipe stopped draining). `pad` bytes of
 /// input per call fill the OS pipe in a handful of frames. Returns the
 /// task ids that were accepted so callers can cancel them later.
-async fn saturate_data_lane(h: &Handle, rx: &mut mpsc::Receiver<RuntimeEvent>) -> Vec<u64> {
+async fn saturate_data_lane(
+    h: &Handle,
+    rx: &mut tauri_plugin_pylair::supervisor::EventDrain,
+) -> Vec<u64> {
     let pad = "x".repeat(64 * 1024);
     let mut inflight = Vec::new();
     let mut lanes_full = false;
@@ -292,7 +294,7 @@ async fn saturate_data_lane(h: &Handle, rx: &mut mpsc::Receiver<RuntimeEvent>) -
 /// ends with zero chunks.
 #[tokio::test]
 async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(512);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(512);
     let h = spawn_h(spec(FAKE_SLOW_READER), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -351,7 +353,7 @@ async fn initial_credit_reaches_runtime_when_data_lane_saturated() {
 /// uncredited.
 #[tokio::test]
 async fn initial_credit_undeliverable_rejects_stream() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(512);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(512);
     // Hold the writer blocked well past the cancels below: the control
     // lane stays full only while the OS pipe is not draining, and a slow
     // CI machine can burn a 1.5 s window before the stream call lands.
@@ -471,7 +473,7 @@ while True:
             w({"jsonrpc":"2.0","method":"stream.chunk","params":{"task": t, "seq": seq, "value": seq}})
         w({"jsonrpc":"2.0","id": m["id"],"result": None})
 "#;
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec(FAKE_UNCREDITED), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 

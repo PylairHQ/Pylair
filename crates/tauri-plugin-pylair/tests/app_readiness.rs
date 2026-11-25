@@ -10,7 +10,6 @@ use tauri_plugin_pylair::supervisor::{
     spawn, AppPhase, ExitKind, Handle, RuntimeEvent, RuntimeKind, SpawnSpec, State,
     SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -18,7 +17,7 @@ const T: Duration = Duration::from_secs(20);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -159,6 +158,59 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
 "#;
 
+/// hello, then a 300-line stderr flood with the component transition
+/// riding behind it: the bulk channel stays full while the state
+/// change lands.
+const FAKE_STDERR_FLOOD: &str = r#"
+import sys, struct, json
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+for i in range(1000):
+    sys.stderr.write(f"flood{i}" + chr(10))
+sys.stderr.flush()
+w({"jsonrpc":"2.0","method":"app.component","params":{"name":"db","phase":"loading"}})
+w({"jsonrpc":"2.0","method":"app.component","params":{"name":"db","phase":"ready"}})
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
+/// hello, `ackd` loading — then the fixture BLOCKS on a test-controlled
+/// ack file before reporting ready. The drain observes `loading` first
+/// and only then can `ready` even exist on the wire: deterministic
+/// proof that separated transitions never coalesce, no sleeps involved.
+const FAKE_APP_ACK: &str = r#"
+import sys, struct, json, time, os
+def w(o):
+    b = json.dumps(o).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(b)) + b); sys.stdout.buffer.flush()
+def comp(name, phase, **kw):
+    p = {"name": name, "phase": phase}; p.update(kw)
+    w({"jsonrpc":"2.0","method":"app.component","params":p})
+w({"jsonrpc":"2.0","method":"hello","params":{"protocol":1,"exposes":[]}})
+comp("ackd", "loading")
+while not os.path.exists("__ACK_PATH__"):
+    time.sleep(0.01)
+comp("ackd", "ready")
+while True:
+    h = sys.stdin.buffer.read(4)
+    if len(h) < 4: break
+    n, = struct.unpack(">I", h)
+    m = json.loads(sys.stdin.buffer.read(n))
+    if m["method"] == "ping":
+        w({"jsonrpc":"2.0","method":"pong","params":{"seq": m["params"]["seq"], "loop_stale_ms": 0}})
+    elif m["method"] == "shutdown":
+        w({"jsonrpc":"2.0","id": m["id"],"result": None}); break
+"#;
+
 fn spec(script: &str) -> SpawnSpec {
     SpawnSpec {
         program: python(),
@@ -204,7 +256,7 @@ async fn eventually(cond: impl Fn() -> bool) -> bool {
     .is_ok()
 }
 
-fn pump(mut rx: mpsc::Receiver<RuntimeEvent>) -> Arc<Mutex<Vec<RuntimeEvent>>> {
+fn pump(mut rx: tauri_plugin_pylair::supervisor::EventDrain) -> Arc<Mutex<Vec<RuntimeEvent>>> {
     let log = Arc::new(Mutex::new(Vec::new()));
     let sink = log.clone();
     tokio::spawn(async move {
@@ -234,13 +286,52 @@ fn events_for(log: &Arc<Mutex<Vec<RuntimeEvent>>>, name: &str) -> Vec<serde_json
         .collect()
 }
 
+/// Observed phases for one component key, in arrival order.
+fn phases_for(log: &Arc<Mutex<Vec<RuntimeEvent>>>, name: &str) -> Vec<String> {
+    events_for(log, name)
+        .iter()
+        .filter_map(|e| e["phase"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The lossless-latest delivery contract for one component key: the
+/// observed sequence is a non-empty, in-order subsequence of what was
+/// emitted and always ends with the final emitted phase — intermediates
+/// may coalesce under drain pressure, the newest state never does.
+fn assert_phase_contract(log: &Arc<Mutex<Vec<RuntimeEvent>>>, name: &str, emitted: &[&str]) {
+    let obs = phases_for(log, name);
+    assert!(
+        !obs.is_empty(),
+        "{name}: nothing delivered — the final state was lost"
+    );
+    assert_eq!(
+        obs.last().map(String::as_str),
+        emitted.last().copied(),
+        "{name}: final state missing or wrong tail — observed {obs:?}, emitted {emitted:?}"
+    );
+    let mut it = emitted.iter();
+    for phase in &obs {
+        assert!(
+            it.by_ref().any(|e| phase.as_str() == *e),
+            "{name}: observed {obs:?} is not an in-order subsequence of {emitted:?}"
+        );
+    }
+}
+
+/// Every key's last observed phase is its final emitted one — the
+/// end state the lossless-latest drain must always reach.
+fn finals_delivered(log: &Arc<Mutex<Vec<RuntimeEvent>>>, want: &[(String, &str)]) -> bool {
+    want.iter()
+        .all(|(name, tail)| phases_for(log, name).last().map(String::as_str) == Some(*tail))
+}
+
 /// §4/§5: the battery lands in `health().app` with the snapshot shape,
 /// phase transitions emit exactly one `pylair://app` each, progress
 /// ticks emit nothing, and every malformed or out-of-contract frame is
 /// dropped without hurting the runtime.
 #[tokio::test]
 async fn app_reports_land_in_health_and_transitions_emit() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_APP_CORE), fast_config(), events);
     let log = pump(rx);
     wait_state(&h, State::Ready).await;
@@ -300,18 +391,55 @@ async fn app_reports_land_in_health_and_transitions_emit() {
         assert_eq!(e["generation"], json!(0));
         assert!(e["name"].is_string() && e["phase"].is_string());
     }
-    // Exactly one event per transition — progress ticks emit nothing.
-    let model_evs = events_for(&log, "model");
-    assert_eq!(model_evs.len(), 2, "{model_evs:?}");
-    assert_eq!(model_evs[0]["phase"], json!("loading"));
-    assert_eq!(model_evs[1]["phase"], json!("ready"));
-    let index_evs = events_for(&log, "index");
-    assert_eq!(index_evs.len(), 2, "{index_evs:?}");
-    assert_eq!(index_evs[0]["phase"], json!("loading"));
-    assert_eq!(index_evs[1]["phase"], json!("failed"));
-    assert_eq!(events_for(&log, &"n".repeat(64)).len(), 1);
-    // 2+2+1+3+1 = 9 transitions total; nothing else ever emits.
-    assert_eq!(app_events(&log).len(), 9, "{:?}", app_events(&log));
+    // Lossless-latest contract per key: an in-order subsequence of the
+    // emitted transitions, non-empty, ending with the final state.
+    // Single-transition keys are their own final state, so they are
+    // delivered exactly once — only model/index hold a coalesce-able
+    // intermediate (their loading), and progress ticks never emit at
+    // all (the emitted sequence has one "loading" at most).
+    let want: Vec<(String, &str)> = [
+        ("model", "ready"),
+        ("index", "failed"),
+        ("over", "loading"),
+        ("under", "loading"),
+        ("texty", "loading"),
+        ("objdetail", "ready"),
+    ]
+    .iter()
+    .map(|(n, t)| (n.to_string(), *t))
+    .chain(std::iter::once(("n".repeat(64), "ready")))
+    .collect();
+    assert!(
+        eventually(|| finals_delivered(&log, &want)).await,
+        "a final state never arrived: {:?}",
+        app_events(&log)
+    );
+    assert_phase_contract(&log, "model", &["loading", "ready"]);
+    assert_phase_contract(&log, "index", &["loading", "failed"]);
+    assert_phase_contract(&log, &"n".repeat(64), &["ready"]);
+    assert_phase_contract(&log, "over", &["loading"]);
+    assert_phase_contract(&log, "under", &["loading"]);
+    assert_phase_contract(&log, "texty", &["loading"]);
+    assert_phase_contract(&log, "objdetail", &["ready"]);
+    // Nothing else ever emits: malformed/dropped frames produce no
+    // events, and no key outside the battery appears.
+    let keys: std::collections::HashSet<String> = app_events(&log)
+        .iter()
+        .filter_map(|e| e["name"].as_str().map(str::to_string))
+        .collect();
+    let want: std::collections::HashSet<String> = [
+        "model",
+        "index",
+        "over",
+        "under",
+        "texty",
+        "objdetail",
+        &"n".repeat(64),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(keys, want, "{:?}", app_events(&log));
 
     // The serde names are the v1 schema — assert the boundary shape.
     let j = serde_json::to_value(&s).unwrap();
@@ -328,19 +456,17 @@ async fn app_reports_land_in_health_and_transitions_emit() {
 /// dropped, but an existing name keeps updating (phase and detail).
 #[tokio::test]
 async fn the_component_cap_drops_new_names_not_updates() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_APP_CAP), fast_config(), events);
     let log = pump(rx);
     wait_state(&h, State::Ready).await;
 
     assert!(
-        eventually(|| h
-            .health(None)
-            .app
-            .as_ref()
-            .is_some_and(|a| a.components.len() == 32))
+        eventually(|| h.health(None).app.as_ref().is_some_and(|a| {
+            a.components.len() == 32 && a.components["flood0"].phase == AppPhase::Ready
+        }))
         .await,
-        "the flood never filled the map: {:?}",
+        "the battery never fully landed: {:?}",
         h.health(None).app
     );
     let s = h.health(None);
@@ -352,9 +478,27 @@ async fn the_component_cap_drops_new_names_not_updates() {
     let flood0 = &app.components["flood0"];
     assert_eq!(flood0.phase, AppPhase::Ready);
     assert_eq!(flood0.detail.as_deref(), Some("updated after the cap"));
-    // 32 first-sighting events + flood0's transition = 33.
-    assert_eq!(events_for(&log, "flood0").len(), 2);
-    assert_eq!(app_events(&log).len(), 33, "{:?}", app_events(&log));
+    // flood1..=31 end in loading — final states are lossless, each
+    // delivered exactly once. flood0 ends in ready; its loading is the
+    // one intermediate that may coalesce away. flood32+ were dropped at
+    // the cap: never stored, never emitted.
+    let mut want: Vec<(String, &str)> = (1..32).map(|i| (format!("flood{i}"), "loading")).collect();
+    want.push(("flood0".into(), "ready"));
+    assert!(
+        eventually(|| finals_delivered(&log, &want)).await,
+        "the burst's final states never all arrived: {:?}",
+        app_events(&log)
+    );
+    for i in 1..32 {
+        assert_phase_contract(&log, &format!("flood{i}"), &["loading"]);
+    }
+    assert_phase_contract(&log, "flood0", &["loading", "ready"]);
+    for i in 32..40 {
+        assert!(
+            events_for(&log, &format!("flood{i}")).is_empty(),
+            "flood{i} must not emit"
+        );
+    }
     h.shutdown().await;
 }
 
@@ -404,7 +548,7 @@ async fn a_component_burst_during_pending_still_delivers_every_transition() {
     )
     .unwrap();
 
-    let (events, mut rx) = mpsc::channel(64);
+    let (events, mut rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_APP_CAP), fast_config(), events);
     let log = Arc::new(Mutex::new(Vec::new()));
     {
@@ -419,11 +563,17 @@ async fn a_component_burst_during_pending_still_delivers_every_transition() {
     }
     wait_state(&h, State::Ready).await;
 
+    let mut want: Vec<(String, &str)> = (1..32).map(|i| (format!("flood{i}"), "loading")).collect();
+    want.push(("flood0".into(), "ready"));
     assert!(
-        eventually(|| app_events(&log).len() == 33).await,
-        "the burst dropped transitions: {:?}",
+        eventually(|| finals_delivered(&log, &want)).await,
+        "the burst dropped a final state: {:?}",
         app_events(&log)
     );
+    for i in 1..32 {
+        assert_phase_contract(&log, &format!("flood{i}"), &["loading"]);
+    }
+    assert_phase_contract(&log, "flood0", &["loading", "ready"]);
     // The heartbeat path: a tick over health's newest report writes
     // progress.json inside the pending window — no event involved.
     let ago = h
@@ -447,7 +597,7 @@ async fn a_component_burst_during_pending_still_delivers_every_transition() {
 async fn app_state_clears_when_the_generation_dies() {
     let mut c = fast_config();
     c.breaker_crashes = 1; // park `failed` after the first crash
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_APP_DIES), c, events);
     let log = pump(rx);
 
@@ -482,7 +632,7 @@ async fn app_state_clears_when_the_generation_dies() {
 async fn a_new_generation_reports_app_state_fresh() {
     let mut c = fast_config();
     c.breaker_crashes = 10; // keep restarting — never park `failed`
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_APP_DIES), c, events);
     let log = pump(rx);
 
@@ -510,7 +660,7 @@ async fn a_new_generation_reports_app_state_fresh() {
 /// `health().app` null — never a fabricated empty map.
 #[tokio::test]
 async fn app_is_null_when_the_runtime_never_reports() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HEALTHY), fast_config(), events);
     wait_state(&h, State::Ready).await;
     // A few ping intervals past Ready: nothing ever reported.
@@ -527,7 +677,7 @@ async fn app_is_null_when_the_runtime_never_reports() {
 /// surfaced as app state on `web`.
 #[tokio::test]
 async fn app_is_null_on_the_web_kind() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.kind = RuntimeKind::Web;
     c.ready_timeout = Duration::from_secs(5);
@@ -541,4 +691,95 @@ async fn app_is_null_on_the_web_kind() {
         s.app
     );
     h.shutdown().await;
+}
+
+/// State delivery is lossless for the latest state even when the
+/// bounded bulk channel is flooded past capacity: a stderr flood keeps
+/// the bulk channel full while the component transition lands, the
+/// pump starts only after the fact — and still observes the final
+/// state. Bulk lines demonstrably drop, proving the flood was real.
+#[tokio::test]
+async fn state_survives_a_bulk_flood_end_to_end() {
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(4);
+    let h = spawn_h(spec(FAKE_STDERR_FLOOD), fast_config(), events);
+    wait_state(&h, State::Ready).await;
+    // The report is in the health snapshot before the pump starts —
+    // the emit happened while nobody was draining.
+    assert!(
+        eventually(|| h
+            .health(None)
+            .app
+            .as_ref()
+            .is_some_and(|a| a.components.contains_key("db")))
+        .await,
+        "the component never reported"
+    );
+    let log = pump(rx);
+    assert!(
+        eventually(|| app_events(&log)
+            .iter()
+            .any(|e| e["name"] == json!("db") && e["phase"] == json!("ready")))
+        .await,
+        "the final state never reached the subscriber: {:?}",
+        app_events(&log)
+    );
+    // The flood was real: 1000 lines into the 512-deep stderr sink
+    // evict the oldest — the drop marker proves the pressure happened.
+    let marked = log.lock().unwrap().iter().any(|e| {
+        matches!(
+            e,
+            RuntimeEvent::Stderr(l) if l.starts_with("[dropped ")
+        )
+    });
+    assert!(marked, "no flood pressure: no drop marker in the log");
+    h.shutdown().await;
+}
+
+/// The non-coalescing guarantee, deterministically: the fixture reports
+/// `loading` and then blocks on a test-controlled ack file. The drain
+/// observes `loading`; only then does the test write the ack, letting
+/// `ready` exist on the wire at all. Nothing can coalesce — `ready` is
+/// emitted strictly after `loading` was already delivered — so both
+/// transitions arrive, in order, exactly once each. No sleeps: the
+/// synchronization is the observation itself.
+#[tokio::test]
+async fn separated_transitions_never_coalesce() {
+    let dir = std::env::temp_dir().join(format!(
+        "pylair-ack-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ack = dir.join("ack");
+    let script = FAKE_APP_ACK.replace(
+        "__ACK_PATH__",
+        &ack.display().to_string().replace('\\', "/"),
+    );
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
+    let h = spawn_h(spec(&script), fast_config(), events);
+    let log = pump(rx);
+    wait_state(&h, State::Ready).await;
+
+    // `loading` is the newest state in existence — lossless-latest
+    // guarantees it reaches the drain.
+    assert!(
+        eventually(|| phases_for(&log, "ackd").last().map(String::as_str) == Some("loading")).await,
+        "the loading report never reached the drain: {:?}",
+        app_events(&log)
+    );
+    // Only now may `ready` come into existence.
+    std::fs::write(&ack, b"go").unwrap();
+    assert!(
+        eventually(|| phases_for(&log, "ackd").last().map(String::as_str) == Some("ready")).await,
+        "the ready report never reached the drain: {:?}",
+        app_events(&log)
+    );
+    // `loading` was in the drain log before `ready` was emitted, so no
+    // coalescing was possible: exactly the two transitions, in order.
+    assert_eq!(phases_for(&log, "ackd"), vec!["loading", "ready"]);
+    h.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

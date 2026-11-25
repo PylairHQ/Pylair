@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 #[cfg(not(windows))]
 use tauri_plugin_pylair::protocol as proto;
-use tauri_plugin_pylair::supervisor::{spawn, RuntimeEvent, SpawnSpec, SupervisorConfig};
+use tauri_plugin_pylair::supervisor::{spawn, SpawnSpec, SupervisorConfig};
 
 fn python() -> PathBuf {
     if let Ok(p) = std::env::var("PYLAIR_TEST_PYTHON") {
@@ -69,7 +69,7 @@ async fn tap_records_real_calls_and_events_channel_unaffected() {
     // before spawning. Debug-only codepath; the flag is additive so
     // sharing the process env with other tests is harmless.
     unsafe { std::env::set_var("PYLAIR_INSPECT", "1") };
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<RuntimeEvent>(256);
+    let (ev_tx, mut ev_rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let (handle, actor) = spawn(real_runtime_spec(), cfg(), ev_tx);
     tokio::spawn(actor);
     wait_ready(&handle).await;

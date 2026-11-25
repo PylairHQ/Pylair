@@ -8,6 +8,19 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **State events can no longer be dropped.** `pylair://state`,
+  `pylair://exposes`, `pylair://health` and `pylair://app` now travel
+  per-kind latest-state slots beside the bounded events channel instead
+  of `try_send` on the channel itself: a stderr flood (or any bulk
+  pressure) used to be able to drop a readiness or liveness transition
+  and strand a webview on "loading" forever. Re-entries into the same
+  state may coalesce under load (crash-loop churn stays bounded), but
+  distinct lifecycle transitions always arrive in order, the newest
+  state always reaches every subscriber, and the supervisor never
+  blocks. `pylair://stderr` stays lossy
+  by design (drop-marked), and a newer generation's report retires an
+  older generation's undelivered entries.
+
 - **Toolchain preflight, before the build finds out the hard way.**
   `npx create-pylair` ends with a short warning naming any missing
   prerequisites (uv, Rust, MSVC/Xcode CLT/webkit2gtk) and their

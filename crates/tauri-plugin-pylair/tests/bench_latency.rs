@@ -17,9 +17,8 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn, Handle, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const WARMUP: usize = 50;
@@ -141,7 +140,7 @@ async fn probe_case(h: &Handle, case: &str, fn_name: &str, warmup: usize, n: usi
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "latency bench — run manually or from bench.yml"]
 async fn bench_host_python_latency() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let (h, actor) = spawn(spec("testapp"), SupervisorConfig::default(), ev);
     tokio::spawn(actor);
     wait_ready(&h).await;
@@ -216,7 +215,7 @@ async fn bench_host_python_latency() {
     // vs mode "warm" (the member pays it once, then serves). This is
     // the warm-workers headline — a small N is honest here: the cold
     // iteration cost is dominated by the spawn, not by tail noise.
-    let (ev2, _rx2) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev2, _rx2) = tauri_plugin_pylair::supervisor::event_pair(256);
     let (h2, actor2) = spawn(spec("testapp_benchcost"), SupervisorConfig::default(), ev2);
     tokio::spawn(actor2);
     wait_ready(&h2).await;

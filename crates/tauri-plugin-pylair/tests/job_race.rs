@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use tauri_plugin_pylair::supervisor::{
     spawn, RuntimeEvent, ShutdownOutcome, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 /// First act: spawn a grandchild that outlives any polite exit, report its
@@ -88,7 +87,7 @@ async fn grandchild_spawned_during_the_assign_gap_dies_with_the_job() {
     // held back until it is in the job.
     std::env::set_var("PYLAIR_TEST_ASSIGN_DELAY_MS", "400");
 
-    let (ev_tx, mut ev_rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev_tx, mut ev_rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = SupervisorConfig::default();
     cfg.hello_timeout = Duration::from_secs(10);
     cfg.shutdown_grace = Duration::from_secs(3);
