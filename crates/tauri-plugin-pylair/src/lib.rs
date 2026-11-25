@@ -13,12 +13,12 @@ pub mod transport;
 pub mod blobs;
 mod builder;
 mod commands;
+mod fn_scope;
 #[cfg(debug_assertions)]
 pub mod inspect;
 #[cfg(not(debug_assertions))]
 #[path = "inspect_stub.rs"]
 pub mod inspect;
-mod fn_scope;
 mod registry;
 mod selftest;
 mod spec;
@@ -27,6 +27,8 @@ mod util;
 pub mod wrap;
 
 pub use builder::{Builder, StderrDelivery};
+#[cfg(debug_assertions)]
+pub use commands::python_inspect_snapshot_impl;
 pub use commands::{
     forward_stream, python_call_impl, python_call_stream_impl, python_health_impl,
     python_state_impl, StreamAck,

@@ -581,9 +581,7 @@ impl Session<'_> {
                 }
                 if let Some(task) = self.task_of_call.remove(&id) {
                     if let Some((outcome, resp)) = inspect_end {
-                        self.sup
-                            .inspect
-                            .note_end(task, outcome, resp.as_ref());
+                        self.sup.inspect.note_end(task, outcome, resp.as_ref());
                     }
                     if let Some(meta) = self.tasks.remove(&task) {
                         self.sup.fair.lock().unwrap().note_finished(

@@ -224,11 +224,16 @@ impl InspectRef {
         }
         let seq = inner.ring.back().map(|r| r.seq + 1).unwrap_or(1);
         // seq must survive ring eviction â€” track it separately.
-        let seq = seq.max(inner.in_flight.values().map(|f| f.seq + 1).max().unwrap_or(1));
+        let seq = seq.max(
+            inner
+                .in_flight
+                .values()
+                .map(|f| f.seq + 1)
+                .max()
+                .unwrap_or(1),
+        );
         let _ = seq;
-        let seq = {
-            inner.next_seq
-        };
+        let seq = { inner.next_seq };
         inner.next_seq += 1;
         inner.in_flight_order.push_back(task);
         inner.in_flight.insert(
@@ -403,4 +408,56 @@ pub fn classify(result: &Result<Value, crate::protocol::ErrorObj>) -> (Outcome, 
             (outcome, None)
         }
     }
+}
+
+// ------------------------------------------------------------------
+// The inspector window: a custom scheme serves the bundled page and
+// the JSON snapshot; both are gated to the inspector window's own
+// label, so app windows cannot read the tap even if they guess the
+// URL. The page polls `snapshot` over the scheme — no Tauri command
+// surface is needed inside the window at all (docs/inspector.md).
+// ------------------------------------------------------------------
+
+/// The inspector window's label — fixed so the scheme handler can gate
+/// on it and the command can refuse every other window.
+pub const WINDOW_LABEL: &str = "pylair-inspector";
+/// The custom scheme the page and snapshot are served over.
+pub const SCHEME: &str = "pylair-inspect";
+
+/// The bundled page — one static file, no framework, no network.
+const PAGE: &str = include_str!("inspect/page.html");
+
+/// Serve one inspector-scheme request. Anything but the inspector
+/// window itself gets 403 — the tap is dev tooling and must not become
+/// a data channel into app windows. Routes: `/` and `/index.html`
+/// serve the page, `/snapshot` the tap+health JSON.
+pub fn serve<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+    path: &str,
+) -> (u16, &'static str, Vec<u8>) {
+    if label != WINDOW_LABEL {
+        return (403, "text/plain", b"inspector only".to_vec());
+    }
+    let _ = label;
+    if path == "/" || path == "/index.html" || path.is_empty() {
+        return (200, "text/html", PAGE.as_bytes().to_vec());
+    }
+    if path == "/snapshot" {
+        let snap = inspect_snapshot_payload(app);
+        return (200, "application/json", snap.to_string().into_bytes());
+    }
+    (404, "text/plain", b"not found".to_vec())
+}
+
+/// The `/snapshot` body: tap records plus a health snapshot. Shared by
+/// the scheme handler and the `python_inspect_snapshot` command.
+pub fn inspect_snapshot_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
+    use tauri::Manager;
+    let mut snap = serde_json::json!({"enabled": false, "records": [], "in_flight": []});
+    if let Some(rt) = app.try_state::<crate::PyRuntime>() {
+        snap = rt.0.inspect().snapshot();
+        snap["health"] = serde_json::to_value(rt.0.health(None)).unwrap_or(Value::Null);
+    }
+    snap
 }

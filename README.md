@@ -24,6 +24,10 @@ The first `pylair dev` compiles the Rust/Tauri side from source, so
 expect a few minutes before the window appears; later runs reuse the
 build cache and start in seconds. `npx pylair build` produces the
 installer for your platform.
+`npx pylair dev --inspect` opens the live inspector — a second window
+with every call's latency and outcome, per-function p50/p95, runtime
+health and warm-pool status (dev builds only — see
+[docs/inspector.md](docs/inspector.md)).
 
 ## Two modes
 

@@ -85,11 +85,7 @@ impl Session<'_> {
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
         // The inspector needs the input after `params` has consumed it —
         // clone only when the tap is live (debug + PYLAIR_INSPECT=1).
-        let inspect_input = self
-            .sup
-            .inspect
-            .enabled()
-            .then(|| input.clone());
+        let inspect_input = self.sup.inspect.enabled().then(|| input.clone());
         let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {
@@ -231,11 +227,7 @@ impl Session<'_> {
         }
         let id = self.sup.next_id.fetch_add(1, Ordering::Relaxed);
         let task = self.sup.next_task.fetch_add(1, Ordering::Relaxed);
-        let inspect_input = self
-            .sup
-            .inspect
-            .enabled()
-            .then(|| input.clone());
+        let inspect_input = self.sup.inspect.enabled().then(|| input.clone());
         let mut params = serde_json::json!({"fn": fn_name.clone(), "task": task,
                                 "input": input});
         if let Some(s) = stream {

@@ -59,3 +59,6 @@ pub fn classify(result: &Result<Value, crate::protocol::ErrorObj>) -> (Outcome, 
         Err(e) => (Outcome::Error { code: e.code }, None),
     }
 }
+
+/// Release: no inspector window ever exists, so this is never called.
+pub const WINDOW_LABEL: &str = "pylair-inspector";
