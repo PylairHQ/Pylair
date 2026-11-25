@@ -65,6 +65,10 @@ pub(super) fn classify_pong(stale: Duration, kill: Option<Duration>) -> PongVerd
 /// Per-task metadata for ownership, kind and credit tracking (RC.6A/RC.8A).
 struct TaskMeta {
     call_id: u64,
+    /// The exposed function the call named — host-side bookkeeping only
+    /// (already on the wire frame), kept so a stall warning can name the
+    /// in-flight call(s) likely holding the loop.
+    fn_name: String,
     owner: Option<String>,
     /// Streaming tasks count toward `max_concurrent_streams`.
     is_stream: bool,

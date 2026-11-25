@@ -130,8 +130,10 @@ crate at `0.1.0-rc.23`). Check each registry for its latest RC.
   `def` keeps running after cancel; mark long-running work
   `@expose(isolated=True)` ([docs/cancellation.md](docs/cancellation.md)).
 - **Async cancel is cooperative.** A coroutine blocked in native code
-  can't be preempted; `loop_stall_kill` can make stalls fatal but is off
-  by default (legitimate loads can stall the loop for minutes).
+  can't be preempted; a stalled event loop logs one warning per episode
+  (`loop_stall_warn`, default 5 s — naming the likely cause and fix),
+  and `loop_stall_kill` can make stalls fatal but is off by default
+  (legitimate loads can stall the loop for minutes).
 - **macOS is CI-tested only.** Windows and Linux are the hand-verified
   platforms. macOS builds, ad-hoc signs and passes the same suite, but
   no maintainer runs it day to day.

@@ -359,11 +359,26 @@ pub struct SupervisorConfig {
     /// Pongs come from a reader thread and only prove the process and pipe
     /// are alive. The runtime also reports how long its asyncio loop has made
     /// no progress (`loop_stale_ms`). `None` (the default) reports stalls as
-    /// a diagnostic only — legitimate blocking work (a multi-GB model load
-    /// inside `async def`) can stall the loop for minutes. `Some(limit)`
+    /// a diagnostic only — and that default is deliberate: legitimate
+    /// blocking work (a multi-GB model load inside `async def`) can stall
+    /// the loop for minutes, so killing on a stall turns a slow-but-healthy
+    /// app into a restart loop, and a restart mid-update would look like a
+    /// bad update to the watchdog and get it rolled back. `Some(limit)`
     /// treats a stall at or beyond it as wedged: in-flight calls fail with
-    /// `RUNTIME_WEDGED` and the runtime is killed and restarted.
+    /// `RUNTIME_WEDGED` and the runtime is killed and restarted — opt in
+    /// only when a blocked loop really is unrecoverable for your app. For
+    /// visibility without the kill, see `loop_stall_warn`.
     pub loop_stall_kill: Option<Duration>,
+    /// Warn on a stalled loop without killing: when a pong reports
+    /// `loop_stale_ms` at or past this, one `pylair` stderr line per stall
+    /// episode names the likely cause and fix, and a matching "recovered"
+    /// line lands when the loop frees. `Some(5s)` is the default; `None`
+    /// silences the warning entirely. Independent of `loop_stall_kill` —
+    /// a configured kill still wins (the stall is fatal, not a warning).
+    /// Suppressed while `health().app` reports a component `loading` —
+    /// `on_startup` blocking is legitimate — but a stall that began during
+    /// load and continues once the app is ready warns then, and says so.
+    pub loop_stall_warn: Option<Duration>,
     /// How long `cancel()` waits for the runtime's acknowledgement.
     pub cancel_timeout: Duration,
     pub max_frame: usize,
@@ -406,6 +421,7 @@ impl Default for SupervisorConfig {
             initial_stream_credit: 64,
             stream_buffer: 256,
             loop_stall_kill: None,
+            loop_stall_warn: Some(Duration::from_secs(5)),
             cancel_timeout: Duration::from_secs(5),
             max_frame: proto::max_frame(),
             restart_trigger: None,
