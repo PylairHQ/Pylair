@@ -45,6 +45,7 @@ Annotation → `{"type": ...}` JSON:
 | Python                        | schema                     | TS emit            |
 |-------------------------------|----------------------------|--------------------|
 | `int`, `float`                | `int` / `float`            | `number`           |
+| `pylair.BigInt`               | `bigint`                   | `bigint`           |
 | `str`                         | `str`                      | `string`           |
 | `bool`                        | `bool`                     | `boolean`          |
 | `None`                        | `none`                     | `null`             |
@@ -72,6 +73,17 @@ instances — without this, emitted types would lie about what crosses the
 wire. The runtime now encodes:
 
 - `bytes`/`bytearray` → `{"$b64": "<base64>"}` and back (`object_hook`)
+- `pylair.BigInt` → `{"$bigint": "<decimal>"}` and back — a JS `bigint`
+  argument encodes the same way (`toWire`), and both sides decode the
+  tag defensively: only `{"$bigint": s}` where `s` matches
+  `^-?(0|[1-9][0-9]*)$` becomes a big integer, anything else stays
+  plain data, and payloads over 4096 digits are rejected outright.
+  **The declared type decides:** under a `-> pylair.BigInt` annotation
+  (or `Optional`/`list[BigInt]`, or `AsyncGenerator[BigInt, _]` yield
+  schema for streams), plain `int` results and chunks are widened to
+  `BigInt` before encoding — int arithmetic drops the subclass, so
+  `a + b` still tags. A non-int result (str, float, bool) keeps the
+  value's own encoding — the signature only widens ints.
 - `@dataclass` → `dataclasses.asdict` (params reconstruct by annotation)
 - `datetime`/`date`/`time` → ISO 8601 string (params stay strings; Python
   accepts them via annotation coercion where the arg is annotated)
@@ -84,7 +96,8 @@ parameters strictly, on every call mode including isolated workers:
 - **Primitives**: `int` accepts ints and whole-number floats (JSON
   can't tell `3` from `3.0`); `float` accepts int/float; `str` accepts
   strings; `bool` accepts booleans. `bool` is never a valid `int` or
-  `float`. `Optional[T]`/`Union` accepts any matching arm; `null` only
+  `float`. `pylair.BigInt` accepts decoded `$bigint` tags and plain
+  JSON ints (promoted, so the fn sees the annotated type). `Optional[T]`/`Union` accepts any matching arm; `null` only
   where `None` is an arm.
 - **Structured types**: dict → dataclass, `list[T]`/`dict[K,V]` recurse
   element validation, `Optional`/`Union` tries arms in order, enums
@@ -114,11 +127,19 @@ from inside the function.
   that one call with `INTERNAL`, never the runtime (protocol §2). Use
   `Optional[float]` and return `None` for missing scores.
 - **Python `int` is unbounded; JS `number` is not.** Integers beyond
-  ±2^53 fail the call with `INTERNAL` — the wire keeps full precision,
-  but `JSON.parse` would round silently, so the codec rejects them
-  first. If your API moves exact big integers (ids, counts), annotate
-  `str` and format in Python. `{"$bigint"}` tagging is tracked in
-  `docs/ideas.md`.
+  ±2^53 on a plain `int` annotation fail the call with `INTERNAL` —
+  the wire keeps full precision, but `JSON.parse` would round
+  silently, so the codec rejects them first and names the way out.
+  For exact big integers (ids, counts, hashes) opt in by *type*:
+  annotate or return `pylair.BigInt` — it crosses as
+  `{"$bigint": "<decimal>"}` regardless of magnitude and comes back as
+  a JS `bigint` (codegen emits `bigint`). Annotating the return is
+  enough for arithmetic: `-> pylair.BigInt` results are widened from
+  plain ints before encoding, so `return a + b` tags without
+  re-wrapping. Note the tag is opt-in: a plain `int` annotation still
+  maps to `number` (and still errors out of range), and `pylair.BigInt`
+  requires matching `pylair` and `@pylair/client` versions — an old
+  client receiving a tag sees a plain `{"$bigint": ...}` object.
 - Non-serializable results (numpy values, torch tensors, open objects)
   fail the *call* with `INTERNAL` — serialize to list/dict/bytes first.
 

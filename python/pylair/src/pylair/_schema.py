@@ -16,6 +16,8 @@ import types
 import typing
 from typing import Any
 
+from pylair._bigint import BigInt
+
 _EMPTY = inspect.Parameter.empty
 
 
@@ -69,6 +71,8 @@ def schema_of(annotation: Any) -> dict[str, Any]:
     # Bare classes
     if annotation is int:
         return {"type": "int"}
+    if annotation is BigInt:
+        return {"type": "bigint"}
     if annotation is float:
         return {"type": "float"}
     if annotation is str:
@@ -110,6 +114,31 @@ def _resolve(cls: type, f: dataclasses.Field) -> Any:
         except Exception:  # noqa: BLE001 - unresolved hint -> any
             return _EMPTY
     return f.type
+
+
+def has_bigint_leaf(schema: Any) -> bool:
+    """True iff the schema tree declares a bigint leaf anywhere.
+
+    Precomputed once per exposed fn (ExposedFn.ret_schema): when the
+    returns schema can't contain a tag, result coercion is skipped
+    entirely and results cross untouched.
+    """
+    if not isinstance(schema, dict):
+        return False
+    t = schema.get("type")
+    if t == "bigint":
+        return True
+    if t == "union":
+        return any(has_bigint_leaf(s) for s in schema.get("opts") or ())
+    if t in ("list", "asyncgen"):
+        return has_bigint_leaf(schema.get("items"))
+    if t == "tuple":
+        return any(has_bigint_leaf(s) for s in schema.get("items") or ())
+    if t == "dict":
+        return has_bigint_leaf(schema.get("values"))
+    if t == "dataclass":
+        return any(has_bigint_leaf(f.get("schema")) for f in schema.get("fields") or ())
+    return False
 
 
 def callable_schema(fn: Any) -> dict[str, Any]:

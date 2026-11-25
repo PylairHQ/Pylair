@@ -63,6 +63,8 @@ function ts(s: Schema | undefined): string {
     case "int":
     case "float":
       return "number";
+    case "bigint":
+      return "bigint";
     case "str":
       return "string";
     case "bool":

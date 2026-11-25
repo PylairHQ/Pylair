@@ -146,8 +146,11 @@ crate at `0.1.0-rc.23`). Check each registry for its latest RC.
   (see docs/cancellation.md).
 - **Worker kill covers the worker's process group.** A descendant that
   deliberately detaches (`setsid`, a new process group) escapes it.
-- **Ints beyond ±2^53 can't cross the bridge.** Return large integers as
-  strings until `{"$bigint"}` tagging lands ([docs/ideas.md](docs/ideas.md)).
+- **Ints beyond ±2^53 need `pylair.BigInt`.** Plain `int` results past
+  the JS safe range fail the call with a clear error; annotate or
+  return `pylair.BigInt` for exact big integers — they cross as
+  `{"$bigint": "<decimal>"}` and arrive as TS `bigint`
+  (requires matching pylair + @pylair/client versions).
 - **Broadcast events are readable by every webview.** Call and stream
   data travels on a per-call channel bound to the invoking webview, but
   `pylair://state` and `pylair://exposes` are broadcast; `pylair://stderr`

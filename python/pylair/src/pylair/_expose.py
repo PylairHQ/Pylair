@@ -33,6 +33,16 @@ class ExposedFn:
     # Normalized worker config for kind == "isolated" (0008): None is
     # per-call process mode; {"mode": "warm", "pool": N} is a pool.
     worker: dict | None = None
+    # The "returns" schema iff it contains a bigint leaf, else None —
+    # the precomputed fast path for result coercion: None means the
+    # declared type can't tag anything, so results cross untouched.
+    ret_schema: dict | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        from pylair._schema import has_bigint_leaf
+
+        ret = self.signature.get("returns")
+        self.ret_schema = ret if has_bigint_leaf(ret) else None
 
 
 # The interrupt grace is bounded by the same budget as ISOLATED_GRACE_S

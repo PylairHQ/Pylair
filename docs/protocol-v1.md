@@ -64,13 +64,40 @@ hang or OOM the host.
   covered by ping/pong (§5).
 - **Wire JSON encoding** (`_json.py`, docs/codegen.md): beyond plain JSON
   types the runtime encodes `bytes`/`bytearray` as `{"$b64": "<base64>"}`
-  (decoded symmetrically on input), `@dataclass` as its field dict,
+  (decoded symmetrically on input), `pylair.BigInt` as
+  `{"$bigint": "<decimal>"}` (decoded symmetrically on input), `@dataclass`
+  as its field dict,
   `datetime`/`date`/`time` as ISO 8601 strings, `Enum` as its value, and
   `set` as a list. Incoming params are validated then coerced by
   annotation — a dataclass-annotated parameter receives an instance,
   not a dict, and a value the annotation can't hold (wrong primitive,
   missing required key, unexpected key) is `INVALID_PARAMS` before the
   function body runs.
+- **`{"$bigint": "<decimal>"}` is the exact-integer tag.** A value typed
+  `pylair.BigInt` encodes this way regardless of magnitude — opt-in by
+  type, never inferred: plain `int` keeps JSON-number semantics (safe
+  range is numbers; outside fails the call with a clear error naming
+  `pylair.BigInt`). In the host→runtime direction the client encodes a
+  JS `bigint` argument as the same tag and the runtime decodes it back
+  to `pylair.BigInt`, so exact integers round-trip in both directions.
+  The declared type decides for results too: under a `-> pylair.BigInt`
+  signature (`Optional`/`list[BigInt]` recurse; a generator's yield
+  schema does the same for stream chunks), plain `int` results are
+  widened to `BigInt` before encoding — int arithmetic drops the
+  subclass, so `return a + b` still tags. A non-int result keeps the
+  value's own encoding: the signature only widens ints, never str,
+  float or bool.
+  Decoding on both sides is defensive and matches the other tags: only
+  an object with exactly the one key `"$bigint"` whose value matches
+  `^-?(0|[1-9][0-9]*)$` becomes a big integer — anything else (extra
+  keys, non-canonical or non-string values) passes through as plain
+  data. The decimal string is capped at **4096 digits** (~12k bits):
+  a longer payload is rejected with a clear error on both sides, so a
+  hostile peer cannot make either end parse an arbitrary-length number.
+  A peer that predates the tag sees a plain `{"$bigint": ...}` object —
+  `pylair.BigInt` requires matching `pylair` and `@pylair/client`
+  versions (released together). The host treats the tag as opaque data
+  and never inspects it.
 - **Serialization happens on the event loop**, before a message reaches
   the writer thread. A result that can't serialize (numpy/tensor
   objects, `NaN`/`Infinity` — `allow_nan=False` since bare `NaN` is not
@@ -113,12 +140,13 @@ All messages carry `"jsonrpc": "2.0"`.
 - `input`: the single JSON argument object, matching the generated TS
   client call shape `python.<fn>({...})`. **What the client accepts**
   (`toWire`): `null`, `undefined`, booleans, numbers, strings, arrays,
-  plain objects (null-prototype included), `Uint8Array` (→ `$b64`), and
+  plain objects (null-prototype included), `Uint8Array` (→ `$b64`),
+  `bigint` (→ `$bigint`), and
   class instances carrying plain data — own enumerable props are the
   intent, same as `{...x}` spread. Anything whose data doesn't live in
   own enumerable props is a TypeError naming the path: `Date`, `Map`,
   `Set`, `RegExp`, `Promise`, `Error`, `ArrayBuffer`, typed arrays other
-  than `Uint8Array`, functions, symbols, `bigint`, non-plain objects
+  than `Uint8Array`, functions, symbols, non-plain objects
   with zero own enumerable props (would serialize as `{}`), and
   circular references. `undefined`/`NaN`/`Infinity` keep JSON
   semantics — omitted in objects, `null` in arrays.

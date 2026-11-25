@@ -8,6 +8,7 @@ actually round-trip:
   pylair.Blob     -> {"$blob": {"id","mime","size"}} — bytes live in
                      PYLAIR_BLOB_DIR; registration rides ahead of the
                      carrying frame (decision 0010)
+  pylair.BigInt   -> {"$bigint": "<decimal>"}  (restored by object_hook)
   @dataclass      -> dataclasses.asdict
   datetime/date/time -> ISO 8601 string
   Enum -> its value; set/frozenset -> list
@@ -37,6 +38,7 @@ import typing
 import weakref
 from typing import Any
 
+from pylair._bigint import BIGINT_MAX_DIGITS, BIGINT_RE, BIGINT_TAG, BigInt
 from pylair._blob import Blob, BlobFallbackExceeded  # noqa: F401 — re-export for senders
 
 _B64_TAG = "$b64"
@@ -76,6 +78,15 @@ def _object_hook(d: dict) -> Any:
             return base64.b64decode(d[_B64_TAG], validate=True)
         except Exception:  # noqa: BLE001 - invalid tag stays a plain object
             return d
+    if set(d) == {BIGINT_TAG} and isinstance(d[BIGINT_TAG], str):
+        v = d[BIGINT_TAG]
+        if not BIGINT_RE.fullmatch(v):
+            return d  # not canonical decimal — caller data, pass through
+        if len(v.lstrip("-")) > BIGINT_MAX_DIGITS:
+            raise ValueError(
+                f"$bigint payload exceeds the {BIGINT_MAX_DIGITS}-digit cap"
+            )
+        return BigInt(v)
     return d
 
 
@@ -88,7 +99,7 @@ class DepthExceeded(Exception):
     """
 
 
-def check_wire(obj: Any, depth_limit: int | None = None) -> None:
+def check_wire(obj: Any, depth_limit: int | None = None) -> bool:
     """One pre-serialization walk over `obj`: nesting depth, the int
     range and NaN/Infinity — everything the emitted JSON must satisfy,
     checked on the pre-dump object so `_default` conversions (dataclass
@@ -96,7 +107,12 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
     re-parse guard was. Iterative for the same reason exceeds_depth is:
     a recursive walk hits Python's own recursion limit on the payloads
     this exists to catch.
+
+    Returns True iff the walk saw a BigInt — the dumps entry points use
+    it to run `_tag_bigints` only when there's something to tag, so a
+    BigInt-free frame costs exactly this one walk, never a second.
     """
+    saw_bigint = False
     # `seen` is the deepest depth each container id was walked at. The
     # int/NaN guards need each node visited once, but the DEPTH check
     # needs a container re-walked whenever it is reached deeper than
@@ -118,13 +134,18 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             raise DepthExceeded(depth_limit)
         if node is None or isinstance(node, (str, bool)):
             continue
+        if isinstance(node, BigInt):
+            # _tag_bigints -> {"$bigint": str} — a plain object leaf. No
+            # range check: crossing safely is the type's whole point.
+            saw_bigint = True
+            continue
         if isinstance(node, int):
             # bool was filtered above — it is a JSON literal, never an int.
             if abs(node) > _SAFE_INT:
                 raise ValueError(
                     f"integer {node} exceeds the JSON safe-integer range "
-                    "(±2^53-1); return it as a string — $bigint tagging is "
-                    "tracked in docs/ideas.md"
+                    "(±2^53-1); return it as a string or use pylair.BigInt "
+                    "for exact big integers"
                 )
             continue
         if isinstance(node, float):
@@ -170,6 +191,91 @@ def check_wire(obj: Any, depth_limit: int | None = None) -> None:
             continue
         # Anything else: _default raises TypeError at dumps time — the
         # same error the caller maps today; no pre-check needed.
+    return saw_bigint
+
+
+def _tag_bigints(obj: Any) -> Any:
+    """Pre-dump transform: every BigInt leaf -> {"$bigint": "<decimal>"}.
+
+    Why a pass and not a `default` case: json's encoder serializes int
+    subclasses natively, so `default` never fires for BigInt. A subtree
+    with no BigInt inside is returned AS-IS — containers are rebuilt
+    only along changed paths, so ordinary frames pay a walk, not a
+    copy. Shared nodes are tagged once via the memo (a shared subtree
+    is visited once), and a cycle rebuilds as a cycle so dumps raises
+    its own circular error. bytes, Blob, datetime and friends are left
+    for _default; a set can't hold tag dicts, so a changed set emits
+    _default's sorted list directly.
+    """
+    memo: dict[int, Any] = {}
+
+    def tag(node: Any) -> Any:
+        if isinstance(node, BigInt):
+            digits = str(int(node)).lstrip("-")
+            if len(digits) > BIGINT_MAX_DIGITS:
+                raise ValueError(
+                    f"BigInt exceeds the {BIGINT_MAX_DIGITS}-digit wire cap"
+                )
+            return {BIGINT_TAG: str(int(node))}
+        if node is None or isinstance(node, (bool, int, float, str)):
+            return node
+        nid = id(node)
+        if nid in memo:
+            return memo[nid]
+        if isinstance(node, dict):
+            out: dict = {}
+            memo[nid] = out  # cycles must see the in-progress rebuild
+            changed = False
+            for k, v in node.items():
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out[k] = c
+            if not changed:
+                memo[nid] = node
+                return node
+            return out
+        if isinstance(node, (list, tuple)):
+            out = []
+            memo[nid] = out
+            changed = False
+            for v in node:
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            if not changed:
+                memo[nid] = node
+                return node
+            return out
+        if isinstance(node, (set, frozenset)):
+            out = []
+            changed = False
+            for v in sorted(node, key=repr):
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            return out if changed else node
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            out = {}
+            memo[nid] = out
+            changed = False
+            for f in dataclasses.fields(node):
+                v = getattr(node, f.name)
+                c = tag(v)
+                if c is not v:
+                    changed = True
+                out[f.name] = c
+            if not changed:
+                memo[nid] = node
+                return node
+            return out
+        if isinstance(node, enum.Enum):
+            return tag(node.value)
+        return node  # everything _default owns — leave it alone
+
+    return tag(obj)
 
 
 def dumps_collect(
@@ -186,7 +292,7 @@ def dumps_collect(
     handles already wrote files, those files are unlinked: nothing was
     ever registered, so Python still owns them.
     """
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
 
     def default(o: Any) -> Any:
         if isinstance(o, Blob):
@@ -194,7 +300,9 @@ def dumps_collect(
         return _default(o)
 
     try:
-        return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+        return json.dumps(
+            tagged, default=default, separators=(",", ":"), allow_nan=False
+        )
     except BaseException:
         for b in regs.values():
             b._unlink()
@@ -209,22 +317,22 @@ def dumps_probe(obj: Any, depth_limit: int | None = None) -> str:
     would write a file the real dump then writes AGAIN (the dry pass's
     handle is unlinked, never registered).
     """
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
 
     def default(o: Any) -> Any:
         if isinstance(o, Blob):
             return o._to_wire_dry()
         return _default(o)
 
-    return json.dumps(obj, default=default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(tagged, default=default, separators=(",", ":"), allow_nan=False)
 
 
 def dumps(obj: Any, depth_limit: int | None = None) -> str:
-    check_wire(obj, depth_limit)
+    tagged = _tag_bigints(obj) if check_wire(obj, depth_limit) else obj
     # allow_nan=False stays as the hard guarantee: even if a path ever
     # reached dumps without check_wire, a bare NaN/Infinity token can
     # still never hit the wire (serde_json rejects it as malformed).
-    return json.dumps(obj, default=_default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(tagged, default=_default, separators=(",", ":"), allow_nan=False)
 
 
 def loads(raw: str | bytes) -> Any:
@@ -291,6 +399,12 @@ def coerce(annotation: Any, value: Any) -> Any:
         if isinstance(value, float) and value.is_integer():
             return int(value)
         raise InvalidParams(f"expected int, got {_short(value)}")
+    if annotation is BigInt:
+        # Decoded tags arrive as BigInt already; a plain JSON number is
+        # promoted so the fn sees the annotated type either way.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return BigInt(value)
+        raise InvalidParams(f"expected BigInt, got {_short(value)}")
     if annotation is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
@@ -489,3 +603,104 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
             # where the function expects an object (docs/codegen.md).
             raise InvalidParams(f"param '{name}': {e}") from e
     return out
+
+
+# ---- result coercion: the declared return type decides (docs/codegen.md) ----
+
+
+def coerce_result(schema: dict[str, Any] | None, value: Any) -> Any:
+    """Return-side mirror of coerce(): where the signature's "returns"
+    schema says bigint, a plain int becomes BigInt before encoding — the
+    declared type decides, not the value's class (int arithmetic always
+    drops the subclass, so `a + b` on two BigInts is a plain int).
+
+    Best-effort widening only: a non-int under a bigint leaf, a bool
+    anywhere, and every unmapped shape keep the value's own encoding —
+    no silent str/float conversion and no new error. A container is
+    rebuilt only when a child actually changed — an unchanged walk
+    returns the original object (identity), and a changed one is a
+    plain list/dict, which encodes identically on the wire and never
+    trips a NamedTuple-style constructor. `schema` is the
+    callable_schema() "returns" dict; for a generator that is the YIELD
+    schema, so the same walk covers stream chunks.
+    """
+    t = schema.get("type") if isinstance(schema, dict) else None
+    if t == "bigint":
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value if isinstance(value, BigInt) else BigInt(value)
+        return value
+    if t == "union":
+        for opt in schema.get("opts") or ():
+            out = coerce_result(opt, value)
+            if out is not value:
+                return out
+        return value
+    if t == "list":
+        item = schema.get("items") or {}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return _widened_seq(item, value)
+        return value
+    if t == "tuple":
+        items = schema.get("items") or ()
+        if isinstance(value, (list, tuple)) and len(items) == len(value):
+            out = []
+            changed = False
+            for s, v in zip(items, value, strict=True):
+                c = coerce_result(s, v)
+                if c is not v:
+                    changed = True
+                out.append(c)
+            return out if changed else value
+        return value
+    if t == "dict":
+        vals = schema.get("values") or {}
+        if isinstance(value, dict):
+            out = {}
+            changed = False
+            for k, v in value.items():
+                c = coerce_result(vals, v)
+                if c is not v:
+                    changed = True
+                out[k] = c
+            return out if changed else value
+        return value
+    if t == "dataclass":
+        fields = {f["name"]: f.get("schema") for f in schema.get("fields") or ()}
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            out = {}
+            changed = False
+            for f in dataclasses.fields(value):
+                v = getattr(value, f.name)
+                c = coerce_result(fields[f.name], v) if f.name in fields else v
+                if c is not v:
+                    changed = True
+                out[f.name] = c
+            # A plain field dict encodes identically to the instance —
+            # dataclasses.replace would re-run __init__/__post_init__.
+            return out if changed else value
+        if isinstance(value, dict):
+            out = {}
+            changed = False
+            for k, v in value.items():
+                c = coerce_result(fields[k], v) if k in fields else v
+                if c is not v:
+                    changed = True
+                out[k] = c
+            return out if changed else value
+        return value
+    return value
+
+
+def _widened_seq(item_schema: Any, seq: Any) -> Any:
+    """coerce_result over a sequence's items: the original object when
+    nothing changed, else a plain list — sets and tuple subclasses
+    encode as JSON arrays anyway, so rebuilding via type(seq)(...) is
+    both unnecessary and fragile (NamedTuple's constructor)."""
+    out = []
+    changed = False
+    for v in seq:
+        c = coerce_result(item_schema, v)
+        if c is not v:
+            changed = True
+        out.append(c)
+    return out if changed else seq

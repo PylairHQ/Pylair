@@ -96,6 +96,11 @@ class Task:
     warm_survived: bool = False
     warm_grace_s: float = 3.0
     warm_started: asyncio.Event = field(default_factory=asyncio.Event)
+    # The signature's "returns" schema (yield schema for generators) —
+    # the declared type decides BigInt tagging, not the result's class
+    # (docs/codegen.md). Unused by isolated/warm: the worker coerces in
+    # _invoke so its payload already carries the tags.
+    ret_schema: dict | None = None
 
 
 class _WarmMember:
@@ -262,6 +267,7 @@ class TaskRegistry:
         input: dict,
         requires: tuple[str, ...] = (),
         worker: dict | None = None,
+        ret_schema: dict | None = None,
     ) -> None:
         warm = worker is not None and worker.get("mode") == "warm"
         # Worker processes are the heaviest resource — refuse past the
@@ -288,6 +294,7 @@ class TaskRegistry:
             return
         task = Task(id=task_id, fn_name=fn_name, kind=kind, call_id=call_id)
         task.warm = warm
+        task.ret_schema = ret_schema
         if warm:
             # Interrupt-first cancel's response window (0008 §2).
             task.warm_grace_s = (worker or {}).get("cancel_grace_ms", 3000) / 1000.0
@@ -389,6 +396,8 @@ class TaskRegistry:
     async def _run_async(self, task: Task, fn: Callable[..., Any], input: dict) -> None:
         try:
             result = await fn(**input)  # input coerced at dispatch (_call)
+            if task.ret_schema is not None:
+                result = _json.coerce_result(task.ret_schema, result)
             self._finish(task, proto.response(task.call_id, result))
         except asyncio.CancelledError:
             self._finish(
@@ -409,6 +418,8 @@ class TaskRegistry:
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(None, lambda: fn(**input))
+            if task.ret_schema is not None:
+                result = _json.coerce_result(task.ret_schema, result)
             self._finish(task, proto.response(task.call_id, result))
         except asyncio.CancelledError:
             # Inline sync can't be interrupted — the executor thread keeps
@@ -437,6 +448,10 @@ class TaskRegistry:
                 # Pull-based flow control: only advance while we hold credit.
                 await self._wait_for_credit(task)
                 value = await agen.__anext__()
+                # The declared yield type decides tagging — coerce before
+                # the caps so the probe measures what really goes out.
+                if task.ret_schema is not None:
+                    value = _json.coerce_result(task.ret_schema, value)
                 task.credit -= 1
                 # A chunk deeper than the host's parser limit is a
                 # malformed frame on arrival — end THIS stream with the

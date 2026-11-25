@@ -561,6 +561,7 @@ class Server:
             input,
             requires=ex.requires,
             worker=ex.worker,
+            ret_schema=ex.ret_schema,
         )
         # Handlers emit the response: value calls on completion, stream
         # calls at the terminal message (protocol §3.1).

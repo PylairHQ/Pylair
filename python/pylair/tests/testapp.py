@@ -401,6 +401,58 @@ def roundtrip(data: bytes) -> bytes:
 
 
 @expose
+def bigint_echo(value):
+    """Unannotated passthrough: a $bigint param decodes to pylair.BigInt
+    and re-encodes as the tag on the way out."""
+    return value
+
+
+@expose
+def bigint_add(a: pylair.BigInt, b: pylair.BigInt) -> pylair.BigInt:
+    """Exact big-int arithmetic over the tag — codegen maps the
+    annotation to TS bigint. a + b is a plain int (int ops drop the
+    subclass); the declared return type re-tags it."""
+    return a + b
+
+
+@expose
+def bigint_list(xs: list[pylair.BigInt]) -> list[pylair.BigInt]:
+    """Each element comes back a plain int (x + 1 drops the subclass);
+    list[BigInt] tags them element-wise."""
+    return [x + 1 for x in xs]
+
+
+@expose
+def bigint_maybe(n: int) -> pylair.BigInt | None:
+    """Optional[BigInt]: a plain int tags, None stays null."""
+    return n if n >= 0 else None
+
+
+@expose
+async def bigint_stream(
+    n: int, base: pylair.BigInt
+) -> AsyncGenerator[pylair.BigInt, None]:
+    """AsyncGenerator[BigInt]: base + i is a plain int per chunk — the
+    yield schema tags it (also beyond 2^63)."""
+    for i in range(n):
+        yield base + i
+
+
+@expose
+def bigint_weird() -> pylair.BigInt:
+    """A non-int under a BigInt declaration keeps its own encoding —
+    no silent str/float conversion."""
+    return "notanint"  # type: ignore[return-value]
+
+
+@expose
+def unbounded_int() -> int:
+    """A plain int past ±2^53 — int annotations never tag, so this still
+    fails the call with the error naming pylair.BigInt."""
+    return 1 << 60
+
+
+@expose
 async def numbers(n: int) -> AsyncGenerator[int, None]:
     for i in range(n):
         yield i

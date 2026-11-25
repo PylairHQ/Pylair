@@ -547,13 +547,12 @@ test("toWire rejects Map, Set, RegExp, Promise, non-Uint8Array views", async () 
   assert.equal(b.calls.length, 0);
 });
 
-test("toWire rejects function, symbol, bigint values by name", async () => {
+test("toWire rejects function and symbol values by name", async () => {
   const b = fakeBridge();
   setBridge(b);
   const cases = [
     [{ fn: () => 1 }, /input\.fn is a function/],
     [{ sym: Symbol("s") }, /input\.sym is a symbol/],
-    [{ big: 10n }, /input\.big is a bigint/],
   ];
   for (const [input, re] of cases) {
     const p = call("f", input);
@@ -561,6 +560,72 @@ test("toWire rejects function, symbol, bigint values by name", async () => {
     assert.ok(out instanceof TypeError && re.test(out.message), `${re} got ${out}`);
   }
   assert.equal(b.calls.length, 0);
+});
+
+test("wire JSON: bigint <-> $bigint inside call/stream", async () => {
+  const b = fakeBridge();
+  setBridge(b);
+  // top-level + nested bigint encode on the way out
+  const p = call("bigint_add", {
+    a: 9007199254740993n,
+    nested: { b: -7n },
+  });
+  await tick();
+  assert.deepEqual(b.calls[0].args.input.a, { $bigint: "9007199254740993" });
+  assert.deepEqual(b.calls[0].args.input.nested.b, { $bigint: "-7" });
+  // $bigint tags decode to JS bigint on the way back
+  b.emitTask(100, streamDone(100, { $bigint: "9007199254741000" }));
+  const result = await p;
+  assert.equal(typeof result, "bigint");
+  assert.equal(result, 9007199254741000n);
+});
+
+test("wire JSON: $bigint decodes in stream chunks and nested values", async () => {
+  const b = fakeBridge();
+  setBridge(b);
+  const it = stream("gen");
+  const collected = [];
+  const consume = (async () => {
+    for await (const v of it) collected.push(v);
+  })();
+  await tick();
+  b.emitTask(100, streamChunk(100, 0, { items: [{ $bigint: "42" }, "x"] }));
+  b.emitTask(100, streamChunk(100, 1, { $bigint: "-5" }));
+  b.emitTask(100, streamDone(100, { done: true }));
+  await consume;
+  assert.equal(collected[0].items[0], 42n);
+  assert.equal(collected[0].items[1], "x");
+  assert.equal(collected[1], -5n);
+});
+
+test("wire JSON: malformed $bigint passes through as plain data", async () => {
+  const b = fakeBridge();
+  setBridge(b);
+  const p = call("f", {});
+  await tick();
+  b.emitTask(100, streamDone(100, {
+    ok: { $bigint: "007" }, // leading zero — not canonical
+    nonstring: { $bigint: 5 },
+    extra: { $bigint: "5", x: 1 },
+  }));
+  const r = await p;
+  assert.deepEqual(r.ok, { $bigint: "007" });
+  assert.deepEqual(r.nonstring, { $bigint: 5 });
+  assert.deepEqual(r.extra, { $bigint: "5", x: 1 });
+});
+
+test("wire JSON: over-cap $bigint rejects the call, not a hang", async () => {
+  const b = fakeBridge();
+  setBridge(b);
+  const p = call("f", {});
+  await tick();
+  b.emitTask(100, streamDone(100, { $bigint: "9".repeat(4097) }));
+  await assert.rejects(p, /digit cap/);
+  // Exactly at the cap still decodes.
+  const p2 = call("f", {});
+  await tick();
+  b.emitTask(101, streamDone(101, { $bigint: "9".repeat(4096) }));
+  assert.equal(await p2, BigInt("9".repeat(4096)));
 });
 
 test("toWire names the nested path", async () => {
