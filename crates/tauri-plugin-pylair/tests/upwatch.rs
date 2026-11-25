@@ -720,6 +720,8 @@ fn restore_renames_over_a_busy_executable() {
     };
     (Hooks::default().restore)(&plan).expect("rename must land over the busy inode");
     sleeper.kill().unwrap();
+    // Reap it: a killed child is a zombie until wait() collects it.
+    sleeper.wait().unwrap();
     assert_eq!(fs::read(&install).unwrap(), b"fake old version");
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(

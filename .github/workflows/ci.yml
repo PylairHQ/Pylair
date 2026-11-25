@@ -149,6 +149,11 @@ jobs:
         if: needs.changes.outputs.code == 'true'
       - run: cargo clippy --all-targets -- -D warnings
         if: needs.changes.outputs.code == 'true'
+      # The updater feature is off by default: its code (and the upwatch
+      # test suite) is never linted by the plain run — a linux-only lint
+      # in upwatch.rs sat on main unnoticed until linted explicitly.
+      - run: cargo clippy --all-targets --features updater -- -D warnings
+        if: needs.changes.outputs.code == 'true'
       - run: cargo build
         if: needs.changes.outputs.code == 'true'
       - run: cargo test
@@ -306,6 +311,7 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features updater -- -D warnings
           cargo build
           cargo test
           # Off-by-default updater feature: watchdog suite needs this run.
