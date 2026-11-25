@@ -8,6 +8,21 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Toolchain preflight, before the build finds out the hard way.**
+  `npx create-pylair` ends with a short warning naming any missing
+  prerequisites (uv, Rust, MSVC/Xcode CLT/webkit2gtk) and their
+  one-line installs — scaffolding still succeeds. `pylair dev` runs
+  the same `pylair doctor` checks *before* `tauri dev` and stops with
+  the same list instead of failing minutes into the Rust compile
+  (`--skip-preflight` bypasses), and a first `pylair dev` now says
+  up front that the initial compile takes several minutes. README
+  gained a per-OS **Prerequisites** section before the quickstart.
+- **`pylair.warm()` / `pylair.isolated()`** — typed `worker=` config
+  helpers for `@expose` (`worker=warm(pool=2, prewarm=True)`), so
+  editors autocomplete the options and bad values fail at the helper,
+  not inside the decorator. `worker` is typed `WorkerConfig | dict`;
+  the dict form is unchanged (the helpers build and validate through
+  the same path). Docs show the helpers first.
 - **Live inspector for `pylair dev`** (dev builds only):
   `pylair dev --inspect` opens a separate read-only window with a live
   table of the last 1000 calls (function, window, mode, latency,

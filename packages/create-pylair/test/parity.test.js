@@ -22,6 +22,19 @@ test("the vendored ui module is byte-identical to packages/cli/src/ui", () => {
   }
 });
 
+const CLI_SRC = fileURLToPath(new URL("../../cli/src/", import.meta.url));
+
+/** preflight.ts is vendored the same way (sync-ui.mjs, single file at
+ * src root): create-pylair's post-scaffold tool check is literally
+ * `pylair dev`'s pre-build gate. */
+test("the vendored preflight module is byte-identical to packages/cli/src", () => {
+  assert.equal(
+    readFileSync(join(SRC, "preflight.ts"), "utf8"),
+    readFileSync(join(CLI_SRC, "preflight.ts"), "utf8"),
+    "preflight.ts drifted from packages/cli/src; run pnpm build to re-sync",
+  );
+});
+
 /** The character policy: printed strings are ASCII except the shared
  * symbol set (vendored, guarded by the CLI's own tests) and the wordmark's
  * box-drawing art (fancy+unicode only). No em dashes, no stray Unicode. */

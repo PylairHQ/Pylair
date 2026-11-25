@@ -19,6 +19,7 @@ import {
   wrapUnavailable,
   type WrapFramework,
 } from "./scaffold.js";
+import { formatMissing, missingTools, preflightChecks, type PreflightItem } from "./preflight.js";
 import { detectProcessCaps, type Caps } from "./ui/caps.js";
 import { Ui, paint } from "./ui/index.js";
 import { PromptCancelled, askSelect, askText, interactive, type PromptIo } from "./ui/prompts.js";
@@ -36,6 +37,8 @@ export interface RunIo {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   caps?: Caps;
+  /** Test seam: the preflight items provider (default: live probes). */
+  preflight?: () => PreflightItem[];
 }
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -237,6 +240,17 @@ function scaffold(
         ? `  ${paint(caps, "accent", cmd.padEnd(Math.max(20, cmd.length + 1)))}${paint(caps, "muted", note)}`
         : `  ${paint(caps, "accent", cmd)}`,
     );
+
+  // Preflight, reusing `pylair doctor`'s checks (the same subset `pylair
+  // dev` gates the Rust build on - vendored from packages/cli): a missing
+  // tool here is a warning, not a failure - the scaffold itself is done.
+  // It goes to stderr so the byte-exact stdout finish block stays stable
+  // for scripted callers on machines missing tools.
+  const missing = missingTools((io.preflight ?? preflightChecks)());
+  if (missing.length) {
+    u.warn("Missing prerequisites (install before `npx pylair dev`):");
+    for (const l of formatMissing(missing)) u.dump(`  ${l}\n`);
+  }
   u.line();
   return 0;
 }

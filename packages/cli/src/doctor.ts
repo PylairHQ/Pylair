@@ -1,6 +1,5 @@
 /** `pylair doctor`: diagnose the dev/build environment. */
 
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { platform, arch } from "node:os";
@@ -8,9 +7,16 @@ import { checkCapabilities, formatFinding, loadCapabilities } from "./capabiliti
 import { loadConfig, loadTauriConfig, type PylairConfig } from "./config.js";
 import { venvPython } from "./dev.js";
 import { hostTriple } from "./build.js";
+import { nativeToolchain, probe, realEnv } from "./preflight.js";
 import { ui, type Hint } from "./ui/index.js";
 import { wrapWarnings } from "./wrapconfig.js";
 import { STAGED_APP, runSmokeImports, smokeImports } from "./wrapbuild.js";
+
+// The detection primitives live in ./preflight.js — the module
+// `pylair dev` and create-pylair share (vendored there). Re-exported so
+// existing imports from ./doctor.js keep working.
+export { nativeToolchain } from "./preflight.js";
+export type { NativeEnv } from "./preflight.js";
 
 interface Check {
   name: string;
@@ -24,11 +30,6 @@ interface Check {
  * name, verdict and detail (the tests) keep working. */
 export type AddCheck = (name: string, ok: boolean, detail: string, hint?: Hint) => void;
 
-function probe(cmd: string, args: string[]): string | null {
-  const r = spawnSync(cmd, args, { encoding: "utf-8" });
-  return r.status === 0 ? (r.stdout || r.stderr).trim() : null;
-}
-
 /** Numeric major.minor comparison — a string compare would pass "3.9"
  * for a "3.12" floor. Anything unparseable is false. */
 export function meetsMinPython(version: string, min: string): boolean {
@@ -38,97 +39,6 @@ export function meetsMinPython(version: string, min: string): boolean {
   const [maj, mi] = [Number(v[1]), Number(v[2])];
   const [fmaj, fmi] = [Number(m[1]), Number(m[2])];
   return maj > fmaj || (maj === fmaj && mi >= fmi);
-}
-
-/** The commands `nativeToolchain` consults. Injectable so tests stub the
- * platform and every tool answer: `run` returns trimmed output on exit 0
- * ("" counts: `pkg-config --exists` prints nothing), `null` on failure. */
-export interface NativeEnv {
-  platform: NodeJS.Platform;
-  run: (cmd: string, args: string[]) => string | null;
-  exists: (p: string) => boolean;
-  /** Names inside a directory, [] when unreadable. */
-  list: (dir: string) => string[];
-  env: NodeJS.ProcessEnv;
-}
-
-const MSVC_FIX =
-  'install "Desktop development with C++" via Visual Studio Installer, or repair it if an update is pending';
-
-/** The C/C++ toolchain `pylair build` needs on this OS, past cargo itself:
- * MSVC build tools on Windows (OK only when vswhere at the standard
- * Installer path reports an instance with the VC tools component: rustc
- * locates MSVC via the setup instance registry vswhere reads, so files on
- * disk without a registered instance do not link; those get a repair hint),
- * Xcode Command Line Tools on macOS, a C compiler and the webkit2gtk-4.1 dev
- * files Tauri links against on Linux. */
-export function nativeToolchain(e: NativeEnv): { ok: boolean; detail: string; fix?: string } {
-  if (e.platform === "win32") {
-    const pf86 = e.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
-    const pf = e.env.ProgramFiles ?? "C:\\Program Files";
-    const vswhere = join(pf86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
-    if (e.exists(vswhere)) {
-      const found = e.run(vswhere, [
-        "-utf8",
-        "-latest",
-        "-products",
-        "*",
-        "-requires",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        "-property",
-        "installationPath",
-      ]);
-      const dir = found?.split(/\r?\n/).find((l) => l.trim());
-      if (dir) return { ok: true, detail: `MSVC build tools at ${dir}` };
-    }
-    // A link.exe on disk that vswhere does not see is a broken or
-    // half-registered install: rustc will not find it either.
-    for (const root of [join(pf, "Microsoft Visual Studio", "2022"), join(pf86, "Microsoft Visual Studio", "2019"), join(pf86, "Microsoft Visual Studio", "2017")]) {
-      for (const ed of ["Enterprise", "Professional", "Community", "BuildTools", "Preview"]) {
-        const msvc = join(root, ed, "VC", "Tools", "MSVC");
-        if (e.list(msvc).some((v) => e.exists(join(msvc, v, "bin", "Hostx64", "x64", "link.exe"))))
-          return {
-            ok: false,
-            detail: `MSVC tools found at ${join(root, ed)} but Visual Studio does not list the install`,
-            fix: "repair it from Visual Studio Installer (More > Repair)",
-          };
-      }
-    }
-    return {
-      ok: false,
-      detail: "no MSVC C++ build tools found (link.exe missing)",
-      fix: MSVC_FIX,
-    };
-  }
-  if (e.platform === "darwin") {
-    const p = e.run("xcode-select", ["-p"]);
-    return p
-      ? { ok: true, detail: `Xcode command line tools at ${p}` }
-      : { ok: false, detail: "Xcode command line tools not found", fix: "run `xcode-select --install`" };
-  }
-  if (e.platform !== "linux")
-    return { ok: true, detail: `${e.platform}: no toolchain requirements known` };
-
-  const cc = e.run("cc", ["--version"]) ?? e.run("gcc", ["--version"]) ?? e.run("clang", ["--version"]);
-  const hasPkgConfig = e.run("pkg-config", ["--version"]) !== null;
-  const gtk = hasPkgConfig && e.run("pkg-config", ["--exists", "webkit2gtk-4.1"]) !== null;
-  const missing: string[] = [];
-  const pkgs: string[] = [];
-  if (!cc) {
-    missing.push("a C compiler (cc/gcc/clang)");
-    pkgs.push("build-essential");
-  }
-  if (!hasPkgConfig) {
-    missing.push("pkg-config");
-    pkgs.push("pkg-config", "libwebkit2gtk-4.1-dev");
-  } else if (!gtk) {
-    missing.push("webkit2gtk-4.1 dev files");
-    pkgs.push("libwebkit2gtk-4.1-dev");
-  }
-  if (missing.length)
-    return { ok: false, detail: `missing: ${missing.join(", ")}`, fix: `sudo apt-get install -y ${pkgs.join(" ")}` };
-  const gtkVer = e.run("pkg-config", ["--modversion", "webkit2gtk-4.1"]);
-  return { ok: true, detail: `${cc?.split("\n")[0]} + webkit2gtk-4.1 ${gtkVer ?? "found"}` };
 }
 
 /** Wrap-mode checks. `add` records one line each. Exported for tests. */
@@ -276,19 +186,7 @@ export async function doctor(appDir: string): Promise<number> {
   add("node", true, process.version);
   const cargoVer = probe("cargo", ["--version"]);
   add("rust/cargo", !!cargoVer, cargoVer ?? "not found", { fix: "install Rust: https://rustup.rs" });
-  const tc = nativeToolchain({
-    platform: platform(),
-    run: probe,
-    exists: existsSync,
-    list: (d) => {
-      try {
-        return readdirSync(d);
-      } catch {
-        return [];
-      }
-    },
-    env: process.env,
-  });
+  const tc = nativeToolchain(realEnv());
   add("native toolchain", tc.ok, tc.detail, tc.fix ? { fix: tc.fix } : undefined);
 
   let triple = "unsupported";

@@ -21,13 +21,19 @@ Specs and guides for building on Pylair, plus the design history.
   Python web apps in a desktop window.
 - [models.md](models.md): `pylair.models` — declarative, verified,
   resumable model downloads into the app data dir.
+- [blobs.md](blobs.md): `pylair.Blob` — large binary payloads as
+  host-served blob URLs instead of base64 in the frame.
+- [inspector.md](inspector.md): `pylair dev --inspect` — the dev-only
+  live inspector window: per-call latency, verdicts and pool status.
+- [updates.md](updates.md): opt-in auto-update — signed artifacts, the
+  rollback watchdog, `pylair keys`/`update` and app-side checks.
 - [wrap-mode-brief.md](wrap-mode-brief.md): the wrap-mode design brief.
 - [performance.md](performance.md): bridge latency baseline: method,
   first numbers per OS, and how to run the three bench layers.
 
 ## History and ideas
 
-- [decisions/](decisions/): numbered decision records (0000-0010).
+- [decisions/](decisions/): numbered decision records (0000-0011).
 - [design/](design/): design notes that outgrew a decision record.
 - [ideas.md](ideas.md): parked ideas, not committed scope.
 

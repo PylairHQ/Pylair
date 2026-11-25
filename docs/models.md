@@ -82,10 +82,13 @@ A `requires=(name,)` gate is still how a call waits for the download;
 `path()` only ever answers for a verified file.
 
 ```python
-@expose(worker={"mode": "warm"}, requires=("llm-7b-q4",))
+@expose(worker=warm(), requires=("llm-7b-q4",))
 def generate(prompt: str) -> str:
     return engine.load(models.path("llm-7b-q4")).complete(prompt)
 ```
+
+(`worker=warm()` is the typed helper from `pylair` — the dict form
+`{"mode": "warm"}` it builds keeps working unchanged.)
 
 To gate on a model *and* a warm worker together:
 

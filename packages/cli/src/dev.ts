@@ -12,6 +12,7 @@ import { runTool } from "./build/util.js";
 import { importRoot, loadConfig, tauriCliEntry, type PylairConfig } from "./config.js";
 import { emit } from "./codegen.js";
 import { loadManifest } from "./manifest.js";
+import { formatMissing, missingTools, preflightChecks } from "./preflight.js";
 import { ui } from "./ui/index.js";
 import { wrapWarnings } from "./wrapconfig.js";
 import { ensureDevResources, writeRuntimeFile } from "./wrapbuild.js";
@@ -101,6 +102,13 @@ function devHeader(appDir: string, cfg: PylairConfig): void {
       `pylair: ${stop}`,
     ],
   );
+  // A missing src-tauri/target means this is the first `tauri dev` on
+  // the machine: it compiles the whole Rust/Tauri tree, so say so now —
+  // a silent multi-minute build reads as a hang.
+  if (!existsSync(join(appDir, "src-tauri", "target")))
+    ui.info(
+      "pylair: first build compiles the Rust side - it can take several minutes; later runs reuse the cache and start in seconds",
+    );
 }
 
 /** Wrap mode: no codegen and no @expose surface. The plugin reads the
@@ -156,6 +164,7 @@ export async function dev(opts: {
   appDir: string;
   inspect?: boolean;
   inspectPayloads?: boolean;
+  skipPreflight?: boolean;
 }): Promise<number> {
   const { appDir } = opts;
   // Inspector (docs/inspector.md): dev-only, compiled into debug builds
@@ -173,6 +182,20 @@ export async function dev(opts: {
       ui.info("pylair: inspector window will open (payload previews on)");
   }
   const cfg = loadConfig(appDir);
+
+  // Preflight BEFORE the build: a missing toolchain otherwise fails
+  // minutes into `tauri dev`'s Rust compile. `pylair doctor` diagnoses
+  // the same checks; --skip-preflight bypasses the gate.
+  if (!opts.skipPreflight) {
+    const missing = missingTools(preflightChecks());
+    if (missing.length) {
+      ui.error(
+        `pylair dev: missing prerequisites (${missing.length}) - install them, or pass --skip-preflight:`,
+      );
+      for (const l of formatMissing(missing)) ui.error(`  ${l}`);
+      return 1;
+    }
+  }
 
   // Sync so the venv exists before codegen/dev need the interpreter.
   try {

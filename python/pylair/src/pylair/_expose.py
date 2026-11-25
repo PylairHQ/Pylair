@@ -15,7 +15,7 @@ import inspect
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, overload
+from typing import Any, Literal, TypedDict, cast, overload
 
 from pylair import _readiness
 
@@ -49,6 +49,60 @@ class ExposedFn:
 # (0008 §2): interrupt wait + kill path must land the cancel ack inside
 # the host's 5 s cancel_timeout.
 WARM_CANCEL_GRACE_MAX_MS = 3000
+
+
+class WorkerConfig(TypedDict, total=False):
+    """The `worker=` mapping shape (decision 0008).
+
+    `mode` selects the execution mode: "process" is the per-call worker
+    subprocess, "warm" a long-lived per-function pool. The other keys
+    apply to "warm" only — warm() and isolated() fill them in; a plain
+    dict with the same keys keeps working unchanged.
+    """
+
+    mode: Literal["process", "warm"]
+    pool: int
+    prewarm: bool
+    cancel_grace_ms: float
+    idle_ttl_s: float
+
+
+def warm(
+    *,
+    pool: int = 1,
+    prewarm: bool = False,
+    cancel_grace_ms: float = WARM_CANCEL_GRACE_MAX_MS,
+    idle_ttl_s: float | None = None,
+) -> WorkerConfig:
+    """Worker config for a long-lived warm pool (decision 0008).
+
+    @expose(worker=warm(pool=2, prewarm=True)) — pool sizes the pool
+    (N >= 1, default 1); prewarm spawns the first member at startup and
+    reports readiness on the `worker:<fn>` component; cancel_grace_ms
+    (0..3000, default 3000) is the interrupt grace before the kill
+    fallback; idle_ttl_s (default None) reaps a member idle that long —
+    the next call respawns lazily. Validation is the same as the dict
+    form — errors raise here, at the call site.
+    """
+    return cast(
+        WorkerConfig,
+        _normalize_worker(
+            {
+                "mode": "warm",
+                "pool": pool,
+                "prewarm": prewarm,
+                "cancel_grace_ms": cancel_grace_ms,
+                "idle_ttl_s": idle_ttl_s,
+            }
+        ),
+    )
+
+
+def isolated() -> WorkerConfig:
+    """Worker config for the per-call worker process — the isolated
+    mode, same as @expose(isolated=True) or worker={"mode": "process"}.
+    """
+    return cast(WorkerConfig, _normalize_worker({"mode": "process"}))
 
 
 def _normalize_worker(worker: dict) -> dict:
@@ -158,7 +212,7 @@ def expose[**P, R](
     /,
     *,
     isolated: bool = False,
-    worker: dict | None = None,
+    worker: WorkerConfig | dict | None = None,
     requires: str | Iterable[str] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
@@ -168,7 +222,7 @@ def expose(
     /,
     *,
     isolated: bool = False,
-    worker: dict | None = None,
+    worker: WorkerConfig | dict | None = None,
     requires: str | Iterable[str] | None = None,
 ) -> Callable[..., object]:
     """Mark a function as callable from the Pylair front end.
@@ -178,9 +232,10 @@ def expose(
     terminate on cancel — the only safe cancellation for blocking code.
 
     `worker` selects how an isolated call runs (decision 0008) and
-    implies isolated=True: {"mode": "process"} is the per-call worker
-    (same as isolated=True alone); {"mode": "warm", "pool": N} serves
-    calls from a long-lived per-function pool — `cancel_grace_ms`
+    implies isolated=True — prefer the typed helpers
+    worker=isolated() (the per-call worker, same as isolated=True
+    alone) and worker=warm(pool=N), which serve calls from a
+    long-lived per-function pool — `cancel_grace_ms`
     (0..3000, default 3000) is the interrupt grace before the kill
     fallback, and `prewarm: True` spawns the first member at startup and
     reports readiness on the `worker:<fn>` component. `idle_ttl_s`

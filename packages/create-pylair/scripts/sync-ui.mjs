@@ -1,10 +1,11 @@
-// Vendor the shared ui sources from packages/cli into src/ui/ before tsc.
+// Vendor the shared sources from packages/cli into src/ before tsc.
 //
 // create-pylair must keep zero runtime dependencies (it runs via `npx
 // create-pylair`), so it cannot import @pylair/cli. Copying at build time
-// keeps one source of truth: edit packages/cli/src/ui/*, and the prebuild
-// hook here refreshes the copy. test/parity.test.js asserts the copy is
-// byte-identical, so the two can never drift silently.
+// keeps one source of truth: edit packages/cli/src/{ui/*,preflight.ts},
+// and the prebuild hook here refreshes the copies. test/parity.test.js
+// asserts each copy is byte-identical, so the two can never drift
+// silently.
 
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 
@@ -18,4 +19,15 @@ writeFileSync(
   new URL(".synced", dst),
   "vendored from packages/cli/src/ui by scripts/sync-ui.mjs; do not edit\n",
 );
-console.log(`sync-ui: copied ${FILES.length} files from packages/cli/src/ui`);
+
+// preflight.ts is the toolchain check `pylair dev` gates the Rust build
+// on and this package warns about after scaffolding — one file at src
+// root, vendored like the ui module above.
+const SRC_TOP = ["preflight.ts"];
+const srcTop = new URL("../../cli/src/", import.meta.url);
+const dstTop = new URL("../src/", import.meta.url);
+for (const f of SRC_TOP) copyFileSync(new URL(f, srcTop), new URL(f, dstTop));
+
+console.log(
+  `sync-ui: copied ${FILES.length} ui files + ${SRC_TOP.join(", ")} from packages/cli/src`,
+);

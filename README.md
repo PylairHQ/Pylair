@@ -10,6 +10,43 @@ workflow or an Ollama integration, one command gives you a dev loop with
 a live window, and one more gives you native installers for Windows,
 macOS and Linux that work on machines with no Python installed.
 
+## Prerequisites
+
+`pylair dev` and `pylair build` compile the Rust/Tauri side from source,
+so a fresh machine needs Node 22+, `uv` (it installs the pinned Python
+itself), Rust via rustup, and the platform's native toolchain. Install
+the block for your OS once — `npx pylair doctor` verifies the whole set
+any time, and both `npx create-pylair` and `npx pylair dev` name
+whatever is missing.
+
+**Windows** (PowerShell):
+
+```powershell
+winget install OpenJS.NodeJS.LTS astral-sh.uv Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools
+# In the installer that opens, select the "Desktop development with C++"
+# workload — rustc links with it.
+```
+
+**macOS**:
+
+```sh
+xcode-select --install
+brew install node uv rustup
+rustup-init
+# without Homebrew: nodejs.org, https://docs.astral.sh/uv/, https://rustup.rs
+```
+
+**Linux** (Ubuntu/Debian):
+
+```sh
+sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
+  libappindicator3-dev librsvg2-dev patchelf
+# Node 22+ (nodesource, nvm or your distro), then:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
 ## Quickstart
 
 ```sh
@@ -68,7 +105,7 @@ limitations: [docs/wrap.md](docs/wrap.md).
 - **App readiness.** `@on_startup` hooks report `loading`/`ready`/
   `failed` per component, `@expose(requires=…)` gates calls on them,
   and `onApp` fires on phase changes.
-- **Warm isolated workers.** `@expose(worker={"mode": "warm"})` keeps a
+- **Warm isolated workers.** `@expose(worker=warm())` keeps a
   loaded model resident in a persistent per-function pool — pay the
   import once, call in microseconds; POSIX cancels interrupt the call
   and keep the worker
@@ -145,7 +182,7 @@ crate at `0.1.0-rc.24`). Check each registry for its latest RC.
   has no parent-death signal; Linux `PR_SET_PDEATHSIG` and Windows Job
   Objects cover that case.
 - **`isolated=True` respawns a worker per call.** Fine for short calls;
-  `worker={"mode": "warm", "pool": N}` keeps a persistent per-function
+  `worker=warm(pool=N)` keeps a persistent per-function
   pool instead — on POSIX a cancel interrupts the call first and a
   surviving worker serves the next call; Windows is kill-only
   (CTRL_BREAK cannot reach a console-less worker)
