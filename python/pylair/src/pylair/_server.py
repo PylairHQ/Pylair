@@ -326,11 +326,15 @@ class Server:
                     params = msg.get("params")
                     seq = params.get("seq") if isinstance(params, dict) else None
                     stale_ms = int((time.monotonic() - self._loop_beat) * 1000)
-                    self._send(
-                        proto.notification(
-                            "pong", {"seq": seq, "loop_stale_ms": stale_ms}
-                        )
-                    )
+                    payload = {"seq": seq, "loop_stale_ms": stale_ms}
+                    # Warm-pool status rides the pong (0008 §health):
+                    # one flat dict per warm fn, small and bounded —
+                    # health() can then expose pool state for everyone
+                    # without a host<->runtime round trip.
+                    pools = self._tasks.warm_pool_stats()
+                    if pools:
+                        payload["pools"] = pools
+                    self._send(proto.notification("pong", payload))
                     continue
                 # Inbound bound: control enqueues ahead of queued data;
                 # data beyond IN_MAX is rejected or dropped - the reader

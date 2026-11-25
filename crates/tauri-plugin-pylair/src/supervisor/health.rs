@@ -129,6 +129,11 @@ pub(super) struct HealthShared {
     /// `app.component` state per name, per generation — cleared by
     /// `reset_generation` like the rest of the liveness block.
     pub(super) app: BTreeMap<String, AppComponent>,
+    /// Latest warm-pool status per function (decision 0008), reported
+    /// by the runtime on each pong. Per-generation like `app`: cleared
+    /// by `reset_generation`. Bounded by the number of warm-pooled fns
+    /// in the manifest — the runtime reports one flat entry per fn.
+    pub(super) pools: BTreeMap<String, serde_json::Value>,
 }
 
 /// The shared block, created in `spawn()` beside the fairness map.
@@ -147,6 +152,7 @@ pub(super) fn new(backoff: Duration) -> HealthRef {
         ping_sent: BTreeMap::new(),
         emitted: None,
         app: BTreeMap::new(),
+        pools: BTreeMap::new(),
     }))
 }
 
@@ -313,6 +319,19 @@ impl HealthShared {
         ev
     }
 
+    /// The latest warm-pool status arrived on a pong (decision 0008
+    /// §health). The runtime sends one flat entry per warm fn; the host
+    /// mirrors it verbatim — per-generation, replaced not merged, so a
+    /// dropped pool disappears instead of going stale.
+    pub(super) fn note_pools(&mut self, pools: &serde_json::Value) {
+        self.pools.clear();
+        if let Some(map) = pools.as_object() {
+            for (fn_name, stats) in map {
+                self.pools.insert(fn_name.clone(), stats.clone());
+            }
+        }
+    }
+
     /// An `app.component` notification landed (decision 0007 §4).
     /// Applies the bounds — name/detail truncation, the 32-component
     /// cap on NEW names (existing names always update), [0,1]-clamped
@@ -369,6 +388,7 @@ impl HealthShared {
         self.ping_sent.clear();
         self.emitted = Some(("unknown", "unknown"));
         self.app.clear();
+        self.pools.clear();
     }
 }
 
@@ -413,6 +433,14 @@ pub struct HealthSnapshot {
     /// when the generation has reported nothing and on the `web`
     /// kind. Runtime-wide, not caller-scoped.
     pub app: Option<AppSnapshot>,
+    /// Per-function warm-pool status as last reported by the runtime
+    /// (decision 0008 §health): `{fn: {size, live, busy, idle, queued,
+    /// deaths, crash_loop, idle_ttl_s, reaps}}`. `null` when no pong
+    /// has carried pool data yet this generation — an app with no warm
+    /// pools reads as the empty object once the first pong lands.
+    /// Runtime-wide, not caller-scoped; absent on the `web` kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pools: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// App readiness, latest-report-per-component (decision 0007 §5).

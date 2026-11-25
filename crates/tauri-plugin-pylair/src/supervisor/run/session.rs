@@ -610,6 +610,12 @@ impl Session<'_> {
                         let (health_ev, app_loading) = {
                             let mut h = self.sup.health.lock().unwrap();
                             h.note_pong(p["seq"].as_u64(), stale, self.sup.config.ping_interval);
+                            // Warm-pool status rides the pong (0008
+                            // §health) — mirrored verbatim, replaced
+                            // wholesale each time.
+                            if let Some(pools) = p.get("pools") {
+                                h.note_pools(pools);
+                            }
                             (
                                 h.health_event(
                                     self.sup.config.kind,

@@ -405,6 +405,14 @@ deadlock) never crashes, so it never restarts.
   beyond that duration as wedged: in-flight calls fail with
   `RUNTIME_WEDGED` and the runtime is killed and restarted. The field is
   additive — hosts that ignore it keep the older behaviour.
+- The `pong` also carries `pools` when the runtime has warm pools in
+  use (decision 0008 §health): `{<fn>: {size, live, busy, idle, queued,
+  deaths, crash_loop, idle_ttl_s, reaps}}` — one flat entry per
+  warm-pooled function, replaced wholesale each pong. Additive like
+  `loop_stale_ms`: hosts that ignore it keep the older behaviour. The
+  host mirrors the latest report into `health().pools` (`null` until
+  the first pong of a live generation; absent on the `web` kind) —
+  reported, never host-measured, so it costs no round trip.
 - `seq` matching guards staleness.
 - **Host-side observability is additive.** The host exposes these
   liveness signals to webviews through the `python_health` command (a

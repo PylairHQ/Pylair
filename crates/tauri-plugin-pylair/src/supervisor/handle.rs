@@ -219,6 +219,7 @@ impl Handle {
             missed_pongs,
             loop_stale_ms,
             app_map,
+            pools_map,
         ) = {
             let h = self.health.lock().unwrap();
             (
@@ -253,6 +254,7 @@ impl Handle {
                     })
                 },
                 h.app.clone(),
+                h.pools.clone(),
             )
         };
         // Same rule the pylair://health event emits on
@@ -358,6 +360,15 @@ impl Handle {
                         })
                         .collect(),
                 })
+            },
+            // Per-generation mirror of the runtime's pong-reported pool
+            // status (decision 0008 §health): null until the first pong
+            // of a live generation carries it, absent on the web kind
+            // (a launcher cannot see the wrapped server's pools).
+            pools: if self.kind == RuntimeKind::Web || !live {
+                None
+            } else {
+                Some(pools_map)
             },
         }
     }

@@ -322,3 +322,12 @@ entry graduates).
 at decoration until now (`_expose.py:112-115`); `mode: "process"`
 behavior is untouched. No version bump in the implementation PRs; the
 feature lands in the next RC train.
+
+## §health: pool status in `health()` (addendum)
+
+Each pong carries `pools` — one flat entry per in-use pool `{size,
+live, busy, idle, queued, deaths, crash_loop, idle_ttl_s, reaps}` —
+which the host mirrors into `health().pools` for every app (not just
+inspector users). Pool state is per-generation: a crashed runtime's
+pools die with it, matching the rest of the health liveness block
+(0006). `reaps` counts idle-TTL reaps cumulatively per generation.
