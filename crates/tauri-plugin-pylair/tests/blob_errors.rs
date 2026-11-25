@@ -148,14 +148,67 @@ fn blob_registered(h: &Handle, id: &str) -> bool {
     tauri_plugin_pylair::blobs::lock_blobs(&h.blobs()).has(id)
 }
 
-/// Files inside the (single) generation dir under the blob root.
+/// `root` rendered as an indented `dir/` + `file` tree — interpolated
+/// into assert messages so a stray dir or file explains itself.
+fn dir_tree(root: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, depth: usize, out: &mut String) {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        entries.sort();
+        for p in entries {
+            out.push_str(&"  ".repeat(depth));
+            out.push_str(&p.file_name().unwrap_or_default().to_string_lossy());
+            if p.is_dir() {
+                out.push_str("/\n");
+                walk(&p, depth + 1, out);
+            } else {
+                out.push('\n');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(root, 0, &mut out);
+    out
+}
+
+/// Files inside the current generation's `gen-N` dir under the blob
+/// root. These tests spawn one runtime each, so the root must hold
+/// exactly one `gen-*` dir — a second is residue a Windows teardown
+/// could not unlink while a file was still open (or a swept leftover),
+/// and reading it instead of the live one counts the wrong directory.
+/// The count uses the highest N (the current generation) and the whole
+/// tree prints on a mismatch so the failure explains itself.
 fn gen_dir_files(root: &std::path::Path) -> usize {
-    let gen = std::fs::read_dir(root)
+    let gens: Vec<PathBuf> = std::fs::read_dir(root)
         .unwrap()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.is_dir())
-        .expect("no generation dir under blob root");
-    std::fs::read_dir(gen)
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("gen-"))
+        })
+        .collect();
+    assert_eq!(
+        gens.len(),
+        1,
+        "expected exactly one gen dir under {}:\n{}",
+        root.display(),
+        dir_tree(root),
+    );
+    let gen = gens
+        .into_iter()
+        .max_by_key(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .strip_prefix("gen-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0)
+        })
+        .unwrap();
+    std::fs::read_dir(&gen)
         .unwrap()
         .filter(|e| e.as_ref().map(|x| x.path().is_file()).unwrap_or(false))
         .count()
