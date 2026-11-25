@@ -695,6 +695,40 @@ fn effective_install_mode_resolves_by_location() {
     );
 }
 
+/// The container leg hit ETXTBSY for real: under
+/// APPIMAGE_EXTRACT_AND_RUN the running AppImage's inode stays busy
+/// for the app's whole life (its runtime waits as the parent), so a
+/// bare fs::copy over the install path fails — the restore must land
+/// via rename. Prove it over a live executable.
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_renames_over_a_busy_executable() {
+    let dir = tmp();
+    let install = dir.join("app.AppImage");
+    fs::copy("/bin/sleep", &install).unwrap();
+    let mut sleeper = std::process::Command::new(&install)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let artifact = dir.join("rollback-artifact");
+    fs::write(&artifact, b"fake old version").unwrap();
+    let plan = RestorePlan {
+        artifact: &artifact,
+        install_path: &install,
+        state_dir: &dir,
+        install_wait: Duration::from_secs(1),
+    };
+    (Hooks::default().restore)(&plan).expect("rename must land over the busy inode");
+    sleeper.kill().unwrap();
+    assert_eq!(fs::read(&install).unwrap(), b"fake old version");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&install).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn rollback_manifest_url_substitutes_version_and_refuses_when_unset() {
     use tauri_plugin_pylair::update::cmd::rollback_manifest_url;

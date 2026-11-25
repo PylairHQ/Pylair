@@ -457,12 +457,19 @@ fn relaunch_target(install_path: &Path) -> PathBuf {
 fn default_restore(plan: &RestorePlan) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        // The artifact IS the runnable file: overwrite the recorded
-        // APPIMAGE path and restore the exec bit.
-        fs::copy(plan.artifact, plan.install_path).map_err(|e| {
+        // The artifact IS the runnable file: replace the recorded
+        // APPIMAGE path and restore the exec bit. Copy-then-rename —
+        // the installed AppImage may still be executing (its runtime
+        // holds the file as text for the app's whole lifetime under
+        // APPIMAGE_EXTRACT_AND_RUN), so a direct fs::copy's open for
+        // write fails ETXTBSY; rename(2) swaps the dir entry instead.
+        let tmp = plan.install_path.with_extension("AppImage.restore-tmp");
+        fs::copy(plan.artifact, &tmp)
+            .map_err(|e| format!("copy {} -> {}: {e}", plan.artifact.display(), tmp.display()))?;
+        fs::rename(&tmp, plan.install_path).map_err(|e| {
             format!(
-                "copy {} -> {}: {e}",
-                plan.artifact.display(),
+                "rename {} -> {}: {e}",
+                tmp.display(),
                 plan.install_path.display()
             )
         })?;
