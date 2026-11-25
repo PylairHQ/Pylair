@@ -30,3 +30,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# update-acceptance runs (local + CI): scaffolded app, server root, work dir
+/app-under-test/
+/htdocs/
+/smoke-work/
+/accept-work/

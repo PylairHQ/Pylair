@@ -5,8 +5,8 @@
 //! it.
 
 use super::{
-    health_update, new_session_id, phase, read_pending, state_dir, write_boot_marker,
-    write_failed_marker, write_progress, write_ready_marker, Knobs, UpdatePhase,
+    effective_install_mode, health_update, new_session_id, phase, read_pending, state_dir,
+    write_boot_marker, write_failed_marker, write_progress, write_ready_marker, Knobs, UpdatePhase,
     NO_COMPONENTS_GRACE_MS,
 };
 use crate::supervisor::{RuntimeEvent, State};
@@ -25,9 +25,11 @@ pub struct UpdateGate {
     pub version: String,
     /// knobs resolved from `plugins.pylair.update` + §2 defaults.
     pub knobs: Knobs,
-    /// `bundle.windows.nsis.installMode` normalized:
-    /// "current-user" | "per-machine" | "both". Windows-only concept;
-    /// the install command consults it on Windows only.
+    /// Effective install scope: "current-user" | "per-machine" —
+    /// `bundle.windows.nsis.installMode` when visible, otherwise
+    /// inferred from the install location (see
+    /// [`super::effective_install_mode`]). Windows-only concept; the
+    /// install command consults it on Windows only.
     pub install_mode: String,
     /// `plugins.updater.endpoints` — where updates are checked.
     pub endpoints: Vec<String>,
@@ -79,15 +81,22 @@ impl UpdateGate {
         let updater = conf.pointer("/plugins/updater")?;
         let data = app.path().app_data_dir().ok()?;
         let dir = state_dir(&data);
-        let mode = conf
+        let declared = match conf
             .pointer("/bundle/windows/nsis/installMode")
             .and_then(Value::as_str)
-            .unwrap_or("currentUser");
-        let install_mode = match mode {
-            "perMachine" => "per-machine",
-            "both" => "both",
+        {
+            Some("perMachine") => "per-machine",
+            Some("both") => "both",
             _ => "current-user",
         };
+        // `bundle.windows.nsis` never reaches `app.config()`: tauri
+        // codegen's `ToTokens` for `WindowsConfig` emits only
+        // `webview_install_mode` (`..Default::default()` for every
+        // other field), so `declared` is "current-user" on every real
+        // app. The authoritative signal is the install location —
+        // a per-user install cannot write under %ProgramFiles%.
+        let install_mode =
+            effective_install_mode(declared, &std::env::current_exe().unwrap_or_default());
         let gate = Self {
             dir: dir.clone(),
             version: conf

@@ -50,7 +50,11 @@ struct Keys {
 fn keys() -> Keys {
     let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
     Keys {
-        pubkey_b64: kp.pk.to_base64(),
+        // plugins.updater.pubkey carries base64 of the WHOLE .pub file
+        // (what `pylair keys init` writes), not the bare key line —
+        // PublicKey::to_box() is exactly that file's text.
+        pubkey_b64: base64::engine::general_purpose::STANDARD
+            .encode(kp.pk.to_box().unwrap().into_string()),
         kp,
     }
 }
@@ -605,6 +609,124 @@ fn per_user_windows_still_restores_silently() {
     assert!(!f.dir.join(APPROVAL_FILE).exists());
     assert_eq!(h.calls.borrow().len(), 2); // restore + relaunch
     let _ = fs::remove_dir_all(&f.dir);
+}
+
+/// `app.config()` can never see `bundle.windows.nsis.installMode`
+/// (tauri codegen prunes it), so a pending.json written with the
+/// conf-blind "current-user" still gets the approval path when the
+/// install itself lives under a machine-wide root.
+#[test]
+fn program_files_install_path_forces_approval_despite_declared_mode() {
+    let mut f = fixture(knobs(1_000, 3, 60_000));
+    let root = f.dir.join("Program Files");
+    let ip = root.join("app-under-test").join("app.exe");
+    fs::create_dir_all(ip.parent().unwrap()).unwrap();
+    fs::write(&ip, b"fake new-version binary").unwrap();
+    f.install_path = ip;
+    f.pending.install_path = f.install_path.to_string_lossy().to_string();
+    f.pending.install_mode = Some("current-user".into());
+    update::write_pending(&f.dir, &f.pending).unwrap();
+    std::env::set_var("ProgramW6432", &root);
+    let mut h = test_hooks();
+    h.hooks.platform = Platform::Windows;
+    let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
+    std::env::remove_var("ProgramW6432");
+    match v {
+        Verdict::ApprovalPending { reason } => assert_eq!(reason, "no_sign_of_life"),
+        other => panic!("expected approval-pending, got {other:?}"),
+    }
+    assert!(f.dir.join(APPROVAL_FILE).exists());
+    assert!(h.calls.borrow().is_empty()); // no restore, no relaunch
+    let _ = fs::remove_dir_all(&f.dir);
+}
+
+/// The mirror: a `both`-declared install that actually landed in the
+/// per-user location restores silently — the location, not the
+/// declared mode, is authoritative.
+#[test]
+fn both_mode_per_user_install_still_restores_silently() {
+    let mut f = fixture(knobs(1_000, 3, 60_000));
+    f.pending.install_mode = Some("both".into());
+    update::write_pending(&f.dir, &f.pending).unwrap();
+    let mut h = test_hooks();
+    h.hooks.platform = Platform::Windows;
+    let v = run(&args(&f), &f.keys.pubkey_b64, &h.hooks);
+    assert!(matches!(v, Verdict::RolledBack { .. }));
+    assert!(!f.dir.join(APPROVAL_FILE).exists());
+    assert_eq!(h.calls.borrow().len(), 2); // restore + relaunch
+    let _ = fs::remove_dir_all(&f.dir);
+}
+
+#[test]
+fn per_machine_install_path_matches_program_files_roots() {
+    use tauri_plugin_pylair::update::per_machine_install_path;
+    let root = tmp().join("Program Files");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ProgramW6432", &root);
+    assert!(per_machine_install_path(&root.join("app/app.exe")));
+    assert!(per_machine_install_path(
+        &root.join("app").join("nested").join("app.exe")
+    ));
+    // Component-wise match: "Program Files Evil" is not "Program Files".
+    assert!(!per_machine_install_path(
+        &root.parent().unwrap().join("Program Files Evil/app.exe")
+    ));
+    std::env::remove_var("ProgramW6432");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn effective_install_mode_resolves_by_location() {
+    use tauri_plugin_pylair::update::effective_install_mode;
+    // Declared per-machine stands even off-Program-Files.
+    assert_eq!(
+        effective_install_mode("per-machine", Path::new("/tmp/x")),
+        "per-machine"
+    );
+    // Anything else resolves by location; the fixture dir is never a
+    // Program Files root.
+    assert_eq!(
+        effective_install_mode("both", Path::new("/tmp/x")),
+        "current-user"
+    );
+    assert_eq!(
+        effective_install_mode("current-user", Path::new("/tmp/x")),
+        "current-user"
+    );
+}
+
+/// The container leg hit ETXTBSY for real: under
+/// APPIMAGE_EXTRACT_AND_RUN the running AppImage's inode stays busy
+/// for the app's whole life (its runtime waits as the parent), so a
+/// bare fs::copy over the install path fails — the restore must land
+/// via rename. Prove it over a live executable.
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_renames_over_a_busy_executable() {
+    let dir = tmp();
+    let install = dir.join("app.AppImage");
+    fs::copy("/bin/sleep", &install).unwrap();
+    let mut sleeper = std::process::Command::new(&install)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let artifact = dir.join("rollback-artifact");
+    fs::write(&artifact, b"fake old version").unwrap();
+    let plan = RestorePlan {
+        artifact: &artifact,
+        install_path: &install,
+        state_dir: &dir,
+        install_wait: Duration::from_secs(1),
+    };
+    (Hooks::default().restore)(&plan).expect("rename must land over the busy inode");
+    sleeper.kill().unwrap();
+    assert_eq!(fs::read(&install).unwrap(), b"fake old version");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&install).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

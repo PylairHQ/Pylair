@@ -46,6 +46,33 @@ pub struct Builder<R: Runtime = tauri::Wry> {
     wrap: bool,
 }
 
+/// `plugins.pylair` in tauri.conf.json. Tauri deserializes that section
+/// into the plugin's config type at `initialize` — registered as `()`,
+/// ANY map there panics the app at startup ("invalid type: map,
+/// expected unit"). Today it only carries the update watchdog knobs
+/// (decision 0011 §2); every field is optional and unknown keys are
+/// ignored. The plugin's config type is `Option<PluginConfig>`: the
+/// section deserializes as `null` when absent, which a bare struct
+/// rejects — `Option` accepts both shapes (None when absent, Some for
+/// a real map).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PluginConfig {
+    pub update: UpdateKnobsConf,
+}
+
+/// `plugins.pylair.update` — the watchdog knobs the gate copies into
+/// pending.json (they're read from the raw conf because the watchdog
+/// path runs before plugin init; this type exists so Tauri accepts the
+/// map at all).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdateKnobsConf {
+    pub heartbeat_ms: Option<u64>,
+    pub max_boots: Option<u64>,
+    pub hard_cap_ms: Option<u64>,
+}
+
 impl<R: Runtime> Builder<R> {
     pub fn new(spec: SpawnSpec) -> Self {
         Self {
@@ -132,8 +159,8 @@ impl<R: Runtime> Builder<R> {
         self
     }
 
-    pub fn build(self) -> tauri::plugin::TauriPlugin<R> {
-        let mut plugin = tauri::plugin::Builder::<R>::new("pylair");
+    pub fn build(self) -> tauri::plugin::TauriPlugin<R, Option<PluginConfig>> {
+        let mut plugin = tauri::plugin::Builder::<R, Option<PluginConfig>>::new("pylair");
         // Installed-webview self-test: the client sees this flag and runs its
         // checks through the real bridge, then calls python_selftest_report.
         if std::env::var_os("PYLAIR_SELF_TEST_WEBVIEW").is_some() {
@@ -411,5 +438,35 @@ impl<R: Runtime> Builder<R> {
             })
             .invoke_handler(commands::invoke_handler())
             .build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // plugins.pylair deserializes as `null` when the section is absent
+    // and as a map when present -- the plugin's config type is
+    // Option<PluginConfig> for exactly that reason (a bare struct
+    // panicked every non-updater app at init).
+    #[test]
+    fn plugin_config_accepts_absent_and_present_sections() {
+        assert!(
+            serde_json::from_value::<Option<PluginConfig>>(serde_json::Value::Null)
+                .unwrap()
+                .is_none()
+        );
+        let conf = serde_json::from_value::<Option<PluginConfig>>(serde_json::json!({}))
+            .unwrap()
+            .expect("an empty map is a present section");
+        assert_eq!(conf.update.heartbeat_ms, None);
+        let conf = serde_json::from_value::<Option<PluginConfig>>(serde_json::json!({
+            "update": {"heartbeatMs": 4000, "maxBoots": 5, "unknownKey": true}
+        }))
+        .unwrap()
+        .expect("a knobs map deserializes");
+        assert_eq!(conf.update.heartbeat_ms, Some(4000));
+        assert_eq!(conf.update.max_boots, Some(5));
+        assert_eq!(conf.update.hard_cap_ms, None);
     }
 }

@@ -267,18 +267,41 @@ Two edge cases:
   would need UAC mid-crash-loop): the watchdog records
   `rollback-pending-approval` and the next interactive launch surfaces
   the approval-needed state instead of attempting a restore (0011 §2).
+  The scope is inferred from the install *location*, never the conf —
+  `generate_context!` prunes `bundle.windows.nsis` out of the embedded
+  `Config` (its `ToTokens` impl forwards only `webview_install_mode`),
+  so `installMode` never reaches `app.config()`. An install under
+  `%ProgramFiles%` is definitionally per-machine: a per-user install
+  cannot write there, and a `both`-mode install resolved per-user is
+  correctly treated as per-user.
 - **Single instance per pending window**: a lock file in the state dir
   means a duplicate watchdog exits immediately; logging is bounded to
   `updater-state/upwatch.log`.
 
-Platform note for the acceptance work (PR 4): on Linux the watchdog is
-spawned from the cached rollback AppImage itself — it bundles its own
-WebKitGTK, where a bare exe copy could not start outside the mount the
-install replaced. On macOS the staged copy runs the app executable
-*outside* its `.app` bundle: proven for unsigned dev builds, but
-unproven for a notarized, hardened-runtime binary (Gatekeeper,
-library validation, entitlements) — acceptance must exercise that case
-explicitly.
+Platform notes from the acceptance work (PR 4,
+`scripts/update-acceptance/` + `acceptance-update.yml`, which builds and
+serves seven real signed variants and drives install→update→confirm /
+rollback scenarios per OS):
+
+- On Windows the install unit for restore is the installed exe itself —
+  an earlier cut resolved the install *directory*, and `default_relaunch`
+  tried to `Command::new(dir)`, so a restored app could never relaunch.
+  Silent NSIS rollback + relaunch is proven locally end-to-end
+  (`readiness_failed`, `crash_loop`, and `verify_failed` on a
+  deliberately corrupted cached artifact all land).
+- On Linux the watchdog is spawned from the cached rollback AppImage
+  itself — it bundles its own WebKitGTK, where a bare exe copy could not
+  start outside the mount the install replaced.
+- On macOS the staged copy runs the app executable *outside* its `.app`
+  bundle: proven for unsigned dev builds, but still unproven for a
+  notarized, hardened-runtime binary (Gatekeeper, library validation,
+  entitlements) — the CI leg exercises the unsigned case; the notarized
+  case remains a documented gap until a signed run exists.
+- The watchdog re-verifies the cached rollback artifact against the
+  pubkey compiled into it. `plugins.updater.pubkey` is base64 of the
+  whole `.pub` file (Tauri's convention); decoding it must go
+  base64→utf8→`PublicKey::decode`, matching `tauri-plugin-updater` —
+  a bare `from_base64` fails verify on every rollback attempt.
 
 ## Security notes
 
@@ -298,7 +321,5 @@ explicitly.
 
 ## What lands next
 
-The remaining pieces from 0011 arrive in the rest of the series: the
-end-to-end install/rollback acceptance legs on all three OSes (a real
-`tauri-plugin-updater` round trip against a staged release), and the
-release-train wiring that ships signed artifacts to a public release.
+The remaining piece from 0011 is the release-train wiring that ships
+signed artifacts to a public release.

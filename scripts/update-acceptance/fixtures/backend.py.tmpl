@@ -1,0 +1,73 @@
+"""Acceptance backend (decision 0011, PR 4): every installed version runs
+the same recorder, so the CI harness asserts the update lifecycle from
+<app-data>/accept/log.jsonl plus the updater-state files — real artifacts,
+never console output. The VERSION/VARIANT_BODY placeholder lines below are
+filled by scripts/update-acceptance/build-version.mjs per build."""
+
+import json
+import os
+import threading
+import time
+from pathlib import Path
+
+from pylair import expose, loading, on_startup, ready
+from pylair import update as pylair_update
+
+VERSION = "@@VERSION@@"
+
+
+def _accept_dir() -> Path:
+    d = Path(os.environ["PYLAIR_APP_DATA_DIR"]) / "accept"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _log(tag: str, data: object = None) -> None:
+    rec: dict = {
+        "t": int(time.time() * 1000),
+        "ver": VERSION,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "tag": tag,
+        "data": data,
+    }
+    with open(_accept_dir() / "log.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+@expose
+def accept_record(tag: str, data: str = "") -> None:
+    """The webview driver's only channel — every observable update step
+    lands here as a JSONL record (call args arrive as JSON strings)."""
+    _log(tag, data)
+
+
+@expose
+def accept_version() -> str:
+    """Which bundle is actually running — the proof a restore landed."""
+    return VERSION
+
+
+_state = {"last": None}
+
+
+def _watch_state() -> None:
+    """Record every pylair.update.state() transition: none -> pending ->
+    confirmed is the lifecycle the scenarios assert."""
+    while True:
+        try:
+            s = pylair_update.state()
+        except Exception as e:  # noqa: BLE001 - keep watching; the
+            # transition record matters more than one bad poll
+            s = f"error:{e}"
+        if s != _state["last"]:
+            _state["last"] = s
+            _log("update.state", s)
+        time.sleep(0.5)
+
+
+@on_startup
+def _accept_boot() -> None:
+    _log("boot", VERSION)
+    threading.Thread(target=_watch_state, daemon=True).start()
+    @@VARIANT_BODY@@

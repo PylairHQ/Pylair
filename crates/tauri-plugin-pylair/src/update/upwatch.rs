@@ -31,8 +31,8 @@
 //! relaunches, and records the reason for `health().update.lastRollback`.
 
 use super::{
-    is_skipped, read_pending, PendingFile, APPROVAL_FILE, PENDING_FILE, PROGRESS_FILE,
-    ROLLBACK_REASON_FILE, SKIPPED_FILE, UPDATE_OK_FILE,
+    effective_install_mode, is_skipped, read_pending, PendingFile, APPROVAL_FILE, PENDING_FILE,
+    PROGRESS_FILE, ROLLBACK_REASON_FILE, SKIPPED_FILE, UPDATE_OK_FILE,
 };
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -367,8 +367,20 @@ fn verify_artifact(dir: &Path, p: &PendingFile, pubkey_b64: &str) -> Result<(), 
     };
     let sig = minisign_verify::Signature::decode(&sig_text)
         .map_err(|e| format!("cached sig decode: {e}"))?;
-    let pubkey = minisign_verify::PublicKey::from_base64(pubkey_b64.trim())
-        .map_err(|e| format!("updater pubkey decode: {e}"))?;
+    // plugins.updater.pubkey is base64 of the WHOLE .pub file — same
+    // convention as the sig above (upstream tauri signs/verifies this
+    // way). PublicKey::from_base64 wants the bare key line and rejects
+    // the wrapped form — decode the file text instead.
+    let pubkey = {
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(pubkey_b64.trim())
+            .map_err(|e| format!("updater pubkey is not base64: {e}"))?;
+        let text =
+            String::from_utf8(raw).map_err(|e| format!("updater pubkey is not utf-8: {e}"))?;
+        minisign_verify::PublicKey::decode(&text)
+            .map_err(|e| format!("updater pubkey decode: {e}"))?
+    };
     pubkey
         .verify(&bytes, &sig, true)
         .map_err(|e| format!("cached artifact failed minisign verify: {e}"))?;
@@ -445,12 +457,19 @@ fn relaunch_target(install_path: &Path) -> PathBuf {
 fn default_restore(plan: &RestorePlan) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        // The artifact IS the runnable file: overwrite the recorded
-        // APPIMAGE path and restore the exec bit.
-        fs::copy(plan.artifact, plan.install_path).map_err(|e| {
+        // The artifact IS the runnable file: replace the recorded
+        // APPIMAGE path and restore the exec bit. Copy-then-rename —
+        // the installed AppImage may still be executing (its runtime
+        // holds the file as text for the app's whole lifetime under
+        // APPIMAGE_EXTRACT_AND_RUN), so a direct fs::copy's open for
+        // write fails ETXTBSY; rename(2) swaps the dir entry instead.
+        let tmp = plan.install_path.with_extension("AppImage.restore-tmp");
+        fs::copy(plan.artifact, &tmp)
+            .map_err(|e| format!("copy {} -> {}: {e}", plan.artifact.display(), tmp.display()))?;
+        fs::rename(&tmp, plan.install_path).map_err(|e| {
             format!(
-                "copy {} -> {}: {e}",
-                plan.artifact.display(),
+                "rename {} -> {}: {e}",
+                tmp.display(),
                 plan.install_path.display()
             )
         })?;
@@ -667,9 +686,14 @@ pub fn run(args: &WatchArgs, pubkey_b64: &str, hooks: &Hooks) -> Verdict {
 
     // §2: per-machine installs can't silently elevate for the
     // rollback — record the approval state; the next interactive
-    // launch offers the restore.
+    // launch offers the restore. The scope is resolved from the
+    // declared mode AND the argv install path: the conf's installMode
+    // never reaches `app.config()` (codegen prunes bundle.windows.nsis)
+    // so a Program Files location is what actually proves per-machine.
     let mode = p.install_mode.as_deref().unwrap_or("current-user");
-    if hooks.platform == Platform::Windows && mode != "current-user" {
+    if hooks.platform == Platform::Windows
+        && effective_install_mode(mode, &args.install_path) == "per-machine"
+    {
         write_skip_entry(dir, &p);
         write_approval(dir, &p, &reason);
         write_reason(dir, &p, &reason, "rollback-pending-approval");

@@ -124,8 +124,10 @@ pub struct PendingFile {
     /// Nonce for this pending window; a ready marker without it is
     /// stale evidence from an earlier generation.
     pub session_id: String,
-    /// NSIS install mode the bundle was built with — `per-machine` /
-    /// `both` mean a silent rollback hits UAC (§2).
+    /// Effective install scope (§2): `per-machine` means a silent
+    /// rollback hits UAC. Resolved from the conf-declared NSIS mode
+    /// plus the install location — see `effective_install_mode` (the
+    /// embedded config prunes `bundle.windows.nsis`).
     #[serde(default)]
     pub install_mode: Option<String>,
     #[serde(default)]
@@ -152,6 +154,52 @@ pub fn new_session_id() -> String {
 
 pub fn state_dir(app_data: &Path) -> PathBuf {
     app_data.join(STATE_SUBDIR)
+}
+
+/// Whether `path` sits under `root`, comparing components
+/// case-insensitively — `Path::starts_with` is case-sensitive even on
+/// Windows and would miss `PROGRAM FILES` vs `Program Files`.
+fn under_dir(path: &Path, root: &Path) -> bool {
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    let mut pc = path.components();
+    root.components().all(|rc| {
+        pc.next()
+            .is_some_and(|c| c.as_os_str().eq_ignore_ascii_case(rc.as_os_str()))
+    })
+}
+
+/// Whether `path` sits under a machine-wide install root
+/// (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%ProgramW6432%`).
+///
+/// This is the runtime signal for NSIS install scope:
+/// `app.config()` cannot see `bundle.windows.nsis.installMode` —
+/// tauri codegen's `ToTokens` for `WindowsConfig` forwards only
+/// `webview_install_mode`, so the embedded config always reports
+/// `nsis: None`. A per-user install cannot write under Program
+/// Files, so an install located there is definitionally per-machine;
+/// a `both`-mode install that resolved per-user is not. The env vars
+/// are unset on POSIX, where this always returns false.
+pub fn per_machine_install_path(path: &Path) -> bool {
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .any(|root| under_dir(path, Path::new(&root)))
+}
+
+/// The effective install scope for rollback purposes (§2). A
+/// conf-declared `per-machine` stands; every other declared value is
+/// resolved by where the install actually lives — the conf's
+/// `installMode` never reaches the embedded runtime config, so the
+/// location is the authoritative signal. Returns `"per-machine"` or
+/// `"current-user"`.
+pub fn effective_install_mode(declared: &str, install_path: &Path) -> &'static str {
+    match declared {
+        "per-machine" => "per-machine",
+        _ if per_machine_install_path(install_path) => "per-machine",
+        _ => "current-user",
+    }
 }
 
 fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {

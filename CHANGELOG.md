@@ -102,6 +102,42 @@ the series is released until all PRs land._
   so when it warns. `loop_stall_kill` stays opt-in: killing on a
   legitimate long block would become a restart loop and roll back good
   auto-updates.
+- Update acceptance harness (PR 4 of 5): `scripts/update-acceptance/`
+  builds seven real signed variants of a scaffolded `--with-updater`
+  app (base, good, slow-confirm, broken-on-startup, crash-loop, and a
+  per-machine good/broken pair), stages them under a loopback-served
+  `htdocs/` release tree, and drives install→update→confirm/rollback
+  scenarios a–f per OS (`scenarios-windows.ps1`, `scenarios-posix.sh`
+  with `linux-in-container.sh` for dockerized Linux). A `FAILURES`
+  file, per-scenario state snapshots, and `timings.log` are the
+  evidence. `acceptance-update.yml` runs Windows + dockerized Linux on
+  push and the full matrix on `workflow_dispatch`.
+- **Fixes the acceptance runs surfaced**: `--with-updater` scaffolds
+  injected a `update_watchdog_entry` call that could not infer its
+  runtime type (now `::<tauri::Wry>`) and never registered
+  `tauri_plugin_updater` itself — so `app.updater()` panicked on
+  `UpdaterState` not managed and every `check()` hung the webview's
+  invoke forever. Scaffolds now register the upstream plugin. A
+  `plugins.pylair` conf map (the update knobs) panicked at plugin init
+  — the plugin now carries a typed config so the section deserializes.
+  On Windows the watchdog resolved the install *directory* as the
+  install unit, so a restored app could never relaunch (the install
+  unit is the exe, matching AppImage-file / `.app`-bundle semantics
+  elsewhere). Rollback-artifact verify decoded
+  `plugins.updater.pubkey` as a bare minisign key — it is base64 of
+  the whole `.pub` file, so every watchdog verify failed until the
+  decode matched `tauri-plugin-updater`'s two-step. The rollback
+  manifest lookup ran the *update* comparator (`release > current`)
+  against the current version's own manifest — restore lookups now use
+  an exact-version comparator. `install_mode` read
+  `bundle.windows.nsis.installMode` out of `app.config()`, but
+  `generate_context!` prunes `bundle.windows.nsis` from the embedded
+  `Config` (its `ToTokens` impl forwards only `webview_install_mode`),
+  so the runtime never sees it and a per-machine install silently
+  restored instead of recording `rollback-pending-approval`. Install
+  scope is now inferred from the install *location*: under
+  `%ProgramFiles%` is definitionally per-machine, and a `both`-mode
+  install resolved per-user is correctly treated as per-user.
 
 ## npm-v0.1.0-rc.30 (2026-11-24)
 
