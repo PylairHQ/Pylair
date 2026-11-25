@@ -146,6 +146,11 @@ jobs:
             -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
             -v "$WORK:/work" \
             ubuntu:22.04 bash /scripts/update-acceptance/linux-in-container.sh a b c d e
+      - name: Open evidence permissions
+        # The container runs as root and leaves root-owned files in the
+        # $WORK mount — the upload (runner user) can't zip them.
+        if: failure()
+        run: sudo chmod -R a+rX "$WORK"
       - name: Upload acceptance evidence on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v6

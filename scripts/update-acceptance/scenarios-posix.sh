@@ -50,7 +50,17 @@ FAILED=0
 mkdir -p "$WORK/app" "$EVIDENCE" "$DATA_DIR/accept" "$HTDOCS/latest"
 
 say() { echo "== $(date +%H:%M:%S) $*"; }
-fail() { echo "FAIL: $*" | tee -a "$WORK/FAILURES"; FAILED=1; }
+fail() {
+  echo "FAIL: $*" | tee -a "$WORK/FAILURES"; FAILED=1
+  # Self-diagnose: a bare timeout says nothing — show what the app last
+  # recorded (errors land in the same log) plus the console tail.
+  if [ -f "$LOG" ]; then
+    echo "── $LOG recent (non-health):"
+    grep -v '"tag": "health"' "$LOG" | tail -15
+  fi
+  echo "── $CONSOLE (tail):"
+  tail -15 "$CONSOLE" 2>/dev/null
+}
 note_t() { echo "$(date +%s) $*" >> "$TIMINGS"; }
 
 # ---- log assertions ------------------------------------------------------
