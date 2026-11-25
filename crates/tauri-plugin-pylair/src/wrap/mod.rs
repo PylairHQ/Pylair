@@ -173,6 +173,26 @@ pub struct Ui<R: Runtime> {
     /// Origin of the wrapped page whose load last finished (the self-test
     /// waits for it: script run on a page that is still being replaced is lost).
     app_loaded: Mutex<Option<String>>,
+    /// When the Ui came up — nav-event timestamps are relative to it.
+    created: std::time::Instant,
+    /// Bounded ring of navigation decisions the host made, newest last —
+    /// cold-path diagnostic (the wrap self-test dumps it when the
+    /// navigation-lock probe fails, and it answers "did the webview even
+    /// ask us?" for real apps too). 64 entries is minutes of user-rate
+    /// navigation.
+    nav_events: Mutex<std::collections::VecDeque<NavEvent>>,
+}
+
+/// One navigation decision the host made, for the diagnostic ring.
+pub struct NavEvent {
+    /// Milliseconds since the Ui was created.
+    pub at_ms: u64,
+    /// `navigation` (in-place) or `new-window`.
+    pub kind: &'static str,
+    pub url: String,
+    /// `allow` | `external` | `deny` — and for `navigation` events on
+    /// windows other than the wrap window, `allow (other window)`.
+    pub decision: &'static str,
 }
 
 /// Managed state: lets plugin hooks (navigation, page load) find the [`Ui`].
@@ -195,6 +215,8 @@ impl<R: Runtime> Ui<R> {
             last_download: Mutex::new(None),
             app_loaded: Mutex::new(None),
             restart_reason: Mutex::new(None),
+            created: std::time::Instant::now(),
+            nav_events: Mutex::new(std::collections::VecDeque::new()),
             inner: Mutex::new(Inner {
                 showing: Showing::Local,
                 shown_app_url: None,
@@ -213,15 +235,21 @@ impl<R: Runtime> Ui<R> {
     /// Plugin navigation hook: true lets the webview load `url`.
     pub(crate) fn navigation_allowed(&self, label: &str, url: &tauri::Url) -> bool {
         if label != WINDOW {
+            self.note_nav("navigation", url, "allow (other window)");
             return true;
         }
         match policy::decide_navigation(url, self.app_url().as_ref(), &self.local) {
-            NavDecision::Allow => true,
+            NavDecision::Allow => {
+                self.note_nav("navigation", url, "allow");
+                true
+            }
             NavDecision::External => {
+                self.note_nav("navigation", url, "external");
                 open_external(url);
                 false
             }
             NavDecision::Deny => {
+                self.note_nav("navigation", url, "deny");
                 self.denied
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 false
@@ -229,12 +257,59 @@ impl<R: Runtime> Ui<R> {
         }
     }
 
+    fn note_nav(&self, kind: &'static str, url: &tauri::Url, decision: &'static str) {
+        let mut g = self.nav_events.lock().unwrap();
+        if g.len() >= 64 {
+            g.pop_front();
+        }
+        g.push_back(NavEvent {
+            at_ms: self.created.elapsed().as_millis() as u64,
+            kind,
+            url: url.to_string(),
+            decision,
+        });
+    }
+
+    /// The diagnostic dump the wrap self-test appends when the
+    /// navigation-lock probe fails: every navigation decision the host
+    /// saw, the denial count, whether the page ever loaded. Answers the
+    /// key question directly: did the webview even ASK, or is the lock
+    /// itself broken.
+    pub(crate) fn nav_diagnostics(&self, denied_seen: u32) -> String {
+        let mut out = format!(
+            "denied total {} (the probe needed +2), page loaded: {:?}
+  nav events:",
+            self.denied.load(std::sync::atomic::Ordering::SeqCst),
+            self.app_loaded.lock().unwrap(),
+        );
+        let _ = denied_seen;
+        let g = self.nav_events.lock().unwrap();
+        if g.is_empty() {
+            out.push_str(" NONE — the webview never asked the host");
+        }
+        for e in g.iter() {
+            out.push_str(&format!(
+                "
+    +{}ms {} {} -> {}",
+                e.at_ms, e.kind, e.url, e.decision
+            ));
+        }
+        out
+    }
+
     /// `target=_blank` / `window.open`: never a second window.
     pub(crate) fn new_window(&self, url: &tauri::Url) {
         match policy::decide_new_window(url, self.app_url().as_ref(), &self.local) {
-            NavDecision::Allow => self.navigate(url.clone()),
-            NavDecision::External => open_external(url),
+            NavDecision::Allow => {
+                self.note_nav("new-window", url, "allow");
+                self.navigate(url.clone());
+            }
+            NavDecision::External => {
+                self.note_nav("new-window", url, "external");
+                open_external(url);
+            }
             NavDecision::Deny => {
+                self.note_nav("new-window", url, "deny");
                 self.denied
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }

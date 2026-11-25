@@ -294,6 +294,16 @@ async fn run<R: Runtime>(ui: &Arc<Ui<R>>, marker: &str) -> Result<String, (i32, 
         || (ui.denied.load(std::sync::atomic::Ordering::SeqCst) >= denied_before + 2).then_some(()),
     )
     .await
+    .map_err(|e| {
+        // A refusal miss means either the webview never asked the host
+        // (platform behaviour — no product bug) or the host saw it and
+        // failed to count/refuse (a real lock bug). The diagnostic dump
+        // says which — it is in the failure line CI prints.
+        format!(
+            "{e}; diagnostics: {}",
+            ui.nav_diagnostics(denied_before)
+        )
+    })
     .map_err(fail(10))?;
     let still = w.url().map_err(|e| (10, e.to_string()))?;
     if !crate::util::same_origin(still.as_str(), url.as_str()) {

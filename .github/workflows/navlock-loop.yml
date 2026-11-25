@@ -1,0 +1,99 @@
+# THROWAWAY diagnostic loop for the macOS wrap nav-lock flake — exists
+# only on this investigation branch, never on main. Runs the installed
+# wrap command-adapter self-test 20 times on one macOS runner, capturing
+# per-iteration logs. Red unless all 20 pass: a green run is the fix's
+# 20/20 proof, a red run carries the nav diagnostics in the artifacts.
+name: navlock-loop
+# Branch-scoped push trigger: GitHub never registers workflow_dispatch
+# workflows that exist only off the default branch, so the loop is
+# "dispatched" by pushing to this investigation branch instead (an empty
+# commit re-runs it). Throwaway — the file never exists on main.
+on:
+  push:
+    branches: [navlock-investigate]
+
+permissions:
+  contents: read
+
+jobs:
+  loop:
+    name: navlock loop (macos-latest, command x20)
+    runs-on: macos-latest
+    timeout-minutes: 300
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/wrap-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+          cache-suffix: wrap-macos
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Build workspace packages (client + cli + scaffolder dists)
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+      - name: Scaffold an app for the Rust cache key
+        shell: bash
+        run: node packages/create-pylair/dist/index.js wrap-app --mode wrap --local .
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: wrap-app/src-tauri
+          shared-key: wrap-macOS
+      - name: Build the command-adapter app once
+        shell: bash
+        run: |
+          set -euo pipefail
+          export APP_DIR=wrap-app APP_BIN=wrap-app MARKER=PYLAIR-WRAP-OK
+          node scripts/wrap-acceptance/prepare.mjs "$APP_DIR" command
+          (
+            cd "$APP_DIR"
+            echo "packages: []" > pnpm-workspace.yaml
+            pnpm install --no-frozen-lockfile
+            uv sync
+            pnpm exec pylair build --bundles app
+          )
+      - name: Run the installed self-test 20 times
+        id: loop
+        shell: bash
+        run: |
+          set -uo pipefail
+          ITERDIR="$GITHUB_WORKSPACE/navlock-iterations"
+          mkdir -p "$ITERDIR"
+          APP="$(find "$CARGO_TARGET_DIR/release/bundle/macos" -name '*.app' | head -1)"
+          [ -n "$APP" ] || { echo "no .app built" >&2; exit 1; }
+          pass=0; fail=0
+          for i in $(seq 1 20); do
+            LOG="$ITERDIR/iter-$(printf '%02d' "$i").log"
+            TRIGGER="$(mktemp)"
+            echo "::group::iteration $i"
+            ( cd /tmp && env -i HOME="$HOME" PATH=/usr/bin:/bin PYLAIR_SELF_TEST_WRAP=PYLAIR-WRAP-OK PYLAIR_SELF_TEST_WRAP_RESTART=1 PYLAIR_SELF_TEST_WRAP_CRASH=1 PYLAIR_RESTART_TRIGGER="$TRIGGER" perl -e 'alarm 600; exec @ARGV' "$APP/Contents/MacOS/wrap-app" ) > "$LOG" 2>&1
+            rc=$?
+            echo "::endgroup::"
+            if [ $rc -eq 0 ] && grep -q "wrap-self-test: ok" "$LOG" 2>/dev/null; then
+              pass=$((pass+1)); echo "iteration $i: ok"
+            else
+              fail=$((fail+1)); echo "iteration $i: FAILED (rc=$rc)"
+            fi
+          done
+          echo "navlock loop: $pass/20 passed, $fail failed"
+          echo "pass=$pass" >> "$GITHUB_OUTPUT"
+          [ "$fail" -eq 0 ]
+      - name: Upload iteration logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: navlock-iterations
+          path: navlock-iterations/
+          retention-days: 14
