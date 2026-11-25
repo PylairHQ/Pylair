@@ -196,6 +196,15 @@ serve() {
 
 boots_count() { ls "$STATE_DIR/boots" 2>/dev/null | wc -l | tr -d ' '; }
 
+# boots_version_count <ver> — product evidence of a boot: the host writes
+# one boots/*.json per launch of the pending version (update/mod.rs) with
+# "version" inside. Immune to fixture log-line loss (the scenario-e
+# flake: v3 booted and proved it through update.state, yet its fixture
+# "boot" line never landed).
+boots_version_count() {
+  grep -l "\"version\": *\"$1\"" "$STATE_DIR/boots"/*.json 2>/dev/null | wc -l | tr -d ' '
+}
+
 # ---- scenarios ------------------------------------------------------------
 
 scenario_a() {
@@ -304,7 +313,9 @@ scenario_e() {
   # v3 stays installed — nothing restored it. It still boots (into its
   # broken startup), and its health().update reports the aborted
   # rollback through lastRollback.
-  wait_log 300 "v3 booted (still installed)" "boot" "3.0.0"
+  # Product evidence, not the fixture's own log line: the host writes a
+  # boots/ marker for every launch of the pending version.
+  wait_for 300 "v3 booted (still installed) — boots/ marker"     "[ \$(boots_version_count '3.0.0') -ge 1 ]"
   wait_log 300 "app reports verify_failed via health().update" \
     "health" "verify_failed"
   note_t "scenario e $((SECONDS - s))s"
