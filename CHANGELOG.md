@@ -8,9 +8,15 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-_Part of the unreleased auto-update series (decision 0011) — nothing in
-the series is released until all PRs land._
+## npm-v0.1.0-rc.31 (unreleased)
 
+Crate `0.1.0-rc.24`, `pylair 0.1.0rc17` on PyPI, npm `0.1.0-rc.31`.
+
+- **Auto-update** (decision 0011): opt-in via
+  `create-pylair --with-updater` — signed update artifacts, a
+  readiness-gated rollback watchdog, `health().update` and a
+  `pylair.update`/`update.*` app surface. Default scaffolds are
+  unchanged.
 - `pylair keys init`: wraps `tauri signer generate` — private key to a
   user-picked path that can never land in git (verified via
   `git check-ignore`), pubkey into `plugins.updater.pubkey`, CI-secret and
@@ -28,7 +34,7 @@ the series is released until all PRs land._
   `updater:default` capability permission, `createUpdaterArtifacts` and a
   `*.key` gitignore. Default scaffolds unchanged — a golden test pins it.
 - [docs/updates.md](docs/updates.md): setup walkthrough, channels and the
-  security model, flagged not-available-yet until the series ships.
+  security model.
 - Host update machinery (PR 2 of 5): a new `updater` cargo feature on
   `tauri-plugin-pylair` (off by default; `--with-updater` scaffolds now
   compile it via `features = ["updater"]`) adds `python_update_check /
@@ -72,6 +78,16 @@ the series is released until all PRs land._
   own `latest.json`. Unset or unfetchable ⇒ install refuses — no
   rollback path, no install. `create-pylair --with-updater` injects a
   placeholder.
+- Update acceptance harness (PR 4 of 5): `scripts/update-acceptance/`
+  builds seven real signed variants of a scaffolded `--with-updater`
+  app (base, good, slow-confirm, broken-on-startup, crash-loop, and a
+  per-machine good/broken pair), stages them under a loopback-served
+  `htdocs/` release tree, and drives install→update→confirm/rollback
+  scenarios a–f per OS (`scenarios-windows.ps1`, `scenarios-posix.sh`
+  with `linux-in-container.sh` for dockerized Linux). A `FAILURES`
+  file, per-scenario state snapshots, and `timings.log` are the
+  evidence. `acceptance-update.yml` runs Windows + dockerized Linux on
+  push and the full matrix on `workflow_dispatch`.
 - `worker={"mode": "warm", "idle_ttl_s": N}`: a warm pool member left
   idle N seconds is reaped through the normal kill path — deliberately,
   so no `WORKER_DIED` and no crash-loop count — and the pool respawns
@@ -102,16 +118,6 @@ the series is released until all PRs land._
   so when it warns. `loop_stall_kill` stays opt-in: killing on a
   legitimate long block would become a restart loop and roll back good
   auto-updates.
-- Update acceptance harness (PR 4 of 5): `scripts/update-acceptance/`
-  builds seven real signed variants of a scaffolded `--with-updater`
-  app (base, good, slow-confirm, broken-on-startup, crash-loop, and a
-  per-machine good/broken pair), stages them under a loopback-served
-  `htdocs/` release tree, and drives install→update→confirm/rollback
-  scenarios a–f per OS (`scenarios-windows.ps1`, `scenarios-posix.sh`
-  with `linux-in-container.sh` for dockerized Linux). A `FAILURES`
-  file, per-scenario state snapshots, and `timings.log` are the
-  evidence. `acceptance-update.yml` runs Windows + dockerized Linux on
-  push and the full matrix on `workflow_dispatch`.
 - **Fixes the acceptance runs surfaced**: `--with-updater` scaffolds
   injected a `update_watchdog_entry` call that could not infer its
   runtime type (now `::<tauri::Wry>`) and never registered
