@@ -27,7 +27,7 @@ apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq \
   libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 libexpat1 \
   libgmp10 libgpg-error0 libcom-err2 \
   libx11-6 libx11-xcb1 libxcb1 libwayland-client0 \
-  libegl1 libgl1 libgl1-mesa-dri libdrm2 libgbm1 \
+  libegl1 libgl1 libgl1-mesa-dri libdrm2 libgbm1 libgles2 \
   fonts-dejavu-core >/dev/null
 
 export HOME=/work/home
