@@ -1,7 +1,9 @@
 # 0012: Pydantic v2 models in the typed bridge
 
-Status: proposed (spike: `spikes/p0-pydantic` — every claim below cites
+Status: accepted (spike: `spikes/p0-pydantic` — every claim below cites
 output reproducible by running the spike scripts; see §Evidence index).
+Accepted after the review-mandated strict-mode matrix (`q7`/`q8`) settled
+§4; identical results on CPython 3.15 and the bundled 3.12.
 
 ## Question
 
@@ -33,6 +35,12 @@ matter, not absolute timings):
   BigInt interaction.
 - `q6_bench.py` — validate/dump cost vs the dataclass path on a nested
   order model (10 line items, 4000 iterations, best of 5).
+- `q7_strict_matrix.py` — the review-mandated conversion matrix: every
+  type × strict-python / strict-json / strict+pre-coercion, plus the
+  stringly-typed bug cases.
+- `q8_decoded_and_cost.py` — strict-python behavior on already-decoded
+  objects, timedelta's accepted forms, the re-serialization cost
+  comparison, the bytes-through-strict-json failure.
 
 ## 1. Dependency: detection without importing pydantic
 
@@ -131,34 +139,75 @@ differ, which codegen already supports structurally). `alias_generator`
 needs no special-casing: pydantic resolves it into the per-field alias
 values before the walker ever looks.
 
-## 4. Validation in: strict, with JSON-mode allowances by pre-coercion
+## 4. Validation in: strict Python validation + comprehensive pre-coercion
 
-The spike's matrix (`q3_q4_q5_wire.py`) rules out both naive modes:
+Settled by the review-mandated matrix (`q7_strict_matrix.py`,
+`q8_decoded_and_cost.py` — identical outcomes on CPython 3.15 and the
+bundled 3.12). The matrix covers int/str/bool/float plus datetime, date,
+time, timedelta, UUID, Decimal, Enum-by-value, tuple, set/frozenset,
+bytes and Path, each in its JSON-native wire form, under three candidate
+designs.
 
-- **lax** (the default): `"1"` validates as `1` — silently. That is the
-  canonical frontend type bug, and the bridge's whole value proposition
-  is surfacing it as `INVALID_PARAMS` instead of letting it through.
-- **strict** (`model_validate(..., strict=True)`): rejects ISO-8601
-  datetime *strings* — but strings are the only way JSON can carry a
-  datetime. Strict-as-shipped is unshippable.
-- **`model_validate_json`**: not strict either — the spike shows it
-  *still* coerces `"1"` to `1`, and it would mean re-serializing input
-  pylair has already parsed.
+**First, a correction this review cycle surfaced**: the original spike's
+"`model_validate_json` still coerces `'1'` to `1`" was *lax* JSON mode
+(the default). **Strict JSON mode — `model_validate_json(raw,
+strict=True)` — is exactly the conversion table this design needs**: it
+rejects every stringly-typed bug (`"1"` for int, `"true"` for bool,
+`1` for str, `"1.5"` for float — all REJECT) while accepting the
+JSON-native forms of non-JSON types (ISO datetimes, UUID strings,
+Decimals, enum values, arrays for tuples/sets — all OK). The reviewer's
+suspicion was correct and the matrix proves it.
 
-**Recommendation: strict validation, with pylair pre-coercing the small
-set of types JSON cannot express.** The bridge's annotation walk already
-knows where `datetime`/`date`/`time`/`bytes`/`BigInt`-shaped values are
-declared (it needs the same walk for codegen); before validation it
-converts the wire representation (ISO strings, base64) into the real
-objects at exactly those paths. Proven in the spike:
+**And yet strict JSON mode is not the design**, for architectural
+reasons the matrix made decisive:
 
-- pre-coerced strict: ISO datetime validates — OK;
-- `"1"` as count after pre-coercion: still rejected (`int_type`) — the
-  bug-hiding hole stays closed;
-- int-for-float passes strict (correct — JSON itself does not
-  distinguish, evidence in the probe);
-- a malformed ISO string fails at the pre-coercion step with a clean
-  `ValueError` — maps to `INVALID_PARAMS` at that path, same shape.
+1. **pylair validation never sees JSON text.** The frame parser's
+   `object_hook` decodes `$b64` → real `bytes` and `$bigint` → `BigInt`
+   *at parse time*; validation receives a Python object graph.
+   Validating from JSON means re-serializing that graph first.
+2. **Bytes can't survive the round trip at all.** `json.dumps` raises
+   TypeError on bytes — so a pre-pass is required *either way* — and
+   worse, strict-JSON interprets any string as UTF-8 bytes literally:
+   the base64 text `'aGVsbG8='` comes out as `b'aGVsbG8='` (the spike
+   shows it), payload unrecoverable. Strict JSON mode is semantically
+   wrong for bytes, not merely awkward.
+3. **It costs 2.6-2.7x more** for the privilege: 9.7 µs vs 3.7 µs per
+   nested-order validation on 3.15 (10.6 vs 3.9 on 3.12) — the
+   re-serialization dominates.
+
+Meanwhile strict **Python** mode on the decoded objects needs no help
+for anything already decoded: bytes objects, `BigInt` (an `int`
+subclass — passes strict `int` validation natively), datetime objects,
+UUID/Decimal/tuple/timedelta/Path objects all validate as-is.
+
+**The design: `model_validate(obj, strict=True)` on the decoded input,
+after a pre-coercion walk converts the JSON-native wire forms at exactly
+the annotated paths.** The walk is the same annotation walk codegen
+already needs. Per the matrix, the pre-coercion list must cover every
+type strict-Python rejects in its wire form — the full list, with its
+wire form per type:
+
+| type | wire form | pre-coercion |
+|---|---|---|
+| datetime / date / time | ISO-8601 strings | `fromisoformat` |
+| timedelta | ISO-8601 duration (`"PT1H0.5S"`) — **not** seconds: seconds are rejected in *both* strict modes; the duration string is the one form strict-JSON accepted, so it is the canonical wire form | small duration parser (no stdlib one exists — an implementation cost honestly noted) |
+| UUID | canonical string | `UUID(v)` |
+| Decimal | string or number | `Decimal(str(v))` — string form preferred, lossless |
+| Enum | its value | `Cls(v)` |
+| tuple / set / frozenset | arrays | `tuple(v)` / `set(v)` / `frozenset(v)` |
+| Path | string | `Path(v)` |
+| bytes | — | **not in the list**: `$b64` is already decoded to real bytes at parse time, which strict mode accepts natively |
+| BigInt | — | **not in the list**: already a `BigInt`/`int` object at parse time |
+
+(The first spike iteration of this list had only datetime/date/time/
+bytes/BigInt; the matrix caught tuple/set/frozenset and the
+timedelta-seconds trap — strict-Python rejects arrays for all three and
+seconds in both modes. That is exactly the hole review item 3 predicted.)
+
+Stringly-typed input is still rejected after pre-coercion (`"1"` for int
+fails with `int_type` — proven in the spike), correct typed input passes
+in all modes, and int-for-float passes (correct — JSON itself does not
+distinguish).
 
 **Error mapping.** `ValidationError.errors()` entries carry
 `{type, loc, msg, input, url}`; `loc` is a tuple like
@@ -176,11 +225,12 @@ objects at exactly those paths. Proven in the spike:
   the declared type #193's contract specifies. The expected type comes
   from looking up the annotation at the failure path in the same walk
   that produced the schema (falling back to the tag-derived hint when a
-  custom validator fails mid-object). Custom validators (`Q4c`):
-  their `ValueError("must be an even number")` surfaces as
+  custom validator fails mid-object). Pre-coercion failures (a malformed
+  ISO datetime, a bad duration) raise before validation at the same
+  path — they map into the identical shape. Custom validators: their
+  `ValueError("must be an even number")` surfaces as
   `type: value_error` with `msg` carrying the user's text — the human
-  `message` field uses it verbatim ("Value error, must be an even
-  number"), the machine shape comes from `loc` as usual.
+  `message` field uses it verbatim, the machine shape comes from `loc`.
 
 ## 5. Results out: `model_dump(mode="json", by_alias=True)`
 
@@ -231,10 +281,11 @@ serialization added the out path is ~4.5x faster. Absolute numbers are
 microseconds — small next to IPC — but the ratio kills the performance
 objection to adoption and even suggests a future where the dataclass
 path borrows the same structure. Caveats honestly noted: pylair's path
-does more work per call (BigInt tagging, depth checks, blob probing),
-and the strict+pre-coercion layering adds the pre-pass cost on top of
-pydantic's numbers — a small constant on the same order, not a
-structural change.
+does more work per call (BigInt tagging, depth checks, blob probing).
+The strict+pre-coercion design of §4 measures 3.7-3.9 µs against 3.5 µs
+lax — the pre-pass is noise, not a structural cost — while the rejected
+strict-JSON alternative costs 9.7-10.6 µs because re-serialization
+dominates (both measured on the same nested order, 3.15 and 3.12).
 
 ## 7. Explicitly unsupported in v1
 
@@ -289,6 +340,11 @@ builds on its shape rather than racing it.
   over a lossy format.
 - **lax validation** — rejected in §4: hides the exact frontend type
   bugs the bridge exists to surface.
+- **strict JSON mode** (`model_validate_json(raw, strict=True)`) — the
+  right conversion table, architecturally impossible here: validation
+  receives decoded objects not JSON text, bytes can't re-serialize at
+  all (and lose their payload if forced through strings), and the round
+  trip costs 2.6-2.7x. Evidence in `q7`/`q8`.
 - **field names instead of aliases** — rejected in §3: breaks every
   model that declares an alias, which is the population that needs this
   feature most.

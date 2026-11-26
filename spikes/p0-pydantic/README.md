@@ -26,3 +26,5 @@ pydantic 2.14.4 — ratios, not absolute timings, are the evidence).
 | `q2_schema_source.py` | feature-by-feature comparison of the two schema sources |
 | `q3_q4_q5_wire.py` | alias round-trip; strict/lax/json-mode validation; `ValidationError.errors()` mapping; `computed_field`/`model_serializer` shapes; BigInt interaction |
 | `q6_bench.py` | `model_validate`/`model_dump` cost vs `coerce_kwargs`/`dumps` on a nested order model |
+| `q7_strict_matrix.py` | the full type x strict-mode conversion matrix + stringly-typed bug cases |
+| `q8_decoded_and_cost.py` | already-decoded objects under strict-python; timedelta forms; re-serialization cost; bytes-through-strict-json failure |
