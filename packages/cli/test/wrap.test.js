@@ -21,6 +21,13 @@ import { PromptCancelled } from "../dist/ui/prompts.js";
 import { wrapChecks } from "../dist/doctor.js";
 import { build } from "../dist/build.js";
 
+// Pin expectations derive from the compatibility manifest (the one place
+// the pins PR edits), never version literals.
+const COMPAT = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../src/compat.json", import.meta.url)), "utf8"),
+);
+const CURRENT = COMPAT.releases.find((r) => r.npm === COMPAT.current);
+
 const REPO = fileURLToPath(new URL("../../..", import.meta.url));
 const CREATE_PYLAIR = join(REPO, "packages", "create-pylair", "dist", "index.js");
 const tmp = (p) => mkdtempSync(join(tmpdir(), `pylair-wrap-${p}-`));
@@ -372,7 +379,10 @@ describe("pylair wrap: initialising a project", () => {
     for (const f of ["src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "ui/index.html", "ui/restarting.html"])
       assert.ok(existsSync(join(d, f)), `missing ${f}`);
     const cargo = readFileSync(join(d, "src-tauri/Cargo.toml"), "utf-8");
-    assert.match(cargo, /tauri-plugin-pylair = "=0\.1\.0-rc\.24"/);
+    assert.ok(
+      cargo.includes(`tauri-plugin-pylair = "=${CURRENT.crate}"`),
+      "wrap scaffold pins the manifest's exact crate version",
+    );
   });
 
   test("an uninferred framework is asked for on a TTY, then its entry file", async () => {

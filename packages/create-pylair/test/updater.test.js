@@ -9,6 +9,13 @@ import { fileURLToPath } from "node:url";
 import { after } from "node:test";
 
 const bin = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+
+// Pin expectations derive from the vendored compatibility manifest, never
+// version literals: the pins PR edits compat.json and these keep passing.
+const COMPAT = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../src/compat.json", import.meta.url)), "utf8"),
+);
+const CURRENT = COMPAT.releases.find((r) => r.npm === COMPAT.current);
 const dirs = [];
 const tmp = () => {
   const d = mkdtempSync(join(tmpdir(), "create-pylair-up-"));
@@ -58,7 +65,12 @@ describe("create-pylair --with-updater", () => {
     assert.match(cargo, /tauri-plugin-updater = "2"/);
     // pylair pin kept, now carrying the `updater` cargo feature so the
     // host compiles its update machinery (decision 0011 §8 PR 2).
-    assert.match(cargo, /tauri-plugin-pylair = \{ version = "=0\.1\.0-rc\.24", features = \["updater"\] \}/);
+    assert.ok(
+      cargo.includes(
+        `tauri-plugin-pylair = { version = "=${CURRENT.crate}", features = ["updater"] }`,
+      ),
+      "updater scaffold keeps the manifest's exact crate pin",
+    );
 
     const cap = JSON.parse(readFileSync(join(app, "src-tauri/capabilities/default.json"), "utf-8"));
     assert.ok(cap.permissions.includes("updater:default"));

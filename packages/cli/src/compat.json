@@ -1,6 +1,13 @@
 {
-  "current": "0.1.0-rc.31",
+  "current": "0.1.0-rc.32",
   "releases": [
+    {
+      "npm": "0.1.0-rc.32",
+      "crate": "0.1.0-rc.25",
+      "pylair": "0.1.0rc18",
+      "date": "2026-11-26",
+      "notes": []
+    },
     {
       "npm": "0.1.0-rc.31",
       "crate": "0.1.0-rc.24",

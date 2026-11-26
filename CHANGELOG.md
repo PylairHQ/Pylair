@@ -8,7 +8,7 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-## npm-v0.1.0-rc.32 (unreleased)
+## npm-v0.1.0-rc.32 (2026-11-26)
 
 Crate `0.1.0-rc.25`, `pylair 0.1.0rc18` on PyPI, npm `0.1.0-rc.32`.
 
