@@ -13,7 +13,6 @@ use tauri_plugin_pylair::release_spawn_spec;
 use tauri_plugin_pylair::supervisor::{
     spawn, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -50,7 +49,7 @@ fn cfg() -> SupervisorConfig {
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -147,7 +146,7 @@ async fn hostile_cwd_does_not_shadow_runtime_or_worker() {
         format!("{}{sep}{}", pylair_src().display(), tests_dir().display()),
     ));
 
-    let (tx, mut rx) = mpsc::channel(256);
+    let (tx, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(spec, cfg(), tx);
 
     let mut stderr = Vec::new();

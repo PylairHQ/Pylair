@@ -21,7 +21,6 @@ use serde_json::json;
 use tauri_plugin_pylair::supervisor::{
     spawn, Handle, RuntimeEvent, RuntimeKind, ShutdownOutcome, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const T: Duration = Duration::from_secs(45);
@@ -142,7 +141,7 @@ struct Rig {
 }
 
 fn start(spec: SpawnSpec, config: SupervisorConfig) -> Rig {
-    let (ev_tx, mut ev_rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev_tx, mut ev_rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let (h, actor) = spawn(spec, config, ev_tx);
     tokio::spawn(actor);
     let events = Arc::new(Mutex::new(Vec::new()));

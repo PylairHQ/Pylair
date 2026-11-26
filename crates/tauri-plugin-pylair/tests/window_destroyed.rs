@@ -14,7 +14,6 @@ use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
     spawn, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(15);
@@ -102,7 +101,7 @@ async fn wait_ready(h: &Handle) {
 
 #[tokio::test]
 async fn window_destroyed_cancels_only_owned_tasks_from_main_thread() {
-    let (tx, mut events) = mpsc::channel(256);
+    let (tx, mut events) = tauri_plugin_pylair::supervisor::event_pair(256);
     let (h, actor) = spawn(spec(FAKE_CANCEL_WATCH), config(), tx);
     tokio::spawn(actor);
     wait_ready(&h).await;

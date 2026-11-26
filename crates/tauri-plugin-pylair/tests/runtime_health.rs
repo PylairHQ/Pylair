@@ -9,7 +9,6 @@ use std::time::Duration;
 use tauri_plugin_pylair::supervisor::{
     spawn, ExitKind, Handle, Limits, RuntimeEvent, RuntimeKind, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -17,7 +16,7 @@ const T: Duration = Duration::from_secs(20);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -315,7 +314,7 @@ async fn eventually(cond: impl Fn() -> bool) -> bool {
 
 /// Collect every runtime event into a shared log so assertions can
 /// count health payloads and state transitions together.
-fn pump(mut rx: mpsc::Receiver<RuntimeEvent>) -> Arc<Mutex<Vec<RuntimeEvent>>> {
+fn pump(mut rx: tauri_plugin_pylair::supervisor::EventDrain) -> Arc<Mutex<Vec<RuntimeEvent>>> {
     let log = Arc::new(Mutex::new(Vec::new()));
     let sink = log.clone();
     tokio::spawn(async move {
@@ -359,7 +358,7 @@ fn unresponsive_arrivals(log: &Arc<Mutex<Vec<RuntimeEvent>>>) -> usize {
 /// correct null/absent rules, verdicts ok.
 #[tokio::test]
 async fn baseline_health_is_ok_when_ready() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HEALTHY), fast_config(), events);
     wait_state(&h, State::Ready).await;
     // First pong's landing is async: wait until liveness is populated.
@@ -404,7 +403,7 @@ async fn baseline_health_is_ok_when_ready() {
 /// unchanged.
 #[tokio::test]
 async fn stalled_loop_reports_busy_and_unresponsive() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_STALE_LOOP), fast_config(), events);
     wait_state(&h, State::Ready).await;
     assert!(
@@ -429,7 +428,7 @@ async fn stalled_loop_reports_busy_and_unresponsive() {
 /// (transport: missing) until the existing kill path trips.
 #[tokio::test]
 async fn missing_pongs_report_missing_then_kill() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_NO_PONG), fast_config(), events);
     wait_state(&h, State::Ready).await;
     // Misses climb one per tick: assert two distinct rungs, each while
@@ -499,7 +498,7 @@ async fn missing_pongs_report_missing_then_kill() {
 async fn a_pong_after_the_next_ping_is_not_a_miss() {
     let mut c = fast_config();
     c.missed_pongs_to_kill = 1000; // state may flap; never kill the worker
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_SLOW_PONG), c, events);
     wait_state(&h, State::Ready).await;
     assert!(
@@ -517,7 +516,7 @@ async fn a_pong_after_the_next_ping_is_not_a_miss() {
 /// An echoed seq measures an RTT; an absent seq must never fake one.
 #[tokio::test]
 async fn echoed_seq_gives_rtt_unmatched_seq_gives_none() {
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HEALTHY), fast_config(), events);
     wait_state(&h, State::Ready).await;
     assert!(
@@ -525,7 +524,7 @@ async fn echoed_seq_gives_rtt_unmatched_seq_gives_none() {
         "an echoed seq never produced an RTT"
     );
 
-    let (events2, _rx2) = mpsc::channel(64);
+    let (events2, _rx2) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h2 = spawn_h(spec(FAKE_NOSEQ_PONG), fast_config(), events2);
     wait_state(&h2, State::Ready).await;
     assert!(
@@ -547,7 +546,7 @@ async fn echoed_seq_gives_rtt_unmatched_seq_gives_none() {
 async fn crash_restart_records_last_exit_and_bumps_generation() {
     let mut c = fast_config();
     c.breaker_crashes = 10; // keep restarting — never park `failed`
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_DIES_AFTER_HELLO), c, events);
     assert!(
         eventually(|| h.health(None).restarts.crashes_in_window == 1).await,
@@ -588,7 +587,7 @@ async fn fairness_off_hides_self_but_load_totals_still_count() {
     c.limits = Limits::default()
         .with_max_concurrent_tasks(4)
         .with_per_window_fairness(false);
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HOLDS_TASKS), c, events);
     wait_state(&h, State::Ready).await;
     let task = h
@@ -617,7 +616,7 @@ async fn a_second_owner_shrinks_self_ceilings() {
     let mut c = fast_config();
     c.ping_interval = Duration::from_secs(60);
     c.missed_pongs_to_kill = 1000;
-    let (events, _rx) = mpsc::channel(64);
+    let (events, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_HOLDS_TASKS), c, events);
     wait_state(&h, State::Ready).await;
     h.fairness_join_window("win-a");
@@ -648,7 +647,7 @@ async fn a_second_owner_shrinks_self_ceilings() {
 /// then ok — and repeated identical pongs emit nothing.
 #[tokio::test]
 async fn a_stale_loop_flap_emits_busy_then_ok_and_stays_quiet() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_FLAP_LOOP), fast_config(), events);
     let log = pump(rx);
     wait_state(&h, State::Ready).await;
@@ -685,7 +684,7 @@ async fn a_stale_loop_flap_emits_busy_then_ok_and_stays_quiet() {
 /// the baseline.
 #[tokio::test]
 async fn a_dead_transport_emits_missing_once_then_unknown_at_teardown() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_NO_PONG), fast_config(), events);
     let log = pump(rx);
     wait_state(&h, State::Ready).await;
@@ -723,7 +722,7 @@ async fn a_dead_transport_emits_missing_once_then_unknown_at_teardown() {
 /// the onState byte-identity check.
 #[tokio::test]
 async fn the_unresponsive_cause_flip_emits_health_not_state() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(spec(FAKE_MISSED_THEN_STALE), fast_config(), events);
     let log = pump(rx);
     wait_state(&h, State::Ready).await;
@@ -751,7 +750,7 @@ async fn the_unresponsive_cause_flip_emits_health_not_state() {
 /// verdict stays `"unknown"` throughout, never a fabricated `"ok"`.
 #[tokio::test]
 async fn a_web_runtime_emits_nothing_steady_and_missing_on_silence() {
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.kind = RuntimeKind::Web;
     c.ready_timeout = Duration::from_secs(5);
@@ -769,7 +768,7 @@ async fn a_web_runtime_emits_nothing_steady_and_missing_on_silence() {
     );
     h.shutdown().await;
 
-    let (events, rx) = mpsc::channel(64);
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut c = fast_config();
     c.kind = RuntimeKind::Web;
     c.ready_timeout = Duration::from_secs(5);

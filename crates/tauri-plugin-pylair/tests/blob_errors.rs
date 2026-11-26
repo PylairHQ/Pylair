@@ -12,10 +12,9 @@ use std::time::Duration;
 use tauri_plugin_pylair::blobs::BlobLimits;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, CancelOutcome, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn, CancelOutcome, Handle, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
 use tauri_plugin_pylair::ErrorObj;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(30);
@@ -24,7 +23,7 @@ const WIN: &str = "main";
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -218,7 +217,7 @@ fn gen_dir_files(root: &std::path::Path) -> usize {
 /// `blob.register` is refused and the call must see it, not a 404.
 #[tokio::test]
 async fn handles_cap_reaches_the_call() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("handles");
     let mut l = BlobLimits::from_env();
     l.max_blobs_per_window = 256;
@@ -254,7 +253,7 @@ async fn handles_cap_reaches_the_call() {
 /// `Completed`, and the next call still works.
 #[tokio::test]
 async fn stream_rejection_ends_stream_and_recovers() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("stream");
     let mut l = BlobLimits::from_env();
     l.max_blobs_per_window = 1;
@@ -308,7 +307,7 @@ async fn stream_rejection_ends_stream_and_recovers() {
 /// `PYLAIR_MAX_BLOB_BYTES` — releasing other handles cannot help.
 #[tokio::test]
 async fn per_blob_bytes_cap() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("bytes");
     let mut l = BlobLimits::from_env();
     l.max_blob_bytes = 8;
@@ -337,7 +336,7 @@ async fn per_blob_bytes_cap() {
 /// is drained — the name stays the pool's, not the share's.
 #[tokio::test]
 async fn generation_total_cap() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("total");
     let mut l = BlobLimits::from_env();
     // max_blob_total below max_blob_bytes is raised to it — keep the
@@ -375,7 +374,7 @@ async fn generation_total_cap() {
 /// the rejection is the hog's, not "the pool is full".
 #[tokio::test]
 async fn share_cap_names_the_fair_bound() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("share");
     let mut l = BlobLimits::from_env();
     l.max_blob_bytes = 100;
@@ -412,7 +411,7 @@ async fn share_cap_names_the_fair_bound() {
 /// succeeds after the client releases one.
 #[tokio::test]
 async fn release_frees_a_slot() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("release");
     let mut l = BlobLimits::from_env();
     l.max_blobs_per_window = 1;
@@ -444,7 +443,7 @@ async fn release_frees_a_slot() {
 /// count where it was before the call.
 #[tokio::test]
 async fn orphan_ids_released_on_replaced_response() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("orphan-call");
     let mut l = BlobLimits::from_env();
     l.max_blobs_per_window = 3;
@@ -490,7 +489,7 @@ async fn orphan_ids_released_on_replaced_response() {
 /// live — the page genuinely holds them.
 #[tokio::test]
 async fn orphan_ids_released_on_replaced_chunk() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("orphan-stream");
     let mut l = BlobLimits::from_env();
     l.max_blobs_per_window = 3;
@@ -566,7 +565,7 @@ while True:
         w({"jsonrpc":"2.0","id": m["id"],
            "result": {"$blob": {"id": "x", "mime": "text/plain", "size": 1}}})
 "#;
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("bad");
     let h = spawn_h(spec(FAKE), fast_config(&root, BlobLimits::from_env()), ev);
     wait_state(&h, State::Ready).await;
@@ -590,7 +589,7 @@ while True:
 /// call is clean.
 #[tokio::test]
 async fn rejections_do_not_leak_between_tasks() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let root = blob_dir("leak");
     let mut l = BlobLimits::from_env();
     l.max_blob_bytes = 8;

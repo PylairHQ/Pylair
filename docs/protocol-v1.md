@@ -474,6 +474,20 @@ Call data and lifecycle events use different mechanisms:
   listeners still see emitted stderr lines (same residual as the other
   broadcasts — delivery selection, not sniffing protection). A
   destroyed window is removed from the subscriber set.
+- **State events are lossless for the latest state.** `pylair://state`,
+  `pylair://exposes`, `pylair://health` and `pylair://app` are state,
+  not traffic: they travel per-kind latest-state slots beside the
+  bounded events channel, so bulk pressure (a stderr flood) can never
+  drop one. Re-entries into the SAME state may coalesce under load —
+  repeated reports for one component on `pylair://app`, or a crash
+  loop's hundredth `Starting` — but distinct lifecycle transitions are
+  distinct facts and always arrive in order, and the newest state
+  always reaches every subscriber: a webview can never be stranded on a
+  superseded readiness or liveness verdict, and a newer generation's
+  report retires an older one's undelivered entries. Ordering across
+  kinds follows store order. `pylair://stderr` stays lossy by design —
+  a flooded log drops lines with a `[dropped N lines]` marker, never
+  states — and the supervisor never blocks on either path.
 
 - `cancel()` waits at most `cancel_timeout` (default 5s) for the runtime's
   acknowledgement and then fails with `RUNTIME_WEDGED`; a blocked runtime

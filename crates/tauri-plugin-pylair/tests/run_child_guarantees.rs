@@ -256,7 +256,7 @@ struct Rec {
 }
 
 impl Rec {
-    fn start(mut rx: mpsc::Receiver<RuntimeEvent>) -> Rec {
+    fn start(mut rx: tauri_plugin_pylair::supervisor::EventDrain) -> Rec {
         let rec = Rec {
             log: Arc::new(Mutex::new(Vec::new())),
             pid: Arc::new(Mutex::new(None)),
@@ -397,7 +397,7 @@ impl Rec {
 }
 
 fn start(spec: SpawnSpec, config: SupervisorConfig) -> (Handle, Rec) {
-    let (ev, rx) = mpsc::channel::<RuntimeEvent>(4096);
+    let (ev, rx) = tauri_plugin_pylair::supervisor::event_pair(4096);
     let rec = Rec::start(rx);
     let (h, actor) = spawn(spec, config, ev);
     tokio::spawn(actor);

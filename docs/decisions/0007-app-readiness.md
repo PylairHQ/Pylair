@@ -373,7 +373,8 @@ there is no command to deny.
 **Rust shape:** `HealthShared` gains
 `app: BTreeMap<String, AppComponent>` (+ the 32-cap and truncation
 rules of §4); the `app.component` match arm in `session.rs` writes
-it and `try_send`s `AppChanged` on a phase transition;
+it and emits `AppChanged` on a phase transition
+(lossless-latest like every state event — protocol §5.1);
 `Handle::health` serializes `app` into the snapshot;
 `reset_generation` clears it. `HealthSnapshot`/`HealthChange` TS
 types gain `app?` / nothing respectively; `AppChange` +

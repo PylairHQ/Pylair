@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, CancelOutcome, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
+    spawn, CancelOutcome, Handle, SpawnSpec, State, SupervisorConfig,
 };
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
@@ -30,7 +30,7 @@ const T: Duration = Duration::from_secs(15);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -151,7 +151,7 @@ time.sleep(600)
 
 #[tokio::test]
 async fn non_owner_cannot_cancel_another_windows_task() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -198,7 +198,7 @@ async fn non_owner_cannot_cancel_another_windows_task() {
 
 #[tokio::test]
 async fn non_owner_cannot_grant_credit_on_another_windows_stream() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.initial_stream_credit = 2; // stream blocks quickly without credit
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -277,7 +277,7 @@ async fn non_owner_cannot_grant_credit_on_another_windows_stream() {
 /// acknowledged, the outcome must be loud and distinct, never ambiguous.
 #[tokio::test]
 async fn cancel_not_dropped_when_frame_queue_full() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     // Keep the wedged runtime alive: it can't pong, so the liveness
     // killer must not fire during the flood.
@@ -579,7 +579,7 @@ async fn host_sigkill_does_not_orphan_wedged_runtime() {
         // Host role: spawn the wedged runtime, then live forever until
         // killed. The wedged fake can't pong — disable the liveness kill
         // so only PDEATHSIG (or its absence) decides.
-        let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+        let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
         let mut cfg = fast_config();
         cfg.missed_pongs_to_kill = 1_000_000;
         let _h = spawn_h(spec(FAKE_WEDGED), cfg, ev);
@@ -641,7 +641,7 @@ async fn host_sigkill_does_not_orphan_wedged_runtime() {
 #[tokio::test]
 async fn host_sigkill_healthy_runtime_exits_on_eof() {
     if std::env::var("PYLAIR_ORPHAN_HOST").is_ok() {
-        let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+        let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
         let _h = spawn_h(spec(FAKE_READY), fast_config(), ev);
         loop {
             sleep(Duration::from_secs(60)).await;
@@ -698,7 +698,7 @@ async fn host_sigkill_healthy_runtime_exits_on_eof() {
 #[tokio::test]
 async fn host_sigkill_does_not_orphan_isolated_worker() {
     if std::env::var("PYLAIR_ORPHAN_HOST").is_ok() {
-        let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+        let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
         let h = spawn_h(real_runtime_spec(), fast_config(), ev);
         wait_state(&h, State::Ready).await;
         // Start the long-running isolated task — the worker it spawns is
@@ -774,7 +774,7 @@ async fn host_sigkill_does_not_orphan_isolated_worker() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn pdeathsig_does_not_kill_a_healthy_runtime_early() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 

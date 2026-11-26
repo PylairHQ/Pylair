@@ -26,9 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri_plugin_pylair::supervisor::{
-    spawn, CancelOutcome, Handle, RuntimeEvent, SpawnSpec, State, SupervisorConfig,
+    spawn, CancelOutcome, Handle, SpawnSpec, State, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(15);
@@ -38,7 +37,7 @@ const T: Duration = Duration::from_secs(15);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -116,7 +115,7 @@ async fn wait_state(h: &Handle, want: State) {
 
 #[tokio::test]
 async fn channel_carries_the_unchanged_payload_shape() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let h = spawn_h(real_runtime_spec(), fast_config(), ev);
     wait_state(&h, State::Ready).await;
 
@@ -157,7 +156,7 @@ async fn channel_carries_the_unchanged_payload_shape() {
 
 #[tokio::test]
 async fn dead_channel_cancels_task_and_releases_stream_slot() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.limits.max_concurrent_streams = 1; // one slot — proves it frees
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -234,7 +233,7 @@ async fn dead_channel_reaps_only_that_task_not_same_owner_siblings() {
     // the window is truly gone, but a webview closed and reopened under
     // the SAME label could have its newer live calls killed by a stale
     // forwarder. The reap must be scoped to the dead task only.
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.limits.max_concurrent_streams = 2;
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -336,7 +335,7 @@ async fn page_load_watermark_reaps_only_pre_navigation_tasks() {
     // survives. The hook itself needs a real webview engine — the mock
     // runtime produces no page loads — so this pins the supervisor
     // primitive it relies on.
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(64);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(64);
     let mut cfg = fast_config();
     cfg.limits.max_concurrent_streams = 2;
     let h = spawn_h(real_runtime_spec(), cfg, ev);

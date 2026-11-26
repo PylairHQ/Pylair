@@ -9,9 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri_plugin_pylair::protocol as proto;
 use tauri_plugin_pylair::supervisor::{
-    spawn, Handle, RuntimeEvent, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn, Handle, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(20);
@@ -70,7 +69,7 @@ fn cfg() -> SupervisorConfig {
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -93,7 +92,7 @@ async fn wait_ready(h: &Handle) {
 /// concurrent call succeeds — and the runtime must stay alive after.
 #[tokio::test]
 async fn deep_result_fails_one_call_and_runtime_survives() {
-    let (tx, _rx) = mpsc::channel(256);
+    let (tx, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), tx);
     wait_ready(&h).await;
 
@@ -119,7 +118,7 @@ async fn deep_result_fails_one_call_and_runtime_survives() {
 /// A deep STREAM chunk fails the stream's terminal, not the runtime.
 #[tokio::test]
 async fn deep_stream_chunk_fails_the_stream_only() {
-    let (tx, _rx) = mpsc::channel(256);
+    let (tx, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), tx);
     wait_ready(&h).await;
 
@@ -158,7 +157,7 @@ async fn deep_stream_chunk_fails_the_stream_only() {
 /// check or the parent's — either way the call fails, the runtime lives).
 #[tokio::test]
 async fn deep_isolated_result_fails_the_call_only() {
-    let (tx, _rx) = mpsc::channel(256);
+    let (tx, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let h = spawn_h(real_runtime_spec(), cfg(), tx);
     wait_ready(&h).await;
 

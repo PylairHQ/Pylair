@@ -10,7 +10,6 @@ use tauri_plugin_pylair::supervisor::{
     spawn, CancelOutcome, Handle, Limits, RuntimeEvent, SpawnSpec, State, StreamItem,
     SupervisorConfig,
 };
-use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const T: Duration = Duration::from_secs(20);
@@ -18,7 +17,7 @@ const T: Duration = Duration::from_secs(20);
 fn spawn_h(
     spec: SpawnSpec,
     config: SupervisorConfig,
-    events: mpsc::Sender<RuntimeEvent>,
+    events: tauri_plugin_pylair::supervisor::EventBus,
 ) -> Handle {
     let (h, actor) = spawn(spec, config, events);
     tokio::spawn(actor);
@@ -140,7 +139,7 @@ fn assert_limit(err: &tauri_plugin_pylair::ErrorObj, limit: &str) {
 
 #[tokio::test]
 async fn task_cap_rejects_then_recovers() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.max_concurrent_tasks = 2;
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -183,7 +182,7 @@ async fn task_cap_rejects_then_recovers() {
 
 #[tokio::test]
 async fn stream_cap_rejects_second_stream() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.max_concurrent_streams = 1;
     let h = spawn_h(real_runtime_spec(), cfg, ev);
@@ -211,7 +210,7 @@ async fn stream_cap_rejects_second_stream() {
 
 #[tokio::test]
 async fn full_command_queue_is_limit_error_not_stopped() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.max_queued_commands = 1;
     cfg.shutdown_grace = Duration::from_secs(3);
@@ -266,7 +265,7 @@ while True:
 
 #[tokio::test]
 async fn credit_cap_rejects_overgrant() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.max_stream_credit = 8;
     cfg.initial_stream_credit = 4;
@@ -296,7 +295,7 @@ async fn credit_cap_rejects_overgrant() {
 /// The cap trip emits a Stderr diagnostic from the actor — waiting for
 /// it is the event-driven form of "let the buffer fill": no sleeps,
 /// and it can't fire before the trip actually happens.
-async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
+async fn wait_for_diag(rx: &mut tauri_plugin_pylair::supervisor::EventDrain, needle: &str) {
     timeout(T, async {
         while let Some(e) = rx.recv().await {
             if let RuntimeEvent::Stderr(l) = e {
@@ -313,7 +312,7 @@ async fn wait_for_diag(rx: &mut mpsc::Receiver<RuntimeEvent>, needle: &str) {
 
 #[tokio::test]
 async fn per_stream_byte_cap_ends_stream_with_limit_error() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.stream_buffer_bytes = 128; // clamped up to the 1024-byte minimum; the flood still trips it
     cfg.initial_stream_credit = 100_000;
@@ -358,7 +357,7 @@ async fn per_stream_byte_cap_ends_stream_with_limit_error() {
 
 #[tokio::test]
 async fn total_byte_cap_trips_across_streams() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     // The total cap can only bind BELOW the per-stream cap (validation
     // raises total >= per) — so it takes multiple streams jointly
@@ -410,7 +409,7 @@ async fn total_byte_cap_trips_across_streams() {
 
 #[tokio::test]
 async fn oversized_call_fails_limit_not_runtime() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.max_frame = 1024;
     let h = spawn_h(spec(FAKE_READY), cfg, ev);
@@ -438,7 +437,7 @@ async fn oversized_call_fails_limit_not_runtime() {
 
 #[tokio::test]
 async fn absurd_limits_are_clamped_and_logged() {
-    let (ev, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, mut rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits = Limits::default()
         .with_max_concurrent_tasks(0)
@@ -473,7 +472,7 @@ async fn absurd_limits_are_clamped_and_logged() {
 
 #[tokio::test]
 async fn isolated_worker_cap_is_typed_error() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let cfg = fast_config();
     let mut spec = real_runtime_spec();
     spec.env
@@ -496,7 +495,7 @@ async fn isolated_worker_cap_is_typed_error() {
 
 #[tokio::test]
 async fn byte_capped_stream_bounds_memory_under_flood() {
-    let (ev, _rx) = mpsc::channel::<RuntimeEvent>(256);
+    let (ev, _rx) = tauri_plugin_pylair::supervisor::event_pair(256);
     let mut cfg = fast_config();
     cfg.limits.stream_buffer_bytes = 4 * 1024; // tiny budget
     cfg.initial_stream_credit = 1_000_000;

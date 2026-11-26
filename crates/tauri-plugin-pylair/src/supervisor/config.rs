@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::protocol as proto;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
     Starting,
     Ready,

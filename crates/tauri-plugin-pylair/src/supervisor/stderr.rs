@@ -5,8 +5,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use super::config::RuntimeEvent;
 
 /// stderr line + queue plumbing (protocol §9: drain unconditionally,
@@ -137,7 +135,7 @@ impl StderrSink {
 
     /// Forward queued lines onto the event channel; exits on Eof or a
     /// closed receiver. Blocks only on `send` — never on the reader.
-    pub(super) async fn forward(self: Arc<Self>, ev: mpsc::Sender<RuntimeEvent>) {
+    pub(super) async fn forward(self: Arc<Self>, ev: crate::eventbus::EventBus) {
         loop {
             // Register interest before polling so a push between the
             // check and the wait can't be missed (Notify keeps a permit,
@@ -149,13 +147,13 @@ impl StderrSink {
             };
             if dropped > 0 {
                 let marker = format!("[dropped {dropped} stderr lines]");
-                if ev.send(RuntimeEvent::Stderr(marker)).await.is_err() {
+                if ev.send_bulk(RuntimeEvent::Stderr(marker)).await.is_err() {
                     return;
                 }
             }
             match item {
                 Some(SinkItem::Line(line)) => {
-                    if ev.send(RuntimeEvent::Stderr(line)).await.is_err() {
+                    if ev.send_bulk(RuntimeEvent::Stderr(line)).await.is_err() {
                         return;
                     }
                 }

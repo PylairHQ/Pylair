@@ -211,7 +211,7 @@ impl<'a> Session<'a> {
         for id in &ids {
             reg.release(id);
         }
-        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+        self.sup.events.emit(RuntimeEvent::Stderr(format!(
             "task {task}: released {} orphaned blob handle(s)",
             ids.len()
         )));
@@ -235,7 +235,7 @@ impl<'a> Session<'a> {
         for id in &orphans {
             reg.release(id);
         }
-        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+        self.sup.events.emit(RuntimeEvent::Stderr(format!(
             "task {task}: released {} orphaned blob handle(s)",
             orphans.len()
         )));
@@ -304,7 +304,7 @@ impl<'a> Session<'a> {
             // recovery line; an unwarned one ends silently.
             if let Some(ep) = self.stall_episode.take() {
                 if ep.warned {
-                    let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                    self.sup.events.emit(RuntimeEvent::Stderr(format!(
                         "pylair: event loop recovered after {:?} blocked",
                         ep.peak
                     )));
@@ -352,7 +352,7 @@ impl<'a> Session<'a> {
                 " (the stall began during app startup, when on_startup blocking is expected)",
             );
         }
-        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(msg));
+        self.sup.events.emit(RuntimeEvent::Stderr(msg));
     }
 }
 
@@ -380,10 +380,7 @@ impl Drop for Session<'_> {
             h.end_generation(self.sup.config.kind, self.sup.config.missed_pongs_to_kill)
         };
         if let Some(payload) = health_ev {
-            let _ = self
-                .sup
-                .events
-                .try_send(RuntimeEvent::HealthChanged(payload));
+            self.sup.events.emit(RuntimeEvent::HealthChanged(payload));
         }
         // Blob lifetime ends with the generation (decision 0010 §6): the
         // registry empties and the dir is deleted wholesale. Every exit
@@ -392,7 +389,7 @@ impl Drop for Session<'_> {
         crate::blobs::lock_blobs(&self.sup.blobs).end_generation();
         if let Some((dir, _)) = self.blob_dir.take() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
-                let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                self.sup.events.emit(RuntimeEvent::Stderr(format!(
                     "pylair: could not remove blob dir {} ({e})",
                     dir.display()
                 )));
@@ -421,10 +418,7 @@ impl Session<'_> {
             )
         };
         if let Some(payload) = health_ev {
-            let _ = self
-                .sup
-                .events
-                .try_send(RuntimeEvent::HealthChanged(payload));
+            self.sup.events.emit(RuntimeEvent::HealthChanged(payload));
         }
         if pongs_outstanding >= self.sup.config.missed_pongs_to_kill {
             self.sup.set_state(
@@ -481,7 +475,7 @@ impl Session<'_> {
     ) -> ControlFlow<ExitCause> {
         let m = restart_trigger.as_deref().and_then(mtime);
         if m != trigger_mtime {
-            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
+            self.sup.events.emit(RuntimeEvent::Stderr(
                 "pylair: source changed — restarting python runtime".into(),
             ));
             fail_all(
@@ -624,10 +618,7 @@ impl Session<'_> {
                             )
                         };
                         if let Some(payload) = health_ev {
-                            let _ = self
-                                .sup
-                                .events
-                                .try_send(RuntimeEvent::HealthChanged(payload));
+                            self.sup.events.emit(RuntimeEvent::HealthChanged(payload));
                         }
                         match classify_pong(stale, self.sup.config.loop_stall_kill) {
                             PongVerdict::StallKill => {
@@ -695,7 +686,7 @@ impl Session<'_> {
                         // and cancel the producer the way a client
                         // cancel would.
                         if let Some(rej) = self.blob_rejects.remove(&task) {
-                            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                            self.sup.events.emit(RuntimeEvent::Stderr(format!(
                                 "task {task}: blob.register rejected — ending the stream"
                             )));
                             // Ids that DID register since the last
@@ -786,7 +777,7 @@ impl Session<'_> {
                                     "over the shared byte cap",
                                 ),
                             };
-                            let _ = self.sup.events.try_send(RuntimeEvent::Stderr(format!(
+                            self.sup.events.emit(RuntimeEvent::Stderr(format!(
                                 "task {task}: stream consumer {note}; cancelling producer"
                             )));
                             if let Some(PendingKind::Stream(sink)) = self.pending.remove(&call_id) {
@@ -826,7 +817,7 @@ impl Session<'_> {
                             _ => None,
                         };
                         if let Some(payload) = ev {
-                            let _ = self.sup.events.try_send(RuntimeEvent::AppChanged(payload));
+                            self.sup.events.emit(RuntimeEvent::AppChanged(payload));
                         }
                     }
                     "blob.register" => {
@@ -858,12 +849,10 @@ impl Session<'_> {
                                         }
                                     }
                                     Err(why) => {
-                                        let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
-                                            format!(
-                                                "pylair: blob.register {} rejected: {why:?}",
-                                                p["id"].as_str().unwrap_or("?")
-                                            ),
-                                        ));
+                                        self.sup.events.emit(RuntimeEvent::Stderr(format!(
+                                            "pylair: blob.register {} rejected: {why:?}",
+                                            p["id"].as_str().unwrap_or("?")
+                                        )));
                                         // The rejection is the task's
                                         // problem: its carrying frame is
                                         // next on this FIFO, and that
@@ -876,7 +865,7 @@ impl Session<'_> {
                                 }
                             }
                             None => {
-                                let _ = self.sup.events.try_send(RuntimeEvent::Stderr(
+                                self.sup.events.emit(RuntimeEvent::Stderr(
                                     format!(
                                         "pylair: blob.register {} for unknown/owner-less task — dropped",
                                         p["id"].as_str().unwrap_or("?")

@@ -36,7 +36,7 @@ impl Supervisor {
                     m = io.msg_in.recv() => break Ok(m),
                     _ = &mut half_mark, if !slow_noted => {
                         slow_noted = true;
-                        let _ = self.events.try_send(RuntimeEvent::StateChanged {
+                        self.events.emit(RuntimeEvent::StateChanged {
                             from: State::Starting,
                             to: State::Starting,
                             detail: format!(
@@ -114,9 +114,8 @@ impl Supervisor {
                     .collect()
             })
             .unwrap_or_default();
-        let _ = self
-            .events
-            .try_send(RuntimeEvent::Exposes(hello["exposes"].clone()));
+        self.events
+            .emit(RuntimeEvent::Exposes(hello["exposes"].clone()));
         if self.config.kind == RuntimeKind::Web {
             // A web runtime is not ready on hello: its server may still be
             // loading. Wait for `ready {url}` (protocol-v1 section 4.1).

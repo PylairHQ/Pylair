@@ -5,6 +5,7 @@
 //! isolation. The plugin glue owns the supervisor `Handle`, forwards
 //! lifecycle events to the frontend, and exposes the `python_*` commands.
 
+pub mod eventbus;
 pub mod protocol;
 pub mod supervisor;
 pub mod transport;
