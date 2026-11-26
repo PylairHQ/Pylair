@@ -329,6 +329,9 @@ pub(super) struct ChildIo {
     pub(super) exited: oneshot::Receiver<io::Result<std::process::ExitStatus>>,
     /// Signal the monitor to kill the child process tree.
     pub(super) kill: mpsc::Sender<()>,
+    /// The child pid as the spawn reported it — the inspector's spawn
+    /// timeline entry; not read by any supervision logic.
+    pub(super) pid: Option<u32>,
     // stderr is drained by a detached task -> events.
 }
 
@@ -462,12 +465,36 @@ impl Supervisor {
                 }
             }
             #[cfg(target_os = "linux")]
-            let spawned =
-                spawn_child(&spec, &self.config, &self.events, &mut self.pdeath_anchor).await;
+            let spawned = spawn_child(
+                &spec,
+                &self.config,
+                &self.events,
+                &self.inspect,
+                self.generation,
+                &mut self.pdeath_anchor,
+            )
+            .await;
             #[cfg(not(target_os = "linux"))]
-            let spawned = spawn_child(&spec, &self.config, &self.events).await;
+            let spawned = spawn_child(
+                &spec,
+                &self.config,
+                &self.events,
+                &self.inspect,
+                self.generation,
+            )
+            .await;
             let cause = match spawned {
-                Ok(io) => self.run_child(io, blob_dir).await,
+                Ok(io) => {
+                    // Inspector lifecycle (docs/inspector.md): the spawn
+                    // opens the generation's timeline — exit/restart
+                    // entries below close it. Inert in release.
+                    self.inspect
+                        .note_event(crate::inspect::TimelineEvent::Spawn {
+                            generation: self.generation,
+                            pid: io.pid,
+                        });
+                    self.run_child(io, blob_dir).await
+                }
                 Err(e) => {
                     // The dir was created for a generation that never ran —
                     // don't leave it for the sweep to find later.
@@ -503,6 +530,11 @@ impl Supervisor {
                         .lock()
                         .unwrap()
                         .note_exit(ExitKind::Fatal, reason.clone());
+                    self.inspect
+                        .note_event(crate::inspect::TimelineEvent::Exit {
+                            generation: self.generation,
+                            detail: reason.clone(),
+                        });
                     self.set_state(State::Failed, reason);
                     if !self.park_failed().await {
                         return;
@@ -522,6 +554,11 @@ impl Supervisor {
                         .lock()
                         .unwrap()
                         .note_exit(ExitKind::Crashed, reason.clone());
+                    self.inspect
+                        .note_event(crate::inspect::TimelineEvent::Exit {
+                            generation: self.generation,
+                            detail: reason.clone(),
+                        });
                     // Surviving Ready for a whole breaker window counts as
                     // healthy — the crash that follows is a fresh incident,
                     // not evidence of a boot loop.
@@ -549,6 +586,15 @@ impl Supervisor {
                         .unwrap()
                         .note_restart_accounting(crashes.len(), backoff);
                     if crashes.len() >= self.config.breaker_crashes {
+                        self.inspect
+                            .note_event(crate::inspect::TimelineEvent::Breaker {
+                                generation: self.generation,
+                                detail: format!(
+                                    "crash loop: {} crashes in {:?}",
+                                    crashes.len(),
+                                    self.config.breaker_window
+                                ),
+                            });
                         self.set_state(
                             State::Failed,
                             format!(
@@ -570,6 +616,11 @@ impl Supervisor {
                         self.health.lock().unwrap().note_generation(self.generation);
                         continue;
                     }
+                    self.inspect
+                        .note_event(crate::inspect::TimelineEvent::Restart {
+                            generation: self.generation,
+                            detail: reason.clone(),
+                        });
                     self.set_state(State::Restarting, reason);
                     if self.sleep_or_shutdown(jitter(backoff)).await {
                         self.set_state(State::Stopped, "shutdown");

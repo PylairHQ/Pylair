@@ -80,3 +80,26 @@ describe("preflightChecks", () => {
     assert.deepEqual(lines, ["uv: not found - install uv", "x: absent"]);
   });
 });
+
+describe("codegen status file (docs/inspector.md)", () => {
+  test("writeCodegenStatus writes parseable status under .pylair", async () => {
+    const { writeCodegenStatus, codegenStatusPath } = await import("../dist/dev.js");
+    const { mkdtempSync, readFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "pylair-cgstat-"));
+    writeCodegenStatus(dir, { ok: false, error: "boom" });
+    const raw = JSON.parse(readFileSync(codegenStatusPath(dir), "utf-8"));
+    assert.equal(raw.ok, false);
+    assert.equal(raw.error, "boom");
+    assert.equal(typeof raw.at, "number");
+    writeCodegenStatus(dir, { ok: true, functions: 3 });
+    const ok = JSON.parse(readFileSync(codegenStatusPath(dir), "utf-8"));
+    assert.equal(ok.ok, true);
+    assert.equal(ok.functions, 3);
+  });
+
+  test("the path is .pylair/codegen-status.json under the app dir", async () => {
+    const { codegenStatusPath } = await import("../dist/dev.js");
+    assert.equal(codegenStatusPath("/app"), join("/app", ".pylair", "codegen-status.json"));
+  });
+});

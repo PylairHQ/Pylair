@@ -308,6 +308,11 @@ impl<'a> Session<'a> {
                         "pylair: event loop recovered after {:?} blocked",
                         ep.peak
                     )));
+                    self.sup
+                        .inspect
+                        .note_event(crate::inspect::TimelineEvent::StallRecovered {
+                            blocked_ms: ep.peak.as_millis() as u64,
+                        });
                 }
             }
             return;
@@ -352,6 +357,11 @@ impl<'a> Session<'a> {
                 " (the stall began during app startup, when on_startup blocking is expected)",
             );
         }
+        self.sup
+            .inspect
+            .note_event(crate::inspect::TimelineEvent::StallWarn {
+                detail: msg.clone(),
+            });
         self.sup.events.emit(RuntimeEvent::Stderr(msg));
     }
 }
@@ -478,6 +488,26 @@ impl Session<'_> {
             self.sup.events.emit(RuntimeEvent::Stderr(
                 "pylair: source changed — restarting python runtime".into(),
             ));
+            // The CLI writes "<millis> <changed-file>" into the trigger —
+            // the inspector names the file when the content carries one
+            // (docs/inspector.md). A read race with the next write loses
+            // the name at worst; the reload itself is already certain.
+            let file = restart_trigger
+                .as_deref()
+                .and_then(|t| std::fs::read_to_string(t).ok())
+                .and_then(|c| {
+                    c.split_whitespace()
+                        .nth(1)
+                        .map(str::trim)
+                        .filter(|f| !f.is_empty())
+                        .map(str::to_string)
+                });
+            self.sup
+                .inspect
+                .note_event(crate::inspect::TimelineEvent::DevReload {
+                    generation: self.sup.generation,
+                    file,
+                });
             fail_all(
                 &mut self.pending,
                 proto::RUNTIME_RESTARTED,
@@ -599,6 +629,12 @@ impl Session<'_> {
                         self.pongs_received += 1;
                         // Transport is alive. Is the loop SERVING?
                         let stale = Duration::from_millis(p["loop_stale_ms"].as_u64().unwrap_or(0));
+                        // Member churn is knowable only as a diff of
+                        // the pong-carried stats (0008: pools are
+                        // runtime-side) — computed against the mirror
+                        // BEFORE note_pools replaces it, recorded after
+                        // the health lock is released.
+                        let mut pool_events = Vec::new();
                         let (health_ev, app_loading) = {
                             let mut h = self.sup.health.lock().unwrap();
                             h.note_pong(p["seq"].as_u64(), stale, self.sup.config.ping_interval);
@@ -606,6 +642,9 @@ impl Session<'_> {
                             // §health) — mirrored verbatim, replaced
                             // wholesale each time.
                             if let Some(pools) = p.get("pools") {
+                                if self.sup.inspect.enabled() {
+                                    pool_events = crate::inspect::diff_pools(&h.pools, pools);
+                                }
                                 h.note_pools(pools);
                             }
                             (
@@ -617,6 +656,9 @@ impl Session<'_> {
                                 h.app.values().any(|c| c.phase == AppPhase::Loading),
                             )
                         };
+                        for ev in pool_events {
+                            self.sup.inspect.note_event(ev);
+                        }
                         if let Some(payload) = health_ev {
                             self.sup.events.emit(RuntimeEvent::HealthChanged(payload));
                         }

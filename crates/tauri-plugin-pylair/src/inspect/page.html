@@ -23,11 +23,17 @@
   tr.limit td { color: #e38de8; }
   tr.inflight td { color: #6fb6ff; }
   tr:hover td { background: #232733; }
+  tr.clickable { cursor: pointer; }
+  tr.detail td { white-space: normal; background: #181b21; padding: 6px 12px; }
   .pill { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10px;
           background: #2a2e38; margin-right: 4px; }
   .pill.ok { background: #1e3a28; color: #6fd390; }
   .pill.bad { background: #3a1e1e; color: #ff7d7d; }
   .pill.busy { background: #3a331e; color: #f0b454; }
+  .pill.lifecycle { background: #1e2c3a; color: #6fb6ff; }
+  .pill.stderr { background: #2a2e38; color: #9aa0aa; }
+  .pill.codegen { background: #2c1e3a; color: #c99ae8; }
+  .pill.denial { background: #3a1e1e; color: #ff7d7d; }
   button { background: #2a2e38; color: #d7dae0; border: 1px solid #3a3e48;
            border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; }
   button.on { background: #20405e; border-color: #3a6a9e; }
@@ -41,6 +47,32 @@
   .scroll { max-height: 46vh; overflow-y: auto; }
   .comp { display: inline-block; margin: 2px 8px 2px 0; }
   #paused-note { color: #f0b454; display: none; }
+  /* codegen failure banner — a broken stub regeneration is never scrollback */
+  #codegenbanner { display: none; background: #3a1e1e; border: 1px solid #6e2e2e;
+                   color: #ffb0b0; border-radius: 6px; padding: 7px 10px;
+                   margin-bottom: 10px; }
+  #codegenbanner b { color: #ff7d7d; }
+  /* timeline */
+  .tl-row { border-top: 1px solid #23262e; padding: 2px 4px; cursor: pointer;
+            display: flex; gap: 8px; align-items: baseline; }
+  .tl-row:hover { background: #232733; }
+  .tl-time { color: #8b919c; flex: 0 0 auto; }
+  .tl-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-detail { border-top: 1px solid #23262e; background: #181b21;
+               padding: 6px 12px; white-space: normal; }
+  .tl-detail pre { background: #14161a; border: 1px solid #2a2e38; border-radius: 4px;
+                   padding: 6px 8px; overflow-x: auto; white-space: pre-wrap;
+                   word-break: break-word; margin: 4px 0; }
+  .tl-detail .stderr-lines { max-height: 180px; overflow-y: auto; }
+  .tl-detail .stderr-lines div { white-space: pre-wrap; word-break: break-word; }
+  .errlbl { color: #8b919c; font-weight: 600; margin-right: 6px; }
+  .sugg { margin: 4px 0 4px 18px; padding: 0; }
+  .sugg li { margin: 2px 0; }
+  .rowerr .tl-sum { color: #ff7d7d; }
+  .rowcancel .tl-sum { color: #f0b454; }
+  .rowlimit .tl-sum { color: #e38de8; }
+  .rowinflight .tl-sum { color: #6fb6ff; }
+  .kindfilter { display: flex; gap: 4px; align-items: center; }
 </style>
 </head>
 <body>
@@ -49,6 +81,8 @@
   <span id="paused-note">paused — data frozen</span>
   <span id="clock" class="mono" style="color:#8b919c"></span>
 </h1>
+
+<div id="codegenbanner"></div>
 
 <div class="panel" id="health"><h2>health</h2><div class="grid" id="healthgrid"></div>
   <div id="components" style="margin-top:6px"></div>
@@ -60,6 +94,19 @@
     <th>function</th><th>size</th><th>live</th><th>busy</th><th>idle</th>
     <th>queued</th><th>deaths</th><th>crash loop</th><th>idle ttl</th><th>reaps</th>
   </tr></thead><tbody></tbody></table>
+</div>
+
+<div class="panel" id="timeline-panel">
+  <h2>timeline</h2>
+  <div class="filters">
+    <label class="kindfilter"><input type="checkbox" id="tk-calls" checked> calls</label>
+    <label class="kindfilter"><input type="checkbox" id="tk-lifecycle" checked> lifecycle</label>
+    <label class="kindfilter"><input type="checkbox" id="tk-stderr" checked> stderr</label>
+    <label class="kindfilter"><input type="checkbox" id="tk-codegen" checked> codegen</label>
+    <label class="kindfilter"><input type="checkbox" id="tk-denial" checked> denials</label>
+    <span class="mono" id="tlcount" style="color:#8b919c"></span>
+  </div>
+  <div class="scroll" id="timeline"></div>
 </div>
 
 <div class="panel" id="stats"><h2>per-function latency</h2>
@@ -89,6 +136,7 @@
 <script>
 "use strict";
 let paused = false, frozen = null;
+const expanded = new Set(); // seqs of expanded rows — survives re-renders
 const $ = (id) => document.getElementById(id);
 $("pause").onclick = () => {
   paused = !paused;
@@ -122,9 +170,111 @@ function pct(sorted, p) {
   if (!sorted.length) return 0;
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
 }
+function hhmmss(ms) {
+  const t = new Date(ms);
+  const p = (n, w) => String(n).padStart(w ?? 2, "0");
+  return p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds()) +
+    "." + p(t.getMilliseconds(), 3);
+}
+
+// stderr lines inside a call's time window — "during this call", never
+// "from this call": attribution is by timestamp, not causation.
+function stderrDuring(rec, stderrRows) {
+  const start = rec.start_unix_ms;
+  const end = rec.outcome?.kind === "in_flight" ? Date.now() : start + rec.latency_ms;
+  return (stderrRows || []).filter((s) => s.at_unix_ms >= start && s.at_unix_ms <= end);
+}
+
+// The expandable detail of a call row (timeline and table share it):
+// what the failure was, why it might have happened, and what the
+// runtime logged while it ran.
+function callDetailHtml(rec, stderrRows) {
+  let h = "";
+  const o = rec.outcome || {};
+  if (o.kind === "error") {
+    h += `<div><span class="errlbl">error ${esc(o.code)}</span>${esc(o.message ?? "")}</div>`;
+    if (o.traceback)
+      h += `<div style="margin-top:4px"><span class="errlbl">traceback</span>` +
+           `<pre class="mono">${esc(o.traceback)}</pre></div>`;
+    if (o.suggestions && o.suggestions.length) {
+      h += `<div style="margin-top:4px"><span class="errlbl">suggestions</span><ul class="sugg">`;
+      for (const s of o.suggestions) h += `<li>${esc(s)}</li>`;
+      h += `</ul></div>`;
+    }
+    if (o.errors && o.errors.length) {
+      h += `<div style="margin-top:4px"><span class="errlbl">field errors</span>` +
+           `<table style="margin-top:2px"><thead><tr><th>path</th><th>expected</th>` +
+           `<th>received</th></tr></thead><tbody>`;
+      for (const fe of o.errors)
+        h += `<tr><td class="mono">${esc(fe?.path)}</td><td>${esc(fe?.expected)}</td>` +
+             `<td>${esc(fe?.received)}</td></tr>`;
+      h += `</tbody></table></div>`;
+    }
+  } else if (o.kind === "cancelled" || o.kind === "limit") {
+    h += `<div><span class="errlbl">outcome</span>${esc(outcomeText(o))}</div>`;
+  }
+  const lines = stderrDuring(rec, stderrRows);
+  if (lines.length) {
+    h += `<div style="margin-top:4px"><span class="errlbl">stderr during this call</span>` +
+         `<span style="color:#8b919c"> (${lines.length} line${lines.length === 1 ? "" : "s"},` +
+         ` by time window — not necessarily from it)</span>` +
+         `<div class="stderr-lines mono" style="margin-top:2px">`;
+    for (const s of lines)
+      h += `<div><span style="color:#8b919c">${hhmmss(s.at_unix_ms)}</span> ${esc(s.line)}</div>`;
+    h += `</div></div>`;
+  }
+  if (!h) h = `<div style="color:#8b919c">no error detail, no stderr in window</div>`;
+  return h;
+}
+
+function lifecycleText(ev) {
+  switch (ev.event) {
+    case "spawn": return `runtime spawned — gen ${ev.generation}` + (ev.pid ? `, pid ${ev.pid}` : "");
+    case "exit": return `runtime exited (gen ${ev.generation}) — ${ev.detail ?? ""}`;
+    case "restart": return `restarting (gen ${ev.generation}) — ${ev.detail ?? ""}`;
+    case "breaker": return `breaker tripped (gen ${ev.generation}) — ${ev.detail ?? ""}`;
+    case "dev_reload": return `dev reload (gen ${ev.generation})` + (ev.file ? ` — ${ev.file} changed` : "");
+    case "warm_spawn": return `warm pool ${ev.function}: +${ev.n} member${ev.n === 1 ? "" : "s"} (${ev.live} live)`;
+    case "warm_death": return `warm pool ${ev.function}: ${ev.n} member death${ev.n === 1 ? "" : "s"}`;
+    case "warm_reap": return `warm pool ${ev.function}: ${ev.n} idle reap${ev.n === 1 ? "" : "s"}`;
+    case "stall_warn": return `event loop stall — ${ev.detail ?? ""}`;
+    case "stall_recovered": return `event loop recovered after ${Math.round((ev.blocked_ms ?? 0) / 100) / 10}s blocked`;
+    default: return esc(ev.event);
+  }
+}
+
+function timelineDetailHtml(row, stderrRows) {
+  const ev = row;
+  if (ev.event === "codegen") {
+    return ev.ok
+      ? `<div><span class="errlbl">codegen ok</span>${esc(ev.detail ?? "")}</div>`
+      : `<div><span class="errlbl">codegen failed</span><pre class="mono">${esc(ev.detail ?? "")}</pre></div>`;
+  }
+  if (ev.event === "denial") {
+    return `<div><span class="errlbl">denied</span>${esc(ev.command)} → ${esc(ev.function)}` +
+      ` for window ${esc(ev.window)} (${esc(ev.origin)})</div>` +
+      `<div style="margin-top:4px"><span class="errlbl">fix</span>${esc(ev.hint)}</div>`;
+  }
+  if (ev.event === "stall_warn" && ev.detail)
+    return `<pre class="mono">${esc(ev.detail)}</pre>`;
+  return `<div>${esc(lifecycleText(ev))}</div>`;
+}
 
 function render(data) {
   $("clock").textContent = new Date().toLocaleTimeString();
+
+  // codegen banner — visible only while the last status is a failure;
+  // disappearing IS the recovery signal (the timeline keeps the history).
+  const cg = data.codegen;
+  if (cg && cg.ok === false) {
+    $("codegenbanner").style.display = "block";
+    $("codegenbanner").innerHTML =
+      `<b>codegen failed</b> — stubs are stale; the running runtime predates your last edit. ` +
+      `<span class="mono">${esc(cg.error ?? "")}</span>`;
+  } else {
+    $("codegenbanner").style.display = "none";
+  }
+
   const h = data.health || {};
   const liv = h.liveness || {};
   const pillFor = (v) => v === "ok" ? "ok" : (v === "unknown" ? "busy" : "bad");
@@ -169,6 +319,76 @@ function render(data) {
   }
 
   const recs = (data.records || []).concat(data.in_flight || []);
+  const stderrRows = data.stderr || [];
+
+  // ---- timeline: calls + lifecycle + stderr + codegen + denials,
+  // interleaved by the shared seq counter, newest first ----
+  const kinds = {
+    calls: $("tk-calls").checked,
+    lifecycle: $("tk-lifecycle").checked,
+    stderr: $("tk-stderr").checked,
+    codegen: $("tk-codegen").checked,
+    denial: $("tk-denial").checked,
+  };
+  const items = [];
+  if (kinds.calls)
+    for (const r of recs) items.push({ seq: r.seq, sortTs: r.start_unix_ms, type: "call", r });
+  for (const t of data.timeline || []) {
+    if (t.kind === "lifecycle" && !kinds.lifecycle) continue;
+    if (t.kind === "codegen" && !kinds.codegen) continue;
+    if (t.kind === "denial" && !kinds.denial) continue;
+    items.push({ seq: t.seq, sortTs: t.at_unix_ms, type: "ev", r: t });
+  }
+  if (kinds.stderr)
+    for (const s of stderrRows) items.push({ seq: s.seq, sortTs: s.at_unix_ms, type: "stderr", r: s });
+  items.sort((a, b) => b.seq - a.seq);
+  const shown = items.slice(0, 300);
+  $("tlcount").textContent = items.length + " entries";
+  let tl = "";
+  for (const it of shown) {
+    const key = it.type + ":" + it.seq;
+    const open = expanded.has(key);
+    if (it.type === "call") {
+      const r = it.r;
+      const cls = { err: "rowerr", cancel: "rowcancel", limit: "rowlimit", inflight: "rowinflight" }[outcomeClass(r.outcome)] || "";
+      tl += `<div class="tl-row ${cls}" data-key="${key}">` +
+        `<span class="tl-time mono">${hhmmss(r.start_unix_ms)}</span>` +
+        `<span class="pill">call</span>` +
+        `<span class="tl-sum">${esc(r.function)} — ${esc(outcomeText(r.outcome))}, ${r.latency_ms}ms` +
+        (r.window ? ` [${esc(r.window)}]` : "") + `</span></div>`;
+      if (open) tl += `<div class="tl-detail">${callDetailHtml(r, stderrRows)}</div>`;
+    } else if (it.type === "stderr") {
+      const s = it.r;
+      tl += `<div class="tl-row" data-key="${key}">` +
+        `<span class="tl-time mono">${hhmmss(s.at_unix_ms)}</span>` +
+        `<span class="pill stderr">stderr</span>` +
+        `<span class="tl-sum mono">${esc(s.line)}</span></div>`;
+      if (open) tl += `<div class="tl-detail"><pre class="mono">${esc(s.line)}</pre></div>`;
+    } else {
+      const t = it.r;
+      const pcls = t.kind === "denial" ? "denial" : (t.kind === "codegen" ? "codegen" : "lifecycle");
+      const sum = t.kind === "codegen"
+        ? (t.ok ? `codegen ok — ${t.detail ?? ""}` : `codegen FAILED — click for the error`)
+        : t.kind === "denial"
+          ? `denied ${t.command} → ${t.function} [${t.window}]`
+          : lifecycleText(t);
+      tl += `<div class="tl-row" data-key="${key}">` +
+        `<span class="tl-time mono">${hhmmss(t.at_unix_ms)}</span>` +
+        `<span class="pill ${pcls}">${t.kind}</span>` +
+        `<span class="tl-sum">${esc(sum)}</span></div>`;
+      if (open) tl += `<div class="tl-detail">${timelineDetailHtml(t, stderrRows)}</div>`;
+    }
+  }
+  $("timeline").innerHTML = tl || `<div style="color:#8b919c;padding:6px">no entries yet</div>`;
+  $("timeline").querySelectorAll(".tl-row").forEach((row) => {
+    row.onclick = () => {
+      const key = row.dataset.key;
+      if (expanded.has(key)) expanded.delete(key); else expanded.add(key);
+      if (frozen) render(frozen);
+    };
+  });
+
+  // ---- per-function latency ----
   const byFn = {};
   for (const r of recs) {
     if (r.outcome?.kind === "in_flight") continue;
@@ -185,6 +405,7 @@ function render(data) {
   }
   $("stattable").querySelector("tbody").innerHTML = sr;
 
+  // ---- calls table ----
   const ffn = $("ffn").value.toLowerCase(), fout = $("fout").value,
         fwin = $("fwin").value.toLowerCase();
   const rows = recs.filter((r) =>
@@ -195,24 +416,32 @@ function render(data) {
   $("rowcount").textContent = rows.length + " rows";
   let tr = "";
   for (const r of rows.slice(0, 500)) {
-    const t = new Date(r.start_unix_ms);
-    const hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0"),
-          ss = String(t.getSeconds()).padStart(2, "0"), ms = String(t.getMilliseconds()).padStart(3, "0");
-    tr += `<tr class="${outcomeClass(r.outcome)}">` +
+    const key = "table:" + r.seq;
+    tr += `<tr class="${outcomeClass(r.outcome)} clickable" data-key="${key}">` +
       `<td>${r.seq}</td><td title="${esc(r.function)}">${esc(r.function)}</td>` +
       `<td>${esc(r.window ?? "")}</td><td>${esc(r.mode)}</td>` +
-      `<td class="mono">${hh}:${mm}:${ss}.${ms}</td><td>${r.latency_ms}</td>` +
+      `<td class="mono">${hhmmss(r.start_unix_ms)}</td><td>${r.latency_ms}</td>` +
       `<td title="${esc(outcomeText(r.outcome))}">${esc(outcomeText(r.outcome))}</td>` +
       `<td>${r.req_bytes}</td><td>${r.resp_bytes}</td>` +
       `<td>${r.stream ? r.stream.chunks : ""}</td>` +
       `<td><button data-seq="${r.seq}" class="copybtn" title="copy row as JSON">⧉</button></td></tr>`;
+    if (expanded.has(key))
+      tr += `<tr class="detail"><td colspan="11">${callDetailHtml(r, stderrRows)}</td></tr>`;
   }
   const tbody = $("calltable").querySelector("tbody");
   tbody.innerHTML = tr;
   tbody.querySelectorAll(".copybtn").forEach((b) => {
-    b.onclick = () => {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
       const row = rows.find((x) => String(x.seq) === b.dataset.seq);
       if (row) navigator.clipboard.writeText(JSON.stringify(row, null, 2));
+    };
+  });
+  tbody.querySelectorAll("tr.clickable").forEach((row) => {
+    row.onclick = () => {
+      const key = row.dataset.key;
+      if (expanded.has(key)) expanded.delete(key); else expanded.add(key);
+      if (frozen) render(frozen);
     };
   });
 }
@@ -228,6 +457,8 @@ async function poll() {
   setTimeout(poll, 250);
 }
 $("ffn").oninput = $("fout").onchange = $("fwin").oninput = () => frozen && render(frozen);
+for (const id of ["tk-calls", "tk-lifecycle", "tk-stderr", "tk-codegen", "tk-denial"])
+  $(id).onchange = () => frozen && render(frozen);
 poll();
 </script>
 </body>
