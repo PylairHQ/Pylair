@@ -483,27 +483,26 @@ below was skipped for rc.20 only.
   verdict; pack/registry legs append it and arm
   `PYLAIR_BLOB_EXPECTED=1` only when the resolved crate is ≥
   `0.1.0-rc.23` AND pylair ≥ `0.1.0rc15` AND `@pylair/client` ≥
-  `0.1.0-rc.29`. The rc.31 train shipped: npm trio
-  `0.1.0-rc.31`, scaffold pins `pylair==0.1.0rc17` / crate
-  `=0.1.0-rc.24`. The bump commit (PR 189) took the crate to
-  `0.1.0-rc.25` and `pylair` to `0.1.0rc18` for the first-run
-  experience, the dev inspector, `warm()`/`isolated()`, the
-  version-alignment tooling and lossless state events — crate
-  `0.1.0-rc.25` is on crates.io (checksum `720d027f…88ae6`)
-  and `pylair 0.1.0rc18` on PyPI. This pins commit moves the npm
-  trio to `0.1.0-rc.32` and is the first proof of the rc.32
-  compat-manifest design: the scaffold pins moved by editing
-  `packages/cli/src/compat.json` alone (PINS derive from it since
-  PR 190; the remaining tripwire tests assert against the
-  manifest, not version literals). Both template `Cargo.lock`
-  files regenerate against the published crate as before.
-  Remaining order:
+  `0.1.0-rc.29`. The rc.32 train shipped: npm trio
+  `0.1.0-rc.32`, scaffold pins `pylair==0.1.0rc18` / crate
+  `=0.1.0-rc.25`. The bump commit (PR 199) took the crate to
+  `0.1.0-rc.26` and `pylair` to `0.1.0rc19` for the pydantic v2
+  runtime and codegen — crate `0.1.0-rc.26` is on crates.io
+  (checksum `703f22c0…4e09`) and `pylair 0.1.0rc19` on PyPI.
+  The pins commit (PR 200) moved the scaffold pins by editing
+  `packages/cli/src/compat.json` alone and regenerated both
+  template `Cargo.lock` files against the published crate; this
+  commit moves the npm trio to `0.1.0-rc.33` (package.json
+  versions, the compat.ts pairing comment, the README install
+  lines and the upgrading.md pairing — the split was the rc.33
+  dry-run lesson: the publish workflow checks all three
+  package.json versions match the input). Remaining order:
 
   1. pack-mode acceptance green on this commit (scaffolded pins
-     resolve crate rc.25 + pylair rc18, both live);
+     resolve crate rc.26 + pylair rc19, both live);
   2. the npm trio under `--tag next`;
   3. registry acceptance with `source=registry` and
-     `expect_version 0.1.0-rc.32` — `PYLAIR_BLOB_EXPECTED` keeps
+     `expect_version 0.1.0-rc.33` — `PYLAIR_BLOB_EXPECTED` keeps
      arming (all three resolved versions are already past their
      floors), so a `blob` skip still fails the leg on every OS.
 
