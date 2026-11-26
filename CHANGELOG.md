@@ -8,6 +8,16 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Pydantic v2 codegen and client types (decision 0012, PR 2 of 2).**
+  Models emit one interface each — `FooInput`/`Foo` pairs when validation
+  and serialization aliases split the wire shape, keyed by exact alias,
+  with computed fields on the output side and serializer-owned fields
+  typed from the serializer's return annotation. Shared types finalize
+  in codegen: timedelta/UUID/Decimal/Path as string, enums as literal
+  unions, tuples as fixed-length tuple types. No client runtime change —
+  the shared types are strings or plain arrays on the wire, needing no
+  decoding.
+
 - **Pydantic v2 models in the typed bridge (runtime, decision 0012).**
   Exposed functions may take and return pydantic v2 models when the app
   uses pydantic — strict validation with pre-coerced wire forms, the

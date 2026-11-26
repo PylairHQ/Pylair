@@ -82,6 +82,14 @@ Annotation → `{"type": ...}` JSON:
 | `Enum`                        | `enum` + `values`          | literal union      |
 | `@dataclass`                  | `dataclass` + `name`,`fields` | `interface`     |
 | `TypedDict`                   | `typeddict` + `name`,`fields` | `interface`     |
+| `BaseModel` (pydantic v2)     | `pydantic` + `name`,`fields` or `in_fields`/`out_fields` | `interface` (two when shapes split) |
+| `timedelta`                   | `timedelta`                 | `string` (ISO-8601 duration) |
+| `UUID`                        | `uuid`                      | `string`        |
+| `Decimal`                     | `decimal`                   | `string`        |
+| `Path`                        | `path`                      | `string`        |
+| enum member types             | `enum` + `values`           | union of literal values |
+| `tuple[A, B]`                 | `tuple` + `items`           | fixed-length tuple `[A, B]` |
+| `set`/`frozenset`             | `list`                      | `T[]` — order is NOT guaranteed |
 | `AsyncGenerator[X,_]`         | yield `X` in `returns`     | `stream<X>`        |
 | missing / anything else       | `any`                      | `unknown`          |
 
@@ -245,3 +253,37 @@ pylair codegen --module myapp.backend [--python path/to/python]
   save, and `pylair build` regenerates them before the frontend build.
 - `*args`/`**kwargs` params emit `unknown` positions — expose explicit
   kwargs for a typed surface.
+
+## Using Pydantic models
+
+Exposed functions may take and return pydantic v2 models when the app
+uses pydantic (pylair never requires or imports it — detection reads
+`sys.modules` only). What codegen emits:
+
+- **One interface per model**, deduped by name like dataclasses. Keys
+  are wire names — aliases exactly as they cross the wire, never the
+  Python field names.
+- **Split shapes**: when validation and serialization aliases differ,
+  params use `FooInput` (validation aliases, defaulted fields optional)
+  and results use `Foo` (serialization aliases, everything pydantic
+  always dumps required). Symmetric models emit a single `Foo`.
+- **computed_field** entries appear on the output interface only, with a
+  comment — never send them back.
+- **Serializer-owned fields** (a bytes field with its own
+  `@field_serializer`, and similar) are typed from the serializer's
+  return annotation when statically known, else `unknown` — the field's
+  annotation would lie about the wire shape.
+- **Validation is strict**: the bridge pre-coerces the JSON-native wire
+  forms (ISO datetimes and durations, UUID strings, enum values, arrays
+  for tuples/sets) and then validates with `model_validate(strict=True)`
+  — stringly-typed mistakes like `"1"` for an int are rejected, same as
+  the dataclass path, with structured `INVALID_PARAMS` errors.
+- **Generics** arrive concretized (`IntBox.item` is `int` in the schema)
+  — no type parameters cross the wire.
+
+Unsupported in v1, each a named error at decoration time: pydantic v1
+models (including the `pydantic.v1` shim), `RootModel`, `@model_serializer`
+(the output shape is statically unknowable), unresolved forward refs,
+and bytes emitted by computed fields or custom serializers (JSON cannot
+carry bytes outside declared fields — declare a bytes field instead).
+
