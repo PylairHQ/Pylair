@@ -1,6 +1,6 @@
 {
   "name": "@pylair/client",
-  "version": "0.1.0-rc.32",
+  "version": "0.1.0-rc.33",
   "description": "Pylair client SDK: typed Python calls, streams, cancellation, diagnostics",
   "license": "MIT OR Apache-2.0",
   "repository": {
