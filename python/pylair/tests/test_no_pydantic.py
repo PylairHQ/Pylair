@@ -65,8 +65,9 @@ print("NO-PYDANTIC-OK")
 
 
 def test_pylair_works_without_pydantic():
-    proc = subprocess.run(  # noqa: S603 - fixed test input
+    proc = subprocess.run(
         [sys.executable, "-c", CHILD],
+        check=False,
         capture_output=True,
         text=True,
         cwd=str(__import__("pathlib").Path(__file__).parent),

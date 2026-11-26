@@ -183,8 +183,7 @@ def _convert_lenient(annotation: Any, value: Any) -> Any:
     ):
         try:
             return _Decimal(value)
-        except Exception:
-            # noqa: BLE001 - lenient pre-coercion: strict validation owns errors
+        except Exception:  # noqa: BLE001
             return value
     if annotation is _Decimal and isinstance(value, float):
         return _Decimal(str(value))
@@ -195,8 +194,7 @@ def _convert_lenient(annotation: Any, value: Any) -> Any:
     ):
         try:
             return annotation(value)
-        except Exception:
-            # noqa: BLE001 - lenient pre-coercion: strict validation owns errors
+        except Exception:  # noqa: BLE001
             return value
     if (
         inspect.isclass(annotation)
