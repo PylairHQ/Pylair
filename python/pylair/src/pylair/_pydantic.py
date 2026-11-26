@@ -431,6 +431,34 @@ def _model_has_bytes(cls: type) -> bool:
     return cached
 
 
+def _serializer_owned_fields(cls: type) -> frozenset:
+    """Fields whose wire representation a custom serializer owns — detected
+    in the core schema as a function-plain/function-wrap serialization
+    entry on the field. The serializer receives the real bytes and its
+    output goes on the wire exactly as json mode produces it (decision
+    0012 §5); such fields are excluded from the sentinel swap. Cached."""
+    cached = getattr(cls, "__pylair_ser_owned__", None)
+    if cached is not None:
+        return cached
+    owned = set()
+    core = getattr(cls, "__pydantic_core_schema__", None) or {}
+    fields = (core.get("schema") or {}).get("fields") or {}
+    for fname, fschema in fields.items():
+        inner = (fschema or {}).get("schema") or {}
+        ser = inner.get("serialization")
+        if isinstance(ser, dict) and ser.get("type") in (
+            "function-plain",
+            "function-wrap",
+        ):
+            owned.add(fname)
+    cached = frozenset(owned)
+    try:
+        cls.__pylair_ser_owned__ = cached
+    except (AttributeError, TypeError):
+        pass
+    return cached
+
+
 def _swap_bytes(obj: Any, sentinels: dict, prefix: str, counter: list) -> Any:
     """Rebuild the deep-copied model graph with every bytes/bytearray leaf
     replaced by a unique sentinel string. The sentinel embeds a random
@@ -444,16 +472,17 @@ def _swap_bytes(obj: Any, sentinels: dict, prefix: str, counter: list) -> Any:
         return token
     base = _base_model()
     if base is not None and isinstance(obj, base):
-        for fname in type(obj).model_fields:
-            if hasattr(obj, fname):
-                try:
-                    setattr(
-                        obj,
-                        fname,
-                        _swap_bytes(getattr(obj, fname), sentinels, prefix, counter),
-                    )
-                except (AttributeError, ValueError):
-                    pass  # frozen/exotic field — bytes inside raise at json dump
+        # direct __dict__ writes on OUR deep copy: bypasses frozen and
+        # validate_assignment by construction — setattr would either
+        # refuse the sentinel (strict validate_assignment) or silently
+        # keep the bytes in place (frozen), both wrong. Fields a custom
+        # serializer owns are excluded: the serializer owns the wire
+        # representation and must receive the real bytes.
+        skip = _serializer_owned_fields(type(obj))
+        for fname in list(vars(obj)):
+            if fname in skip:
+                continue
+            vars(obj)[fname] = _swap_bytes(vars(obj)[fname], sentinels, prefix, counter)
         return obj
     if isinstance(obj, dict):
         return {k: _swap_bytes(v, sentinels, prefix, counter) for k, v in obj.items()}
@@ -512,7 +541,14 @@ def dump_model(instance: Any) -> dict:
         # expects bytes — it warns (correctly, from its perspective) but
         # still emits the sentinel verbatim, which is all we need
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
+            # scoped to the exact warning the sentinel swap provokes —
+            # pydantic emits plain UserWarning with this message prefix;
+            # anything else still surfaces
+            warnings.filterwarnings(
+                "ignore",
+                message="Pydantic serializer warnings",
+                category=UserWarning,
+            )
             dumped = swapped.model_dump(mode="json", by_alias=True)
     except UnicodeDecodeError as e:
         raise TypeError(

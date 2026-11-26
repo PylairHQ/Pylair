@@ -419,3 +419,59 @@ def test_bytes_in_computed_field_named_error():
 
     with pytest.raises((TypeError, UnicodeDecodeError)):
         dumps(C(x=b"ok"))
+
+
+# ---- sentinel-swap hardening (review: no silent fallthrough) -------------------
+
+
+def test_frozen_model_bytes_both_kinds():
+    class F(BaseModel):
+        model_config = pydantic.ConfigDict(frozen=True)
+        blob: bytes
+
+    for payload in (b"hello", b"\x00\xffbin"):
+        out = dumps(F(blob=payload))
+        assert "$b64" in out
+        import base64
+
+        assert base64.b64decode(json.loads(out)["blob"]["$b64"]) == payload
+
+
+def test_validate_assignment_strict_bytes():
+    class V(BaseModel):
+        model_config = pydantic.ConfigDict(validate_assignment=True)
+        blob: bytes
+
+    for payload in (b"hello", b"\x00\xffbin"):
+        assert "$b64" in dumps(V(blob=payload))
+
+
+def test_nested_in_frozen_parent():
+    class Inner(BaseModel):
+        blob: bytes
+
+    class Outer(BaseModel):
+        model_config = pydantic.ConfigDict(frozen=True)
+        inner: Inner
+
+    for payload in (b"hello", b"\x00\xffbin"):
+        out = json.loads(dumps(Outer(inner=Inner(blob=payload))))
+        import base64
+
+        assert base64.b64decode(out["inner"]["blob"]["$b64"]) == payload
+
+
+def test_serializer_owned_bytes_field_not_swapped():
+    from pydantic import field_serializer
+
+    class H(BaseModel):
+        blob: bytes
+
+        @field_serializer("blob")
+        def ser(self, v):
+            return v.hex()
+
+    # the serializer owns the representation — output is the hex string,
+    # exactly as json mode produces it, never $b64
+    out = json.loads(dumps(H(blob=b"\xff\x00")))
+    assert out == {"blob": "ff00"}

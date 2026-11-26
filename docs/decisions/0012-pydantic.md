@@ -263,6 +263,24 @@ bytes are handled around it:
   applies `$b64` — the single intended divergence. The user's instance
   is never mutated. The serializer warnings the swap triggers are scoped-
   suppressed (they are correct from pydantic's perspective and noise here).
+- **No silent fallthrough in the swap.** Writes into the deep copy use
+  `__dict__` directly — the copy is ours, so bypassing `frozen` and
+  `validate_assignment` is safe by construction, while `setattr` would
+  silently leave bytes in place (utf-8-valid bytes would then cross as
+  plain strings where TS expects Uint8Array). Frozen models, strict
+  validate_assignment models and models nested in frozen parents all
+  round-trip as `$b64` (tested with utf-8-valid and non-utf-8 payloads).
+- **Serializer-owned bytes fields are excluded from the swap.** A bytes
+  field with its own serializer (`@field_serializer`, `PlainSerializer`,
+  `WrapSerializer`, Annotated serializers — detected at decoration as a
+  function-plain/function-wrap serialization entry in the field's core
+  schema) owns its representation: the serializer receives the real bytes
+  and its output crosses exactly as json mode produces it (e.g. `.hex()`
+  arrives as the hex string). Codegen types such fields from the
+  serializer's return annotation, else unknown (PR 2).
+- **Warning suppression is scoped** to the exact message the swap
+  provokes (`Pydantic serializer warnings`, plain UserWarning — pydantic
+  has no dedicated category for it); any other warning still surfaces.
 - **Bytes inside computed-field or custom-serializer output** cannot be
   swapped (they don't exist before the dump): json mode raises
   UnicodeDecodeError, surfaced as a named TypeError telling the author to
