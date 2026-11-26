@@ -7,17 +7,21 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { currentRelease } from "./compat.js";
 
 export const TEMPLATES = resolve(fileURLToPath(import.meta.url), "../../templates");
 const BINARY = new Set([".png", ".ico", ".icns"]);
 
-/** The registry versions a scaffolded app pins. Bump together with the
- * manifests and the template `Cargo.lock` (AGENTS.md, "Scaffold pins"). */
+/** The registry versions a scaffolded app pins, derived from the
+ * compatibility manifest's current set (compat.json - the one place the
+ * release-bump PR edits). The template `Cargo.lock` still regenerates
+ * per the release train (AGENTS.md, "Scaffold pins"). */
+const CURRENT = currentRelease();
 export const PINS = {
-  py: "pylair==0.1.0rc17",
-  js: "0.1.0-rc.31",
-  cli: "0.1.0-rc.31",
-  rs: `tauri-plugin-pylair = "=0.1.0-rc.24"`,
+  py: `pylair==${CURRENT.pylair}`,
+  js: CURRENT.npm,
+  cli: CURRENT.npm,
+  rs: `tauri-plugin-pylair = "=${CURRENT.crate}"`,
   /** tauri-plugin-updater for `--with-updater` scaffolds (0011). Major-
    * pinned like `tauri = "2"`; the resolved version lands in the app's own
    * Cargo.lock on first build. */

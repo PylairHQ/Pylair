@@ -47,6 +47,18 @@ Crate `0.1.0-rc.25`, `pylair 0.1.0rc18` on PyPI, npm `0.1.0-rc.32`.
   not inside the decorator. `worker` is typed `WorkerConfig | dict`;
   the dict form is unchanged (the helpers build and validate through
   the same path). Docs show the helpers first.
+- **Version alignment tooling** (DX batch 2): one compatibility manifest
+  (`packages/cli/src/compat.json`, vendored into create-pylair — the
+  scaffold pins now derive from it, so a release bump edits one place);
+  `pylair doctor` gains a Versions section reporting what the app
+  actually uses (declared + lockfile-resolved per ecosystem) with a
+  compatible/mismatched verdict; `pylair upgrade --check` compares the
+  app's set against the newest manifest set and prints the exact
+  per-file edits, the lockfile commands and the manual upgrade notes for
+  every release in between — offline, read-only, exit codes 0/1/2 for
+  scripts (`--online` additionally flags a stale CLI). Backfill covers
+  rc.24..rc.31. [docs/upgrading.md](docs/upgrading.md).
+
 - **State events can no longer be dropped.** `pylair://state`,
   `pylair://exposes`, `pylair://health` and `pylair://app` now travel
   per-kind latest-state slots beside the bounded events channel instead

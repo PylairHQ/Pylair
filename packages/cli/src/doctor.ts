@@ -11,6 +11,7 @@ import { nativeToolchain, probe, realEnv } from "./preflight.js";
 import { ui, type Hint } from "./ui/index.js";
 import { wrapWarnings } from "./wrapconfig.js";
 import { STAGED_APP, runSmokeImports, smokeImports } from "./wrapbuild.js";
+import { judge, releaseVersion, resolveAppVersions, type AppVersions } from "./versions.js";
 
 // The detection primitives live in ./preflight.js — the module
 // `pylair dev` and create-pylair share (vendored there). Re-exported so
@@ -167,6 +168,62 @@ function shown(appDir: string, p: string): string {
     .join(", ");
 }
 
+/** The Versions section: what the app actually uses per ecosystem
+ * (declared + lockfile-resolved), whether the combination is one release's
+ * compatible set, and - when it is not - exactly which part is out of
+ * step. Unresolved (no lockfile yet) is never a failure: a fresh scaffold
+ * has not installed anything. */
+export function versionChecks(appDir: string, add: AddCheck): void {
+  const v = resolveAppVersions(appDir);
+  const rows: { key: keyof AppVersions; label: string }[] = [
+    { key: "client", label: "@pylair/client" },
+    { key: "cli", label: "@pylair/cli" },
+    { key: "crate", label: "tauri-plugin-pylair" },
+    { key: "pylair", label: "pylair" },
+  ];
+  let present = 0;
+  for (const { key, label } of rows) {
+    const c = v[key];
+    if (c.status === "absent") continue;
+    present += 1;
+    const detail =
+      c.status === "resolved"
+        ? `${c.resolved}`
+        : c.status === "local"
+          ? `local checkout (${c.declared})`
+          : `unresolved - declared ${c.declared}; ${c.detail}`;
+    add(`versions: ${label}`, true, detail);
+  }
+  if (present === 0) return;
+  const verdict = judge(v);
+  if (verdict.kind === "compatible") {
+    const r = verdict.release;
+    add(
+      "versions: compatibility",
+      true,
+      `a compatible set (npm-v${r.npm}: crate ${r.crate}, pylair ${r.pylair}) - the ecosystems version independently, so differing numbers are expected, not skew`,
+    );
+  } else if (verdict.kind === "mismatched") {
+    add(
+      "versions: compatibility",
+      false,
+      [
+        `mismatched - not any single release's set; closest is npm-v${verdict.best.npm}:`,
+        ...verdict.offenders.map(
+          (o) => `  ${o.component} ${o.have} is out of step - ${o.want} pairs with the rest`,
+        ),
+      ].join("\n    "),
+      { fix: "run `pylair upgrade --check` for the exact edits" },
+    );
+  } else if (verdict.kind === "unresolved") {
+    add(
+      "versions: compatibility",
+      true,
+      `unjudged - unresolved: ${verdict.components.join(", ")} (install/build/uv sync first)`,
+    );
+  }
+}
+
 export async function doctor(appDir: string): Promise<number> {
   const checks: Check[] = [];
   const add: AddCheck = (name, ok, detail, hint) => checks.push({ name, ok, detail, hint });
@@ -243,6 +300,7 @@ export async function doctor(appDir: string): Promise<number> {
         : found.map(formatFinding).join("\n    "),
       { file: "src-tauri/capabilities", fix: "fix the listed scopes (docs/security.md)" },
     );
+    versionChecks(appDir, add);
   } else {
     add("app dir", false, `${appDir} has no pyproject.toml`, {
       file: join(appDir, "pyproject.toml"),

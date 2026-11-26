@@ -23,7 +23,7 @@ writeFileSync(
 // preflight.ts is the toolchain check `pylair dev` gates the Rust build
 // on and this package warns about after scaffolding — one file at src
 // root, vendored like the ui module above.
-const SRC_TOP = ["preflight.ts"];
+const SRC_TOP = ["preflight.ts", "compat.ts", "compat.json"];
 const srcTop = new URL("../../cli/src/", import.meta.url);
 const dstTop = new URL("../src/", import.meta.url);
 for (const f of SRC_TOP) copyFileSync(new URL(f, srcTop), new URL(f, dstTop));
