@@ -133,7 +133,7 @@ Release candidate. `pylair` and `pylair-ollama` are on PyPI,
 Install RCs with **exact pins**, not `--pre`:
 
 ```sh
-pip install pylair==0.1.0rc18 pylair-ollama==0.1.0rc3
+pip install pylair==0.1.0rc19 pylair-ollama==0.1.0rc3
 ```
 
 `--pre` opts *every* package in the install into prereleases. It can
@@ -141,8 +141,8 @@ pull your dependencies into unstable versions and break for reasons
 unrelated to this project. Exact pins avoid that.
 
 Each package versions independently across registries: the numbers
-won't match (`pylair` at `0.1.0rc18`, npm packages at `0.1.0-rc.32`, the
-crate at `0.1.0-rc.25`). Check each registry for its latest RC.
+won't match (`pylair` at `0.1.0rc19`, npm packages at `0.1.0-rc.33`, the
+crate at `0.1.0-rc.26`). Check each registry for its latest RC.
 
 ## Debugging
 
