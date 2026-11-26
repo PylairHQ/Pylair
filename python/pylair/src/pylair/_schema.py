@@ -10,10 +10,13 @@ from __future__ import annotations
 import collections.abc as cabc
 import dataclasses
 import datetime as _dt
+import decimal as _decimal
 import enum
 import inspect
+import pathlib as _pathlib
 import types
 import typing
+import uuid as _uuid
 from typing import Any
 
 from pylair._bigint import BigInt
@@ -106,6 +109,68 @@ def _typeddict_schema(cls: Any, seen: frozenset) -> dict[str, Any]:
     }
 
 
+def _pydantic_model_schema(cls: Any, seen: frozenset) -> dict[str, Any]:
+    """decision 0012 §2/§3: walk model_fields through the shared walker.
+    By-alias both ways — in_fields keyed by validation names, out_fields
+    by serialization names; identical shapes collapse to `fields`.
+    computed_field entries join the response side. Unsupported shapes
+    raise at decoration (§7) — this walk IS the decoration-time hook."""
+    from pylair import _pydantic
+
+    _pydantic.check_model_supported(cls)
+    if cls in seen:
+        return {"type": "pydantic", "name": cls.__name__, "recursive": True}
+    seen = seen | {cls}
+
+    def wire_in(f: Any) -> str:
+        va = f.validation_alias
+        return va if isinstance(va, str) else (f.alias or "") or ""
+
+    in_fields = []
+    for name, f in cls.model_fields.items():
+        key = wire_in(f) or name
+        in_fields.append(
+            {
+                "name": key,
+                "field": name,
+                "required": f.is_required(),
+                "schema": schema_of(f.annotation, seen),
+            }
+        )
+    out_fields = []
+    for name, f in cls.model_fields.items():
+        key = f.serialization_alias or f.alias or name
+        out_fields.append(
+            {
+                "name": key,
+                "field": name,
+                "required": True,
+                "schema": schema_of(f.annotation, seen),
+            }
+        )
+    for cname, cf in cls.model_computed_fields.items():
+        out_fields.append(
+            {
+                "name": cf.alias or cname,
+                "field": cname,
+                "required": True,
+                "computed": True,
+                "schema": schema_of(
+                    cf.return_type if cf.return_type is not None else Any, seen
+                ),
+            }
+        )
+    out: dict[str, Any] = {"type": "pydantic", "name": cls.__name__}
+    if [f["name"] for f in in_fields] == [
+        f["name"] for f in out_fields[: len(in_fields)]
+    ] and len(in_fields) == len(out_fields):
+        out["fields"] = in_fields
+    else:
+        out["in_fields"] = in_fields
+        out["out_fields"] = out_fields
+    return out
+
+
 def schema_of(annotation: Any, _seen: frozenset = frozenset()) -> dict[str, Any]:
     if annotation in (_EMPTY, None, Any):
         return {"type": "any"} if annotation is not None else {"type": "none"}
@@ -177,6 +242,16 @@ def schema_of(annotation: Any, _seen: frozenset = frozenset()) -> dict[str, Any]
         return {"type": "bytes"}
     if issubclass(annotation, (_dt.datetime, _dt.date, _dt.time)):
         return {"type": "datetime"}
+    # decision 0012 §4 shared types — provisional schema names (protocol §8);
+    # codegen learns them in PR 2
+    if issubclass(annotation, _dt.timedelta):
+        return {"type": "timedelta"}
+    if issubclass(annotation, _uuid.UUID):
+        return {"type": "uuid"}
+    if issubclass(annotation, _decimal.Decimal):
+        return {"type": "decimal"}
+    if issubclass(annotation, _pathlib.PurePath):
+        return {"type": "path"}
     if issubclass(annotation, enum.Enum):
         vals = [m.value for m in annotation]
         return {"type": "enum", "values": vals}
@@ -198,6 +273,12 @@ def schema_of(annotation: Any, _seen: frozenset = frozenset()) -> dict[str, Any]
         }
     if is_typed_dict_class(annotation):
         return _typeddict_schema(annotation, _seen)
+    from pylair import _pydantic  # lazy: pylair never requires pydantic
+
+    if _pydantic.is_v1_model_class(annotation):
+        _pydantic.check_model_supported(annotation)  # always raises for v1
+    if _pydantic.is_model_class(annotation):
+        return _pydantic_model_schema(annotation, _seen)
     return {"type": "any"}
 
 
