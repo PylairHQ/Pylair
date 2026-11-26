@@ -53,7 +53,17 @@ class InvalidParams(Exception):
     Maps to INVALID_PARAMS on the wire (protocol §8) — the host sent a
     value the annotated signature can't hold (e.g. a dataclass field
     missing), which is a caller error, not an internal failure.
+
+    `errors` carries the structured form for error.data.errors on the
+    wire: [{"path": "args.items[2].name", "expected": <schema type name>,
+    "received": <JSON type of the value, never the value itself>}].
+    Nested failures build their path as they propagate, so the deepest
+    leaf names the exact field that rejected.
     """
+
+    def __init__(self, message: str, *, errors: list | None = None) -> None:
+        super().__init__(message)
+        self.errors: list = list(errors) if errors else []
 
 
 def _default(obj: Any) -> Any:
@@ -354,11 +364,55 @@ def _short(value: Any) -> str:
     return r if len(r) <= _SHORT_LIMIT else r[:_SHORT_LIMIT] + "…"
 
 
-def coerce(annotation: Any, value: Any) -> Any:
+def _json_type(value: Any) -> str:
+    """The JSON type name of a wire value — never the value itself."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def _schema_name(annotation: Any) -> str:
+    """The type as the codegen schema names it (protocol §8 data.errors):
+    primitives by their schema type, dataclasses and enums by class name,
+    everything unmodelled by its schema type string."""
+    from pylair._schema import schema_of
+
+    if inspect.isclass(annotation) and (
+        dataclasses.is_dataclass(annotation) or issubclass(annotation, enum.Enum)
+    ):
+        return annotation.__name__
+    try:
+        return str(schema_of(annotation).get("type", "any"))
+    except Exception:  # noqa: BLE001 - naming is cosmetic; never fail validation
+        return _typename(annotation)
+
+
+def _fail(expected: str, value: Any, path: str, msg: str | None = None) -> None:
+    """Raise InvalidParams with the structured error beside the message —
+    the message keeps its legacy wording (tests and logs read it), the
+    wire-visible shape rides in errors[]."""
+    raise InvalidParams(
+        msg if msg is not None else f"expected {expected}, got {_short(value)}",
+        errors=[{"path": path, "expected": expected, "received": _json_type(value)}],
+    )
+
+
+def coerce(annotation: Any, value: Any, _path: str = "args") -> Any:
     """Validate `value` (wire JSON) against `annotation` and rebuild the
     annotated type. Raises InvalidParams on mismatch — a value that can't
     hold the annotation must never reach the function body. Annotations
-    this layer doesn't model pass through unchanged."""
+    this layer doesn't model pass through unchanged.
+
+    `_path` is the wire path of the value being coerced ("args.items[2]")
+    — recursion extends it so a nested failure names the exact leaf."""
     if (
         annotation is inspect.Parameter.empty
         or annotation is Any
@@ -377,47 +431,72 @@ def coerce(annotation: Any, value: Any) -> Any:
             if arm is type(None):
                 continue
             try:
-                return coerce(arm, value)
+                return coerce(arm, value, _path)
             except Exception:  # noqa: BLE001,S112 - try the next union arm
                 continue
-        raise InvalidParams(f"expected {annotation}, got {_short(value)}")
+        raise InvalidParams(
+            f"expected {annotation}, got {_short(value)}",
+            errors=[
+                {
+                    "path": _path,
+                    "expected": _schema_name(annotation),
+                    "received": _json_type(value),
+                }
+            ],
+        )
 
     # null is only valid for Optional (handled above).
     if value is None:
-        raise InvalidParams(f"expected {_typename(annotation)}, got null")
+        raise InvalidParams(
+            f"expected {_typename(annotation)}, got null",
+            errors=[
+                {
+                    "path": _path,
+                    "expected": _schema_name(annotation),
+                    "received": "null",
+                }
+            ],
+        )
 
     # Primitives: strict wire types. bool precedes int — isinstance(True, int)
     # is True, and JSON true is never a valid int/float.
     if annotation is bool:
         if isinstance(value, bool):
             return value
-        raise InvalidParams(f"expected bool, got {_short(value)}")
+        _fail("bool", value, _path)
     if annotation is int:
         # JSON can't distinguish 3 from 3.0 — whole floats are ints.
         if isinstance(value, int) and not isinstance(value, bool):
             return value
         if isinstance(value, float) and value.is_integer():
             return int(value)
-        raise InvalidParams(f"expected int, got {_short(value)}")
+        _fail("int", value, _path)
     if annotation is BigInt:
         # Decoded tags arrive as BigInt already; a plain JSON number is
         # promoted so the fn sees the annotated type either way.
         if isinstance(value, int) and not isinstance(value, bool):
             return BigInt(value)
-        raise InvalidParams(f"expected BigInt, got {_short(value)}")
+        _fail("bigint", value, _path, msg=f"expected BigInt, got {_short(value)}")
     if annotation is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
-        raise InvalidParams(f"expected float, got {_short(value)}")
+        _fail("float", value, _path)
     if annotation is str:
         if isinstance(value, str):
             return value
-        raise InvalidParams(f"expected str, got {_short(value)}")
+        _fail("str", value, _path)
 
     if inspect.isclass(annotation) and dataclasses.is_dataclass(annotation):
         if not isinstance(value, dict):
             raise InvalidParams(
-                f"expected object for {_typename(annotation)}, got {_short(value)}"
+                f"expected object for {_typename(annotation)}, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": annotation.__name__,
+                        "received": _json_type(value),
+                    }
+                ],
             )
         fields = _dataclass_fields(annotation)
         # Under `from __future__ import annotations` f.type is a
@@ -425,37 +504,68 @@ def coerce(annotation: Any, value: Any) -> Any:
         hints = _resolved_hints(annotation)
         try:
             kwargs = {
-                k: coerce(hints.get(k, fields[k].type), v)
+                k: coerce(hints.get(k, fields[k].type), v, f"{_path}.{k}")
                 for k, v in value.items()
                 if k in fields
             }
             return annotation(**kwargs)
-        except InvalidParams:
-            raise
+        except InvalidParams as e:
+            # The nested failure already carries its full wire path.
+            raise InvalidParams(f"{_typename(annotation)}: {e}", errors=e.errors) from e
         except Exception as e:
             raise InvalidParams(f"{_typename(annotation)}: {e}") from e
 
     if origin in (list, set, frozenset) or annotation is list:
         if not isinstance(value, list):
             raise InvalidParams(
-                f"expected list for {_typename(annotation)}, got {_short(value)}"
+                f"expected list for {_typename(annotation)}, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": "list",
+                        "received": _json_type(value),
+                    }
+                ],
             )
         (item_t,) = args or (inspect.Parameter.empty,)
-        items = [coerce(item_t, v) for v in value]
+        items = [coerce(item_t, v, f"{_path}[{i}]") for i, v in enumerate(value)]
         return set(items) if origin in (set, frozenset) else items
 
     if origin is tuple:
         if not isinstance(value, list):
-            raise InvalidParams(f"expected list for tuple, got {_short(value)}")
+            raise InvalidParams(
+                f"expected list for tuple, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": "tuple",
+                        "received": _json_type(value),
+                    }
+                ],
+            )
         if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(coerce(args[0], v) for v in value)
-        return tuple(coerce(t, v) for t, v in zip(args, value, strict=False))
+            return tuple(
+                coerce(args[0], v, f"{_path}[{i}]") for i, v in enumerate(value)
+            )
+        return tuple(
+            coerce(t, v, f"{_path}[{i}]")
+            for i, (t, v) in enumerate(zip(args, value, strict=False))
+        )
 
     if origin is dict or annotation is dict:
         if not isinstance(value, dict):
-            raise InvalidParams(f"expected object for dict, got {_short(value)}")
+            raise InvalidParams(
+                f"expected object for dict, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": "dict",
+                        "received": _json_type(value),
+                    }
+                ],
+            )
         val_t = args[1] if len(args) == 2 else inspect.Parameter.empty
-        return {k: coerce(val_t, v) for k, v in value.items()}
+        return {k: coerce(val_t, v, f"{_path}.{k}") for k, v in value.items()}
 
     if annotation in (_dt.datetime, _dt.date, _dt.time):
         if isinstance(value, str):
@@ -464,7 +574,14 @@ def coerce(annotation: Any, value: Any) -> Any:
             except ValueError:
                 pass
         raise InvalidParams(
-            f"expected ISO-8601 {_typename(annotation)}, got {_short(value)}"
+            f"expected ISO-8601 {_typename(annotation)}, got {_short(value)}",
+            errors=[
+                {
+                    "path": _path,
+                    "expected": "datetime",
+                    "received": _json_type(value),
+                }
+            ],
         )
 
     if annotation is bytes:
@@ -476,16 +593,39 @@ def coerce(annotation: Any, value: Any) -> Any:
                 return base64.b64decode(value, validate=True)
             except (binascii.Error, ValueError):
                 raise InvalidParams(
-                    f"expected base64 bytes, got {_short(value)}"
+                    f"expected base64 bytes, got {_short(value)}",
+                    errors=[
+                        {
+                            "path": _path,
+                            "expected": "bytes",
+                            "received": _json_type(value),
+                        }
+                    ],
                 ) from None
-        raise InvalidParams(f"expected base64 bytes, got {_short(value)}")
+        raise InvalidParams(
+            f"expected base64 bytes, got {_short(value)}",
+            errors=[
+                {
+                    "path": _path,
+                    "expected": "bytes",
+                    "received": _json_type(value),
+                }
+            ],
+        )
 
     if inspect.isclass(annotation) and issubclass(annotation, enum.Enum):
         try:
             return annotation(value)
         except ValueError:
             raise InvalidParams(
-                f"expected {_typename(annotation)}, got {_short(value)}"
+                f"expected {_typename(annotation)}, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": annotation.__name__,
+                        "received": _json_type(value),
+                    }
+                ],
             ) from None
 
     return value
@@ -574,9 +714,18 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
         return input
     params, hints, has_varkw = parts
     if not has_varkw:
-        for k in input:
+        for k, v in input.items():
             if k not in params:
-                raise InvalidParams(f"unexpected parameter '{k}'")
+                raise InvalidParams(
+                    f"unexpected parameter '{k}'",
+                    errors=[
+                        {
+                            "path": f"args.{k}",
+                            "expected": "absent",
+                            "received": _json_type(v),
+                        }
+                    ],
+                )
 
     for name, p in params.items():
         if (
@@ -585,7 +734,16 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
             not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
             and name not in input
         ):
-            raise InvalidParams(f"missing required parameter '{name}'")
+            raise InvalidParams(
+                f"missing required parameter '{name}'",
+                errors=[
+                    {
+                        "path": f"args.{name}",
+                        "expected": _schema_name(hints.get(name, p.annotation)),
+                        "received": "missing",
+                    }
+                ],
+            )
 
     out = dict(input)
     for name, param in params.items():
@@ -597,11 +755,14 @@ def coerce_kwargs(fn: Any, input: dict) -> dict:
             continue
         ann = hints.get(name, param.annotation)
         try:
-            out[name] = coerce(ann, out[name])
+            out[name] = coerce(ann, out[name], f"args.{name}")
         except Exception as e:
             # A construction failure must not silently deliver a dict
             # where the function expects an object (docs/codegen.md).
-            raise InvalidParams(f"param '{name}': {e}") from e
+            raise InvalidParams(
+                f"param '{name}': {e}",
+                errors=getattr(e, "errors", []),
+            ) from e
     return out
 
 

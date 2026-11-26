@@ -36,6 +36,13 @@ pub fn release_spawn_spec(resources: &Path, app_module: &str, source_dir: &str) 
     // bundled runtime is 3.12) removes the implicit entry; PYTHONPATH
     // above still resolves the app module and bundled site-packages.
     spec.env.push(("PYTHONSAFEPATH".into(), "1".into()));
+    // Dev builds only: exposed-function errors may carry a formatted
+    // traceback in error.data (protocol §8). Debug assertions are the
+    // gate — a release build must never ship source paths or code to
+    // end-user machines, and cfg! means the release binary contains no
+    // path that ever sets this variable.
+    #[cfg(debug_assertions)]
+    spec.env.push(("PYLAIR_DEV_TRACEBACKS".into(), "1".into()));
     // The bundle is precompiled at build time and the install dir is
     // often read-only (per-machine installs, .app bundles): never write
     // bytecode at launch. Isolated workers inherit os.environ, so they
@@ -188,6 +195,9 @@ pub fn app_spawn_spec<R: Runtime>(
         if let Ok(module) = std::env::var("PYLAIR_APP_MODULE") {
             let program = std::env::var("PYLAIR_PYTHON").unwrap_or_else(|_| "python3".into());
             let mut spec = SpawnSpec::pylair(PathBuf::from(program), &module);
+            // Same dev-only gate as release_spawn_spec: already inside
+            // cfg!(debug_assertions) here — release builds never set it.
+            spec.env.push(("PYLAIR_DEV_TRACEBACKS".into(), "1".into()));
             if let Ok(pp) = std::env::var("PYLAIR_PYTHONPATH") {
                 spec.env.push(("PYTHONPATH".into(), pp));
             }

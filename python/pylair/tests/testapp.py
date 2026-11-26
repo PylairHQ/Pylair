@@ -28,6 +28,12 @@ class Color(str, enum.Enum):
 
 
 @expose
+def boom() -> None:
+    """Raises on purpose - error-field tests drive the traceback path."""
+    raise ValueError("boom")
+
+
+@expose
 def add(a: int, b: int) -> int:
     return a + b
 

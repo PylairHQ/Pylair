@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import difflib
 import itertools
 import os
 import queue
@@ -519,9 +520,19 @@ class Server:
             return
         ex = exposed_functions().get(fn_name)
         if ex is None:
+            # Close matches among the exposed names are safe in all
+            # builds — exposes already publish the full set (protocol §8).
+            names = list(exposed_functions())
+            sugg = difflib.get_close_matches(str(fn_name), names, n=3, cutoff=0.6)
+            msg = f"no such function {fn_name!r}"
+            if sugg:
+                msg += f" - did you mean {sugg[0]!r}?"
             self._send(
                 proto.error_response(
-                    rid, proto.FUNCTION_NOT_FOUND, f"no such function {fn_name!r}"
+                    rid,
+                    proto.FUNCTION_NOT_FOUND,
+                    msg,
+                    {"suggestions": sugg} if sugg else None,
                 )
             )
             return
@@ -554,7 +565,14 @@ class Server:
         try:
             input = _json.coerce_kwargs(ex.fn, input)
         except _json.InvalidParams as e:
-            self._send(proto.error_response(rid, proto.INVALID_PARAMS, str(e)))
+            self._send(
+                proto.error_response(
+                    rid,
+                    proto.INVALID_PARAMS,
+                    str(e),
+                    {"errors": e.errors} if e.errors else None,
+                )
+            )
             return
         await self._tasks.start(
             task_id,

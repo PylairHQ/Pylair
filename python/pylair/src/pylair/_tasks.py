@@ -18,6 +18,7 @@ from typing import Any
 
 from pylair import _json, _readiness
 from pylair import _protocol as proto
+from pylair._devtb import format_dev_traceback as _devtb
 
 ISOLATED_GRACE_S = 3.0
 # taskkill is awaited with this bound - a hung taskkill or a nonzero
@@ -67,6 +68,17 @@ def _killpg(pid: int, sig: int) -> None:
 
 def _is_int_id(task_id: Any) -> bool:
     return isinstance(task_id, int) and not isinstance(task_id, bool)
+
+
+def _err_data(e: BaseException) -> dict:
+    """error.data for a user-code failure: the exception type always,
+    the formatted traceback only when the host opted in (dev builds -
+    protocol §8); release builds never leak source paths."""
+    data: dict = {"type": type(e).__name__}
+    tb = _devtb(e)
+    if tb is not None:
+        data["traceback"] = tb
+    return data
 
 
 @dataclass
@@ -412,7 +424,7 @@ class TaskRegistry:
             self._finish(
                 task,
                 proto.error_response(
-                    task.call_id, proto.INTERNAL, str(e), {"type": type(e).__name__}
+                    task.call_id, proto.INTERNAL, str(e), _err_data(e)
                 ),
             )
 
@@ -437,7 +449,7 @@ class TaskRegistry:
             self._finish(
                 task,
                 proto.error_response(
-                    task.call_id, proto.INTERNAL, str(e), {"type": type(e).__name__}
+                    task.call_id, proto.INTERNAL, str(e), _err_data(e)
                 ),
             )
 
@@ -514,7 +526,7 @@ class TaskRegistry:
             self._finish(
                 task,
                 proto.error_response(
-                    task.call_id, proto.INTERNAL, str(e), {"type": type(e).__name__}
+                    task.call_id, proto.INTERNAL, str(e), _err_data(e)
                 ),
             )
 
