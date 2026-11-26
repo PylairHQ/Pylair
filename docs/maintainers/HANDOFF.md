@@ -483,22 +483,27 @@ below was skipped for rc.20 only.
   verdict; pack/registry legs append it and arm
   `PYLAIR_BLOB_EXPECTED=1` only when the resolved crate is ≥
   `0.1.0-rc.23` AND pylair ≥ `0.1.0rc15` AND `@pylair/client` ≥
-  `0.1.0-rc.29`. The rc.30 train shipped: npm trio
-  `0.1.0-rc.30`, scaffold pins `pylair==0.1.0rc16` / crate
-  `=0.1.0-rc.23`. The bump commit (PR 180) took the crate to
-  `0.1.0-rc.24` and `pylair` to `0.1.0rc17` for the auto-update
-  series, `idle_ttl_s`, `$bigint` and the loop-stall warning —
-  crate `0.1.0-rc.24` is on crates.io (checksum `ca939333…add2`)
-  and `pylair 0.1.0rc17` on PyPI. This pins commit moves the npm
-  trio to `0.1.0-rc.31`, the scaffold py/js/cli/rs pins with it,
-  and regenerates both template `Cargo.lock` files against the
-  published crate. Remaining order:
+  `0.1.0-rc.29`. The rc.31 train shipped: npm trio
+  `0.1.0-rc.31`, scaffold pins `pylair==0.1.0rc17` / crate
+  `=0.1.0-rc.24`. The bump commit (PR 189) took the crate to
+  `0.1.0-rc.25` and `pylair` to `0.1.0rc18` for the first-run
+  experience, the dev inspector, `warm()`/`isolated()`, the
+  version-alignment tooling and lossless state events — crate
+  `0.1.0-rc.25` is on crates.io (checksum `720d027f…88ae6`)
+  and `pylair 0.1.0rc18` on PyPI. This pins commit moves the npm
+  trio to `0.1.0-rc.32` and is the first proof of the rc.32
+  compat-manifest design: the scaffold pins moved by editing
+  `packages/cli/src/compat.json` alone (PINS derive from it since
+  PR 190; the remaining tripwire tests assert against the
+  manifest, not version literals). Both template `Cargo.lock`
+  files regenerate against the published crate as before.
+  Remaining order:
 
   1. pack-mode acceptance green on this commit (scaffolded pins
-     resolve crate rc.24 + pylair rc17, both live);
+     resolve crate rc.25 + pylair rc18, both live);
   2. the npm trio under `--tag next`;
   3. registry acceptance with `source=registry` and
-     `expect_version 0.1.0-rc.31` — `PYLAIR_BLOB_EXPECTED` keeps
+     `expect_version 0.1.0-rc.32` — `PYLAIR_BLOB_EXPECTED` keeps
      arming (all three resolved versions are already past their
      floors), so a `blob` skip still fails the leg on every OS.
 
