@@ -1,11 +1,13 @@
 """Wire-codec unit tests — the JSON safety guards in pylair._json."""
 
 import dataclasses
+import datetime
 import enum
+import typing
 
 import pytest
 
-from pylair import BigInt, _json
+from pylair import BigInt, _json, _schema
 
 _SAFE = (1 << 53) - 1  # JS Number.MAX_SAFE_INTEGER
 
@@ -528,3 +530,113 @@ def test_task_result_untouched_when_no_bigint_declared(monkeypatch):
     finally:
         _ex._registry.clear()
         _ex._registry.update(saved)
+
+
+# ---- TypedDict coercion (docs/codegen.md) ------------------------------------
+
+
+def test_typeddict_coerce_passes_plain_dict_through():
+    class Opts(typing.TypedDict, total=False):
+        limit: int
+
+    out = _json.coerce(Opts, {"limit": 3})
+    assert type(out) is dict  # no class to construct — stays a plain dict
+    assert out == {"limit": 3}
+    # optional keys may be absent entirely
+    assert _json.coerce(Opts, {}) == {}
+
+
+def test_typeddict_coerce_values_per_declared_type():
+    @dataclasses.dataclass
+    class P:
+        x: int
+
+    class W(typing.TypedDict):
+        balance: BigInt
+        owner: P
+        when: datetime.datetime
+
+    out = _json.coerce(
+        W,
+        {"balance": 5, "owner": {"x": 1}, "when": "2026-01-02T03:04:05"},
+    )
+    # nested values are rebuilt per their declared type: bigint promoted,
+    # dataclass constructed, ISO string parsed.
+    assert isinstance(out["balance"], BigInt)
+    assert isinstance(out["owner"], P) and out["owner"].x == 1
+    assert isinstance(out["when"], datetime.datetime)
+
+
+def test_typeddict_unknown_key_rejected():
+    class Opts(typing.TypedDict, total=False):
+        limit: int
+
+    with pytest.raises(_json.InvalidParams, match="unknown key") as ei:
+        _json.coerce(Opts, {"limit": 1, "bogus": 2}, "args.opts")
+    assert ei.value.errors == [
+        {"path": "args.opts.bogus", "expected": "absent", "received": "number"}
+    ]
+
+
+def test_typeddict_missing_required_key():
+    class Req(typing.TypedDict):
+        limit: int
+
+    with pytest.raises(_json.InvalidParams, match="missing required key") as ei:
+        _json.coerce(Req, {}, "args.opts")
+    assert ei.value.errors == [
+        {"path": "args.opts.limit", "expected": "int", "received": "missing"}
+    ]
+
+
+def test_typeddict_wrong_type_paths_nested():
+    class Inner(typing.TypedDict):
+        tag: str
+
+    class Outer(typing.TypedDict):
+        inner: Inner
+
+    with pytest.raises(_json.InvalidParams) as ei:
+        _json.coerce(Outer, {"inner": {"tag": 5}}, "args.cfg")
+    # the deepest leaf names the exact field that rejected
+    assert ei.value.errors == [
+        {"path": "args.cfg.inner.tag", "expected": "str", "received": "number"}
+    ]
+    # non-dict input names the TypedDict by class name
+    with pytest.raises(_json.InvalidParams) as ei2:
+        _json.coerce(Outer, [1], "args.cfg")
+    assert ei2.value.errors[0]["expected"] == "Outer"
+    assert ei2.value.errors[0]["received"] == "array"
+
+
+def test_typeddict_inside_list_and_optional():
+    class Opts(typing.TypedDict, total=False):
+        limit: int
+
+    out = _json.coerce(list[Opts], [{"limit": 1}, {}], "args.xs")
+    assert out == [{"limit": 1}, {}]
+    with pytest.raises(_json.InvalidParams) as ei:
+        _json.coerce(list[Opts], [{"limit": "x"}], "args.xs")
+    assert ei.value.errors[0]["path"] == "args.xs[0].limit"
+    opt = Opts | None
+    assert _json.coerce(opt, None) is None
+    assert _json.coerce(opt, {"limit": 2}) == {"limit": 2}
+
+
+def test_typeddict_result_bigint_widened():
+    class W(typing.TypedDict):
+        balance: BigInt
+        note: str
+
+    schema = _schema.schema_of(W)
+    # int arithmetic drops the subclass — the declared schema re-widens.
+    out = _json.coerce_result(schema, {"balance": 41 + 1, "note": "x"})
+    assert isinstance(out["balance"], BigInt)
+    assert int(out["balance"]) == 42
+    # zero cost when no bigint leaf: schema is None in ExposedFn and
+    # coerce_result is never invoked — but a non-matching shape passes
+    # through untouched either way.
+    assert _json.coerce_result(schema, {"balance": "notint", "note": "x"}) == {
+        "balance": "notint",
+        "note": "x",
+    }

@@ -381,18 +381,32 @@ def _json_type(value: Any) -> str:
 
 def _schema_name(annotation: Any) -> str:
     """The type as the codegen schema names it (protocol §8 data.errors):
-    primitives by their schema type, dataclasses and enums by class name,
-    everything unmodelled by its schema type string."""
+    primitives by their schema type, dataclasses, TypedDicts and enums by
+    class name, everything unmodelled by its schema type string."""
     from pylair._schema import schema_of
 
     if inspect.isclass(annotation) and (
-        dataclasses.is_dataclass(annotation) or issubclass(annotation, enum.Enum)
+        dataclasses.is_dataclass(annotation)
+        or is_typed_dict_class(annotation)
+        or issubclass(annotation, enum.Enum)
     ):
         return annotation.__name__
     try:
         return str(schema_of(annotation).get("type", "any"))
     except Exception:  # noqa: BLE001 - naming is cosmetic; never fail validation
         return _typename(annotation)
+
+
+def is_typed_dict_class(annotation: Any) -> bool:
+    from pylair._schema import is_typed_dict_class as _is
+
+    return _is(annotation)
+
+
+def strip_extras(annotation: Any) -> Any:
+    from pylair._schema import strip_extras as _strip
+
+    return _strip(annotation)
 
 
 def _fail(expected: str, value: Any, path: str, msg: str | None = None) -> None:
@@ -514,6 +528,62 @@ def coerce(annotation: Any, value: Any, _path: str = "args") -> Any:
             raise InvalidParams(f"{_typename(annotation)}: {e}", errors=e.errors) from e
         except Exception as e:
             raise InvalidParams(f"{_typename(annotation)}: {e}") from e
+
+    if inspect.isclass(annotation) and is_typed_dict_class(annotation):
+        # A TypedDict is a plain dict on the wire — there is no class to
+        # construct. Each value is coerced per its declared type; required
+        # keys must be present and unknown keys are REJECTED (stricter
+        # than dataclasses, whose extra keys are dropped — docs/codegen.md).
+        if not isinstance(value, dict):
+            raise InvalidParams(
+                f"expected object for {_typename(annotation)}, got {_short(value)}",
+                errors=[
+                    {
+                        "path": _path,
+                        "expected": annotation.__name__,
+                        "received": _json_type(value),
+                    }
+                ],
+            )
+        required = annotation.__required_keys__
+        known = required | annotation.__optional_keys__
+        for k, v in value.items():
+            if k not in known:
+                raise InvalidParams(
+                    f"{_typename(annotation)}: unknown key '{k}'",
+                    errors=[
+                        {
+                            "path": f"{_path}.{k}",
+                            "expected": "absent",
+                            "received": _json_type(v),
+                        }
+                    ],
+                )
+        hints = _resolved_hints(annotation)
+        for k in required:
+            if k not in value:
+                raise InvalidParams(
+                    f"{_typename(annotation)}: missing required key '{k}'",
+                    errors=[
+                        {
+                            "path": f"{_path}.{k}",
+                            "expected": _schema_name(strip_extras(hints.get(k, Any))),
+                            "received": "missing",
+                        }
+                    ],
+                )
+        try:
+            return {
+                k: coerce(
+                    strip_extras(hints.get(k, inspect.Parameter.empty)),
+                    v,
+                    f"{_path}.{k}",
+                )
+                for k, v in value.items()
+            }
+        except InvalidParams as e:
+            # The nested failure already carries its full wire path.
+            raise InvalidParams(f"{_typename(annotation)}: {e}", errors=e.errors) from e
 
     if origin in (list, set, frozenset) or annotation is list:
         if not isinstance(value, list):
@@ -825,9 +895,13 @@ def coerce_result(schema: dict[str, Any] | None, value: Any) -> Any:
                 out[k] = c
             return out if changed else value
         return value
-    if t == "dataclass":
+    if t in ("dataclass", "typeddict"):
         fields = {f["name"]: f.get("schema") for f in schema.get("fields") or ()}
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        if (
+            t == "dataclass"
+            and dataclasses.is_dataclass(value)
+            and not isinstance(value, type)
+        ):
             out = {}
             changed = False
             for f in dataclasses.fields(value):

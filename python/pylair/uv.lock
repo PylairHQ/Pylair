@@ -1200,6 +1200,7 @@ source = { editable = "." }
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "typing-extensions" },
 ]
 wrap = [
     { name = "gradio" },
@@ -1212,6 +1213,7 @@ wrap = [
 dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "typing-extensions", specifier = ">=4.12" },
 ]
 wrap = [
     { name = "gradio", specifier = ">=5,<6" },

@@ -28,12 +28,291 @@
             }
         },
         {
+            "name": "app_data_dir_env",
+            "kind": "sync",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "union",
+                "opts": [
+                    {
+                        "type": "str"
+                    },
+                    {
+                        "type": "none"
+                    }
+                ]
+            }
+        },
+        {
             "name": "bad_stream",
             "kind": "generator",
             "doc": "A stream whose second chunk can't be serialized.",
             "params": [],
             "returns": {
                 "type": "int"
+            }
+        },
+        {
+            "name": "bench_echo",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "s",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "bench_nested",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "shape",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "dataclass",
+                        "name": "BenchShape",
+                        "fields": [
+                            {
+                                "name": "name",
+                                "required": true,
+                                "schema": {
+                                    "type": "str"
+                                }
+                            },
+                            {
+                                "name": "origin",
+                                "required": true,
+                                "schema": {
+                                    "type": "dataclass",
+                                    "name": "BenchPoint",
+                                    "fields": [
+                                        {
+                                            "name": "x",
+                                            "required": true,
+                                            "schema": {
+                                                "type": "float"
+                                            }
+                                        },
+                                        {
+                                            "name": "y",
+                                            "required": true,
+                                            "schema": {
+                                                "type": "float"
+                                            }
+                                        },
+                                        {
+                                            "name": "label",
+                                            "required": true,
+                                            "schema": {
+                                                "type": "str"
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "name": "points",
+                                "required": true,
+                                "schema": {
+                                    "type": "list",
+                                    "items": {
+                                        "type": "dataclass",
+                                        "name": "BenchPoint",
+                                        "fields": [
+                                            {
+                                                "name": "x",
+                                                "required": true,
+                                                "schema": {
+                                                    "type": "float"
+                                                }
+                                            },
+                                            {
+                                                "name": "y",
+                                                "required": true,
+                                                "schema": {
+                                                    "type": "float"
+                                                }
+                                            },
+                                            {
+                                                "name": "label",
+                                                "required": true,
+                                                "schema": {
+                                                    "type": "str"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                            {
+                                "name": "meta",
+                                "required": true,
+                                "schema": {
+                                    "type": "dict",
+                                    "keys": {
+                                        "type": "str"
+                                    },
+                                    "values": {
+                                        "type": "int"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "bench_noop",
+            "kind": "sync",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "bigint_add",
+            "kind": "sync",
+            "doc": "Exact big-int arithmetic over the tag \u2014 codegen maps the\nannotation to TS bigint. a + b is a plain int (int ops drop the\nsubclass); the declared return type re-tags it.",
+            "params": [
+                {
+                    "name": "a",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "bigint"
+                    }
+                },
+                {
+                    "name": "b",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "bigint"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "bigint"
+            }
+        },
+        {
+            "name": "bigint_echo",
+            "kind": "sync",
+            "doc": "Unannotated passthrough: a $bigint param decodes to pylair.BigInt\nand re-encodes as the tag on the way out.",
+            "params": [
+                {
+                    "name": "value",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "any"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "bigint_list",
+            "kind": "sync",
+            "doc": "Each element comes back a plain int (x + 1 drops the subclass);\nlist[BigInt] tags them element-wise.",
+            "params": [
+                {
+                    "name": "xs",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "list",
+                        "items": {
+                            "type": "bigint"
+                        }
+                    }
+                }
+            ],
+            "returns": {
+                "type": "list",
+                "items": {
+                    "type": "bigint"
+                }
+            }
+        },
+        {
+            "name": "bigint_maybe",
+            "kind": "sync",
+            "doc": "Optional[BigInt]: a plain int tags, None stays null.",
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "union",
+                "opts": [
+                    {
+                        "type": "bigint"
+                    },
+                    {
+                        "type": "none"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "bigint_stream",
+            "kind": "generator",
+            "doc": "AsyncGenerator[BigInt]: base + i is a plain int per chunk \u2014 the\nyield schema tags it (also beyond 2^63).",
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                },
+                {
+                    "name": "base",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "bigint"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "bigint"
+            }
+        },
+        {
+            "name": "bigint_weird",
+            "kind": "sync",
+            "doc": "A non-int under a BigInt declaration keeps its own encoding \u2014\nno silent str/float conversion.",
+            "params": [],
+            "returns": {
+                "type": "bigint"
             }
         },
         {
@@ -55,7 +334,52 @@
             }
         },
         {
+            "name": "boom",
+            "kind": "sync",
+            "doc": "Raises on purpose - error-field tests drive the traceback path.",
+            "params": [],
+            "returns": {
+                "type": "none"
+            }
+        },
+        {
             "name": "counter",
+            "kind": "generator",
+            "doc": null,
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "deep",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "deep_stream",
             "kind": "generator",
             "doc": null,
             "params": [
@@ -99,6 +423,121 @@
             }
         },
         {
+            "name": "echo_opts",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "opts",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "typeddict",
+                        "name": "SearchOpts",
+                        "fields": [
+                            {
+                                "name": "limit",
+                                "required": true,
+                                "schema": {
+                                    "type": "int"
+                                }
+                            },
+                            {
+                                "name": "label",
+                                "required": false,
+                                "schema": {
+                                    "type": "str"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "typeddict",
+                "name": "SearchOpts",
+                "fields": [
+                    {
+                        "name": "limit",
+                        "required": true,
+                        "schema": {
+                            "type": "int"
+                        }
+                    },
+                    {
+                        "name": "label",
+                        "required": false,
+                        "schema": {
+                            "type": "str"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "first_opt",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "options",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "list",
+                        "items": {
+                            "type": "typeddict",
+                            "name": "SearchOpts",
+                            "fields": [
+                                {
+                                    "name": "limit",
+                                    "required": true,
+                                    "schema": {
+                                        "type": "int"
+                                    }
+                                },
+                                {
+                                    "name": "label",
+                                    "required": false,
+                                    "schema": {
+                                        "type": "str"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ],
+            "returns": {
+                "type": "union",
+                "opts": [
+                    {
+                        "type": "typeddict",
+                        "name": "SearchOpts",
+                        "fields": [
+                            {
+                                "name": "limit",
+                                "required": true,
+                                "schema": {
+                                    "type": "int"
+                                }
+                            },
+                            {
+                                "name": "label",
+                                "required": false,
+                                "schema": {
+                                    "type": "str"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "type": "none"
+                    }
+                ]
+            }
+        },
+        {
             "name": "infinite",
             "kind": "generator",
             "doc": null,
@@ -114,6 +553,32 @@
             "params": [],
             "returns": {
                 "type": "int"
+            }
+        },
+        {
+            "name": "int_or_str",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "v",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "int"
+                            },
+                            {
+                                "type": "str"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
             }
         },
         {
@@ -140,6 +605,98 @@
             ],
             "returns": {
                 "type": "int"
+            }
+        },
+        {
+            "name": "isolated_blob",
+            "kind": "isolated",
+            "doc": "A Blob made in an isolated worker \u2014 the registration must ride\nback in the payload and the parent must bind it to this task.",
+            "params": [],
+            "returns": {
+                "type": "dict",
+                "keys": {
+                    "type": "any"
+                },
+                "values": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "isolated_deep",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "isolated_env_flag",
+            "kind": "isolated",
+            "doc": "Report the env the isolated WORKER actually inherited \u2014 the proof\nthat release-spec vars like PYTHONDONTWRITEBYTECODE reach workers\nspawned by the runtime, not just the runtime itself.",
+            "params": [],
+            "returns": {
+                "type": "dict",
+                "keys": {
+                    "type": "any"
+                },
+                "values": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "isolated_maybe",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "x",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "isolated_pick",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "c",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
             }
         },
         {
@@ -171,6 +728,121 @@
                     "required": true,
                     "schema": {
                         "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "isolated_spy",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "a",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "loop_block",
+            "kind": "async",
+            "doc": "Blocks the EVENT LOOP with a sync sleep - the pathological\n\"blocking code inside an async def\" case: inbound data floods while\nthe loop is wedged and control must still reach dispatch.",
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "make_blob",
+            "kind": "sync",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "make_blob_copy",
+            "kind": "sync",
+            "doc": "copy=True forces the plain-copy path even when a hardlink would\nwork \u2014 the test asserts a second inode, not a shared one.",
+            "params": [
+                {
+                    "name": "src",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "make_blob_path",
+            "kind": "sync",
+            "doc": "from_path \u2014 hardlink into the blob dir (source lives beside the\ndir in the test so the hardlink path provably applies).",
+            "params": [
+                {
+                    "name": "tmp_name",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "maybe",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "x",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "str"
                     }
                 }
             ],
@@ -307,6 +979,24 @@
             }
         },
         {
+            "name": "passthrough",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "x",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "any"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
             "name": "pick",
             "kind": "sync",
             "doc": null,
@@ -372,6 +1062,120 @@
             }
         },
         {
+            "name": "read_wallet",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "w",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "typeddict",
+                        "name": "Wallet",
+                        "fields": [
+                            {
+                                "name": "balance",
+                                "required": true,
+                                "schema": {
+                                    "type": "bigint"
+                                }
+                            },
+                            {
+                                "name": "owner",
+                                "required": true,
+                                "schema": {
+                                    "type": "dataclass",
+                                    "name": "Point",
+                                    "fields": [
+                                        {
+                                            "name": "x",
+                                            "required": true,
+                                            "schema": {
+                                                "type": "float"
+                                            }
+                                        },
+                                        {
+                                            "name": "y",
+                                            "required": true,
+                                            "schema": {
+                                                "type": "float"
+                                            }
+                                        },
+                                        {
+                                            "name": "label",
+                                            "required": false,
+                                            "schema": {
+                                                "type": "str"
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "name": "note",
+                                "required": false,
+                                "schema": {
+                                    "type": "str"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "typeddict",
+                "name": "Wallet",
+                "fields": [
+                    {
+                        "name": "balance",
+                        "required": true,
+                        "schema": {
+                            "type": "bigint"
+                        }
+                    },
+                    {
+                        "name": "owner",
+                        "required": true,
+                        "schema": {
+                            "type": "dataclass",
+                            "name": "Point",
+                            "fields": [
+                                {
+                                    "name": "x",
+                                    "required": true,
+                                    "schema": {
+                                        "type": "float"
+                                    }
+                                },
+                                {
+                                    "name": "y",
+                                    "required": true,
+                                    "schema": {
+                                        "type": "float"
+                                    }
+                                },
+                                {
+                                    "name": "label",
+                                    "required": false,
+                                    "schema": {
+                                        "type": "str"
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "name": "note",
+                        "required": false,
+                        "schema": {
+                            "type": "str"
+                        }
+                    }
+                ]
+            }
+        },
+        {
             "name": "roundtrip",
             "kind": "sync",
             "doc": null,
@@ -390,12 +1194,136 @@
             }
         },
         {
+            "name": "shared_blob",
+            "kind": "sync",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "sigterm_ignoring_sleep",
+            "kind": "isolated",
+            "doc": "Sleeps while ignoring SIGTERM: the kill path must burn the full\nSIGTERM grace and finish via SIGKILL (POSIX semantics only).",
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "sigterm_immune",
+            "kind": "isolated",
+            "doc": "Worker that ignores SIGTERM and sleeps: its terminate path must\nwait the whole ISOLATED_GRACE_S before SIGKILL lands. Used to prove\na slow kill doesn't stall the dispatch lane.",
+            "params": [
+                {
+                    "name": "ready_file",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "sized_blob",
+            "kind": "sync",
+            "doc": "A Blob of exactly n bytes \u2014 the crate's limit tests drive the\nregistry caps (per-blob, generation total, per-window share) with\nsizes they choose instead of make_blob's fixed payload.",
+            "params": [
+                {
+                    "name": "n",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
             "name": "sleep_forever",
             "kind": "async",
             "doc": null,
             "params": [],
             "returns": {
                 "type": "none"
+            }
+        },
+        {
+            "name": "spy",
+            "kind": "sync",
+            "doc": null,
+            "params": [
+                {
+                    "name": "a",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "spy_count",
+            "kind": "sync",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "stream_blob",
+            "kind": "generator",
+            "doc": "One scalar chunk, then a Blob chunk \u2014 ordering must hold for\nstream.chunk frames exactly as for responses (\u00a73).",
+            "params": [],
+            "returns": {
+                "type": "any"
+            }
+        },
+        {
+            "name": "stream_mixed_blobs",
+            "kind": "generator",
+            "doc": "Chunk 1 carries one blob; chunk 2 carries three \u2014 the host's\norphan-release must free the two that registered inside the\nrefused chunk while the delivered chunk's handle stays live.",
+            "params": [],
+            "returns": {
+                "type": "any"
             }
         },
         {
@@ -414,6 +1342,464 @@
             ],
             "returns": {
                 "type": "str"
+            }
+        },
+        {
+            "name": "three_blobs",
+            "kind": "sync",
+            "doc": "One result carrying three $blob tags \u2014 three registers ahead of\none terminal. The orphan-release test breaks the last register and\nasserts the first two never linger.",
+            "params": [],
+            "returns": {
+                "type": "list",
+                "items": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "unbounded_int",
+            "kind": "sync",
+            "doc": "A plain int past \u00b12^53 \u2014 int annotations never tag, so this still\nfails the call with the error naming pylair.BigInt.",
+            "params": [],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm2_sleep",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "warm_app_data_dir_env",
+            "kind": "isolated",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "union",
+                "opts": [
+                    {
+                        "type": "str"
+                    },
+                    {
+                        "type": "none"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "warm_blob",
+            "kind": "isolated",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "dict",
+                "keys": {
+                    "type": "any"
+                },
+                "values": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "warm_break_witness",
+            "kind": "isolated",
+            "doc": "Installs its own interrupt handler that writes `witness` before\nraising KeyboardInterrupt \u2014 a delivered-signal proof: the file can\nonly exist if the interrupt actually reached this worker. `started`\nis a running-gate marker the test polls before cancelling.",
+            "params": [
+                {
+                    "name": "witness",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                },
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "started",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "warm_crash_stderr",
+            "kind": "isolated",
+            "doc": "Write a marker to stderr then die hard \u2014 the member's bounded\nstderr tail must carry it into WORKER_DIED.",
+            "params": [
+                {
+                    "name": "marker",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "none"
+            }
+        },
+        {
+            "name": "warm_gated_result",
+            "kind": "isolated",
+            "doc": "Write `marker` (carrying this worker's pid) then return a payload\nbig enough that building and writing its frame takes measurable\ntime \u2014 the interrupt-vs-completion race test lands signals inside\nexactly that window.",
+            "params": [
+                {
+                    "name": "marker",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                },
+                {
+                    "name": "size",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "int"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "dict",
+                "keys": {
+                    "type": "any"
+                },
+                "values": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "warm_gated_start",
+            "kind": "isolated",
+            "doc": "Poll `gate` before doing the real work \u2014 the call sits inside the\nraise window doing nothing until the test releases it. Returns the\nserving pid so a reuse compare needs no files at all; the pidfile\nalso lands in `finally` \u2014 an interrupt firing at the earliest legal\npoint (fn entry, before any write) still records which member ran.",
+            "params": [
+                {
+                    "name": "gate",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "float"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm_immune_fastgrace",
+            "kind": "isolated",
+            "doc": "Same ignoring worker with a 150 ms grace \u2014 proves the configured\nbound reaches the stuck path far faster than the 3 s default.",
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "warm_immune_then_crash",
+            "kind": "isolated",
+            "doc": "SIGINT-immune member that dies on its own mid-grace \u2014 the cancel\nkill path then hits a zombie's group (EPERM on macOS), the exact\nchain behind the lost-terminal wedge.",
+            "params": [
+                {
+                    "name": "die_after",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "none"
+            }
+        },
+        {
+            "name": "warm_interrupt_immune",
+            "kind": "isolated",
+            "doc": "Ignores the interrupt signal entirely \u2014 the stuck path: the grace\nexpires and the kill fallback runs.",
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "warm_mark",
+            "kind": "isolated",
+            "doc": "Append to a module global \u2014 a later call sees it, which proves both\nstate persistence (same process) and FIFO order inside the pool.",
+            "params": [
+                {
+                    "name": "tag",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "str"
+                    }
+                },
+                {
+                    "name": "delay",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "float"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "list",
+                "items": {
+                    "type": "any"
+                }
+            }
+        },
+        {
+            "name": "warm_maybe_crash",
+            "kind": "isolated",
+            "doc": "Hard-die on demand \u2014 WORKER_DIED and crash-loop proofs. With\ncrash=False it doubles as the success that resets the death count.",
+            "params": [
+                {
+                    "name": "crash",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "bool"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm_pid",
+            "kind": "isolated",
+            "doc": null,
+            "params": [],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm_sleep",
+            "kind": "isolated",
+            "doc": null,
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                },
+                {
+                    "name": "pidfile",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "union",
+                        "opts": [
+                            {
+                                "type": "str"
+                            },
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "returns": {
+                "type": "str"
+            }
+        },
+        {
+            "name": "warm_ttl_maybe_crash",
+            "kind": "isolated",
+            "doc": "Hard-die on demand inside a TTL pool \u2014 proves an idle reap burns\nno crash-loop token: two real deaths after a reap must NOT stop the\npool (it would if the reap had counted).",
+            "params": [
+                {
+                    "name": "crash",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": false,
+                    "schema": {
+                        "type": "bool"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm_ttl_pid",
+            "kind": "isolated",
+            "doc": "Identity witness for the idle reap: same pid = member survived.",
+            "params": [],
+            "returns": {
+                "type": "int"
+            }
+        },
+        {
+            "name": "warm_ttl_sleep",
+            "kind": "isolated",
+            "doc": "A call longer than the TTL \u2014 the member must not be reaped while\nbusy; returning the serving pid doubles as the reuse witness.",
+            "params": [
+                {
+                    "name": "seconds",
+                    "kind": "POSITIONAL_OR_KEYWORD",
+                    "required": true,
+                    "schema": {
+                        "type": "float"
+                    }
+                }
+            ],
+            "returns": {
+                "type": "int"
             }
         },
         {

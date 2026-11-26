@@ -99,6 +99,69 @@ test("nested dataclass fields are emitted", () => {
   assert.match(ts, /export interface Inner \{\n  v: number;\n\}/);
 });
 
+test("typeddicts emit interfaces with exact wire keys", () => {
+  const opts = {
+    type: "typeddict",
+    name: "SearchOpts",
+    fields: [
+      { name: "limit", required: true, schema: { type: "int" } },
+      { name: "label", required: false, schema: { type: "str" } },
+      // valid TS identifiers emit bare even when reserved — property
+      // names can't collide; wire fidelity beats cosmetic renaming.
+      { name: "class", required: false, schema: { type: "str" } },
+    ],
+  };
+  const ts = emit(M([FN({ params: [{ name: "o", kind: "P", required: true, schema: opts }] })]), "m");
+  assert.match(ts, /export interface SearchOpts \{\n  limit: number;\n  label\?: string;\n  class\?: string;\n\}/);
+});
+
+test("typeddict keys that are not identifiers emit quoted", () => {
+  // Functional-syntax TypedDicts can carry arbitrary string keys —
+  // they are wire names, so quoting keeps them exact.
+  const weird = {
+    type: "typeddict",
+    name: "Weird",
+    fields: [
+      { name: "foo-bar", required: true, schema: { type: "int" } },
+      { name: "9lives", required: false, schema: { type: "str" } },
+      { name: "with space", required: false, schema: { type: "bool" } },
+    ],
+  };
+  const ts = emit(M([FN({ returns: weird })]), "m");
+  assert.match(ts, /"foo-bar": number;/);
+  assert.match(ts, /"9lives"\?: string;/);
+  assert.match(ts, /"with space"\?: boolean;/);
+});
+
+test("typeddicts dedupe like dataclasses, across kinds", () => {
+  const opts = {
+    type: "typeddict",
+    name: "Opts",
+    fields: [{ name: "limit", required: true, schema: { type: "int" } }],
+  };
+  const inner = {
+    type: "typeddict",
+    name: "Inner",
+    fields: [{ name: "v", required: true, schema: { type: "int" } }],
+  };
+  const outer = {
+    type: "typeddict",
+    name: "Outer",
+    fields: [{ name: "inner", required: true, schema: inner }],
+  };
+  const ts = emit(
+    M([
+      FN({ name: "a", params: [{ name: "o", kind: "P", required: true, schema: opts }], returns: opts }),
+      FN({ name: "b", returns: opts }),
+      FN({ name: "c", returns: outer }),
+    ]),
+    "m",
+  );
+  assert.equal(ts.match(/export interface Opts/g).length, 1);
+  assert.match(ts, /export interface Outer \{\n  inner: Inner;\n\}/);
+  assert.match(ts, /export interface Inner \{\n  v: number;\n\}/);
+});
+
 test("type mapping", () => {
   const cases = [
     [{ type: "list", items: { type: "int" } }, "number\\[\\]"],
@@ -293,6 +356,15 @@ test("generated fixture compiles under tsc --strict", () => {
       { name: "y", required: false, schema: { type: "float" } },
     ],
   };
+  const tdict = {
+    type: "typeddict",
+    name: "SearchOpts",
+    fields: [
+      { name: "limit", required: true, schema: { type: "bigint" } },
+      { name: "label", required: false, schema: { type: "str" } },
+      { name: "point", required: false, schema: dataclass },
+    ],
+  };
   const ts = emit(
     M([
       FN({
@@ -313,6 +385,11 @@ test("generated fixture compiles under tsc --strict", () => {
           { name: "p", kind: "P", required: true, schema: dataclass },
         ],
         returns: { type: "union", opts: [dataclass, { type: "none" }] },
+      }),
+      FN({
+        name: "search",
+        params: [{ name: "opts", kind: "P", required: true, schema: tdict }],
+        returns: { type: "union", opts: [tdict, { type: "none" }] },
       }),
       FN({ name: "call" }),
       FN({ name: "stream", kind: "generator", returns: { type: "bytes" } }),

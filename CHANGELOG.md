@@ -8,6 +8,24 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **TypedDict support in the typed bridge.** A `TypedDict` (typing or
+  typing_extensions) used as a param, return or nested field is now a
+  first-class wire shape: codegen emits a deduped TS `interface` with
+  optional keys as `key?: T` and keys kept exactly as written (they are
+  wire names — no camelCasing, reserved words need no renaming, keys
+  that aren't valid identifiers emit quoted). `total=False`,
+  `Required[]`/`NotRequired[]` and inheritance between TypedDicts are
+  respected, `ReadOnly[]` is accepted with no runtime effect. Input
+  coercion validates the object per the declared key types (nested
+  dataclasses, `BigInt` and datetimes work inside) and rejects missing
+  required keys, wrong types — and unknown keys, stricter than
+  dataclasses on purpose: a TypedDict is a closed wire shape — with the
+  exact `error.data.errors` path (`args.opts.limit`). The value stays a
+  plain dict, and the declared return type drives `BigInt` widening
+  inside it like any other container. Generic subscription
+  (`Page[int]`) and recursive TypedDicts fail decoration with a clear
+  unsupported error rather than degrading silently.
+
 - **Errors that explain themselves.** Python exceptions in exposed
   functions now carry the formatted traceback in `error.data.traceback`
   — dev builds only, since the host opts in under

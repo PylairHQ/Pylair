@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import NotRequired, Required, TypedDict
 
 import pylair
 from pylair import expose
@@ -20,6 +21,39 @@ class Point:
     x: float
     y: float
     label: str = ""
+
+
+class SearchOpts(TypedDict, total=False):
+    """A partial-options TypedDict: `limit` is required even though the
+    class is total=False; `label` is optional."""
+
+    limit: Required[int]
+    label: str
+
+
+class Wallet(TypedDict):
+    """A TypedDict mixing a BigInt leaf and a dataclass member."""
+
+    balance: pylair.BigInt
+    owner: Point
+    note: NotRequired[str]
+
+
+@expose
+def echo_opts(opts: SearchOpts) -> SearchOpts:
+    return opts
+
+
+@expose
+def first_opt(options: list[SearchOpts]) -> SearchOpts | None:
+    return options[0] if options else None
+
+
+@expose
+def read_wallet(w: Wallet) -> Wallet:
+    # balance + 1 is a PLAIN int (int arithmetic drops the subclass) —
+    # the declared return type must re-widen it for the wire tag.
+    return {"balance": w["balance"] + 1, "owner": w["owner"]}
 
 
 class Color(str, enum.Enum):
