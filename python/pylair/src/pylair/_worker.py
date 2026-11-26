@@ -25,10 +25,10 @@ import signal
 import sys
 import threading
 import time
-import traceback
 
 from pylair import _json, _transport
 from pylair import _protocol as proto
+from pylair._devtb import format_dev_traceback as _devtb
 from pylair._expose import ExposedFn, exposed_functions
 
 
@@ -172,14 +172,19 @@ def _install_interrupt() -> None:
 
 
 def _exception_payload(e: BaseException) -> dict:
-    """The generic error body for failures outside a mapped type."""
+    """The generic error body for failures outside a mapped type.
+
+    The traceback rides only when the host opted in (dev builds) — a
+    release app must never leak source paths or code into end-user
+    machines, no matter which worker shape raised (protocol §8)."""
+    data: dict = {"type": type(e).__name__}
+    tb = _devtb(e)
+    if tb is not None:
+        data["traceback"] = tb
     return {
         "error": {
             "message": f"{type(e).__name__}: {e}",
-            "data": {
-                "type": type(e).__name__,
-                "traceback": traceback.format_exc(limit=20),
-            },
+            "data": data,
         }
     }
 

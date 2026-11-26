@@ -158,8 +158,36 @@ All messages carry `"jsonrpc": "2.0"`.
 {"jsonrpc":"2.0","id":3,"error":{"code":-32010,"message":"task cancelled","data":{...}}}
 ```
 
-`id` echoes the request. `error.data` may carry a Python traceback and
-a `type` string (the Python exception class) for diagnostics.
+`id` echoes the request. `error.data` carries a `type` string (the
+Python exception class) for diagnostics, plus optional self-explaining
+fields (all absent means older runtime — old clients must ignore fields
+they don't know):
+
+- `data.traceback` (string) — the formatted Python traceback, trimmed
+  to the app's own frames plus the raise site (pylair-internal frames
+  dropped) and capped at about 8 KB. **Dev builds only**: the runtime
+  includes it only when launched with `PYLAIR_DEV_TRACEBACKS=1`, which
+  the host sets exclusively under `cfg(debug_assertions)`. Release
+  builds additionally strip the variable from the child's environment
+  (both any spec-carried value and inheritance from the launching
+  process), so even a release app started from a dev shell never
+  carries it — and since isolated/warm workers inherit the runtime's
+  environment, they can't re-acquire it either. Source paths and code
+  can't leak onto end-user machines. Applies to exceptions raised by
+  exposed functions, in both `call` and `stream`.
+- `data.suggestions` (string array) — on `FUNCTION_NOT_FOUND`, up to 3
+  close matches among the exposed names (best first). Safe in all
+  builds: the names are already public via the `exposes` manifest.
+  When present, `message` ends with `did you mean '<name>'?`.
+- `data.errors` (array) — on `INVALID_PARAMS`, a list of
+  `{path, expected, received}` describing each validation failure:
+  `path` locates the offending value (`args.items[2].name` — dotted
+  fields, `[i]` indices, rooted at the parameter name), `expected` is
+  the declared type as the codegen schema names it (`"int"`, `"str"`,
+  a dataclass or enum's class name, or `absent` for an unknown
+  keyword), and `received` is the received value's JSON **type** only
+  (`string`/`number`/`boolean`/`array`/`object`/`null`/`missing`) —
+  never the value itself.
 
 ### Notifications
 
@@ -614,9 +642,9 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 |---|---|---|
 | -32700 | PARSE_ERROR | malformed JSON / bad frame |
 | -32600 | INVALID_REQUEST | wrong shape, missing fields |
-| -32601 | FUNCTION_NOT_FOUND | `fn` not in `@expose` registry |
-| -32602 | INVALID_PARAMS | input fails signature validation |
-| -32000 | INTERNAL | uncaught Python exception (`data.type` = class) |
+| -32601 | FUNCTION_NOT_FOUND | `fn` not in `@expose` registry (`data.suggestions` may name close matches) |
+| -32602 | INVALID_PARAMS | input fails signature validation (`data.errors` locates each failure) |
+| -32000 | INTERNAL | uncaught Python exception (`data.type` = class; `data.traceback` in dev builds) |
 | -32001 | TASK_NOT_FOUND | cancel/shutdown for unknown `task` |
 | -32010 | TASK_CANCELLED | task ended via cancel (also stream terminus) |
 | -32011 | WORKER_DIED | isolated worker subprocess exited non-zero |

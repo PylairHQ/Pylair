@@ -50,6 +50,56 @@ export class PythonError extends Error {
     this.code = code;
     this.data = data;
   }
+
+  /** Formatted Python traceback of the failure - present only in dev
+   * builds (the host opts in under cfg(debug_assertions)); release
+   * builds never carry it, so source paths can't leak to end users. */
+  get traceback(): string | undefined {
+    const d = this.data as { traceback?: unknown } | undefined;
+    return typeof d?.traceback === "string" ? d.traceback : undefined;
+  }
+
+  /** Close matches for a FUNCTION_NOT_FOUND call, best first (up to 3),
+   * from the exposed names - already public via the exposes manifest. */
+  get suggestions(): string[] {
+    const d = this.data as { suggestions?: unknown } | undefined;
+    return Array.isArray(d?.suggestions) ? (d.suggestions as string[]) : [];
+  }
+
+  /** Structured INVALID_PARAMS failures: path ("args.items[2].name"),
+   * expected (schema type name), received (the JSON type, never the
+   * value). Empty for any other error. */
+  get details(): Array<{ path: string; expected: string; received: string }> {
+    const d = this.data as { errors?: unknown } | undefined;
+    return Array.isArray(d?.errors)
+      ? (d.errors as Array<{ path: string; expected: string; received: string }>)
+      : [];
+  }
+}
+
+/** Protocol error codes (docs/protocol-v1.md §8). Named constants so
+ * callers never write the literals - TASK_CANCELLED replaces the
+ * -32010 scattered through older code. */
+export const ErrorCode = {
+  PARSE_ERROR: -32700,
+  INVALID_REQUEST: -32600,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_PARAMS: -32602,
+  INTERNAL: -32000,
+  TASK_NOT_FOUND: -32001,
+  TASK_CANCELLED: -32010,
+  WORKER_DIED: -32011,
+  RUNTIME_WEDGED: -32012,
+  LIMIT_EXCEEDED: -32040,
+  PERMISSION_DENIED: -32050,
+  UPDATE_FAILED: -32060,
+} as const;
+
+/** True when the rejection is a task cancellation - the caller's own
+ * AbortController or a runtime shutdown, never a failure worth
+ * reporting. Works on any thrown value, not just PythonError. */
+export function isCancelled(e: unknown): boolean {
+  return e instanceof PythonError && e.code === ErrorCode.TASK_CANCELLED;
 }
 
 /** Protocol code for limit rejections (docs/protocol-v1.md §8). */
@@ -128,10 +178,19 @@ export class UpdateError extends PythonError {
 
 /** Build the typed error for a wire code. */
 function mkError(code: number, message: string, data?: unknown): PythonError {
-  if (code === LIMIT_EXCEEDED) return new LimitExceededError(message, data);
-  if (code === PERMISSION_DENIED) return new PermissionDeniedError(message, data);
-  if (code === UPDATE_FAILED) return new UpdateError(message, data);
-  return new PythonError(code, message, data);
+  const err =
+    code === LIMIT_EXCEEDED
+      ? new LimitExceededError(message, data)
+      : code === PERMISSION_DENIED
+        ? new PermissionDeniedError(message, data)
+        : code === UPDATE_FAILED
+          ? new UpdateError(message, data)
+          : new PythonError(code, message, data);
+  // A traceback only exists in dev builds (the host gates it), so its
+  // presence is itself the dev signal: surface it in Python's own format
+  // instead of leaving it buried in .data.
+  if (err.traceback) console.error(err.traceback);
+  return err;
 }
 
 /**

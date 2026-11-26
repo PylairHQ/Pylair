@@ -8,6 +8,21 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Errors that explain themselves.** Python exceptions in exposed
+  functions now carry the formatted traceback in `error.data.traceback`
+  — dev builds only, since the host opts in under
+  `cfg(debug_assertions)` via `PYLAIR_DEV_TRACEBACKS` and release
+  builds never leak source paths — trimmed to the app's own frames and
+  the client's `console.error` shows it in Python's own format.
+  Calling a misspelled function returns `data.suggestions` with close
+  matches and a message ending `did you mean 'x'?`; parameter
+  validation failures carry `data.errors`, a structured list of
+  `{path, expected, received}` entries locating the exact offending
+  field (`args.items[2].name`) without ever echoing the value. The
+  client types all three on `PythonError` and gains `isCancelled(e)`
+  plus the `ErrorCode` constants — the template's cancellation check no
+  longer writes the `-32010` literal.
+
 ## npm-v0.1.0-rc.32 (2026-11-26)
 
 Crate `0.1.0-rc.25`, `pylair 0.1.0rc18` on PyPI, npm `0.1.0-rc.32`.

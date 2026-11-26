@@ -144,6 +144,27 @@ Each package versions independently across registries: the numbers
 won't match (`pylair` at `0.1.0rc18`, npm packages at `0.1.0-rc.32`, the
 crate at `0.1.0-rc.25`). Check each registry for its latest RC.
 
+## Debugging
+
+Errors from Python explain themselves (docs/protocol-v1.md §8):
+
+- **Exceptions carry tracebacks in dev builds.** An exposed function
+  that raises rejects with a `PythonError` whose `.traceback` is the
+  formatted Python traceback, trimmed to your own code's frames. The
+  client also prints it to the console in Python's format. The host
+  opts in via `PYLAIR_DEV_TRACEBACKS` under `cfg(debug_assertions)`
+  only — release builds never include tracebacks, so source paths
+  can't leak onto end-user machines.
+- **Typos suggest themselves.** Calling a misspelled function rejects
+  with `FUNCTION_NOT_FOUND`, a message ending `did you mean 'x'?`, and
+  `.suggestions` — up to three close matches among your exposed names.
+- **Parameter errors locate themselves.** `INVALID_PARAMS` rejections
+  carry `.details`: `{path, expected, received}` entries like
+  `args.items[2].name`, with `expected` as the annotated type and
+  `received` as the JSON type only (never the value).
+- Use `isCancelled(e)` instead of comparing error codes by hand —
+  cancellation is normal control flow, not a failure worth reporting.
+
 ## Documentation
 
 - [docs/](docs/): the index of guides and specs, including the

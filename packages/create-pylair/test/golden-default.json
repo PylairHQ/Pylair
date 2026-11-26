@@ -7,7 +7,7 @@
   "pyproject.toml": "e347c970fa82dcb70345bb4c373ac7dfa892d3ae3b6cf384b69e432be2c65f87",
   "README.md": "bbb360bcdeed2fc4b5bf3a9c9004e8b24c1f15abf781e92befd16ed1f8816093",
   "requirements.txt": "aad15b3777f3a5d696f11ad3f3693a04664de93b4e8a2399e44e4cce1adf5776",
-  "src/App.tsx": "1a1d25ad63dc80ea7f93317a7482c75447f2e1bb29b26c1b9d92aa4f13ca5df2",
+  "src/App.tsx": "c3726c032ffb8c898fe93bc6b845fdd2d8f7f460d13c8f1ee27685c8d460cd68",
   "src/main.tsx": "b7c4db84b2c8de2cb590aa3a7d73fe58dc942b96c6411b2e499b7a3d8e5384c8",
   "src/vite-env.d.ts": "65996936fbb042915f7b74a200fcdde7e410f32a669b1ab9597cfaa4b0faddb5",
   "src-tauri/build.rs": "487059eaf8a947b80f20a9aacac038a5047b2ad69d2401b827376c67d6fe847f",

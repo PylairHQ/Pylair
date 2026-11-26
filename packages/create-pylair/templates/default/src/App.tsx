@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { PythonError } from "@pylair/client";
+import { isCancelled } from "@pylair/client";
 import { count, hello } from "./api.generated";
 
 export default function App() {
@@ -21,8 +21,8 @@ export default function App() {
       }
       setNote("stream finished");
     } catch (e) {
-      // -32010 is the bridge cancellation outcome - anything else is real.
-      if (e instanceof PythonError && e.code === -32010) setNote("stream cancelled");
+      // cancellation is the caller's own doing - anything else is real.
+      if (isCancelled(e)) setNote("stream cancelled");
       else setNote(`stream error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setStreaming(false);
