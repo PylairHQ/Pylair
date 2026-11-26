@@ -783,3 +783,60 @@ async fn separated_transitions_never_coalesce() {
     h.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Dev reload: a FILE-CHANGE trigger while the breaker is parked open is
+/// one human "I fixed it" attempt, not a loop - park_failed treats any
+/// trigger change as Retry and the runtime respawns. (The running-case
+/// rule is unchanged: only the manual marker resets crash accounting.)
+#[tokio::test]
+async fn a_file_trigger_while_parked_respawns_the_runtime() {
+    let dir = std::env::temp_dir().join(format!("pylair-park-trig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let trigger = dir.join("restart-trigger");
+    std::fs::write(&trigger, "0 seed").unwrap();
+
+    let mut c = fast_config();
+    c.breaker_crashes = 1; // park after the first crash
+    c.restart_trigger = Some(trigger.clone());
+    let (events, rx) = tauri_plugin_pylair::supervisor::event_pair(64);
+    let h = spawn_h(spec(FAKE_APP_DIES), c, events);
+    let log = pump(rx);
+
+    wait_state(&h, State::Failed).await;
+    let starting_count = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    RuntimeEvent::StateChanged {
+                        to: State::Starting,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let before = starting_count();
+
+    // a file save, NOT the manual marker — the parked case must not care
+    std::fs::write(
+        &trigger,
+        format!(
+            "{} app.py",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ),
+    )
+    .unwrap();
+
+    assert!(
+        eventually(|| starting_count() > before).await,
+        "a file-change trigger while parked must respawn the runtime"
+    );
+    h.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

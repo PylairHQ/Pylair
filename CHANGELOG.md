@@ -25,9 +25,11 @@ what the GitHub releases page publishes.
   CLI), never in release builds.
 - **Manual restart**: `pylair restart` from a second terminal, or `r` +
   Enter in the dev terminal (line-buffered, TTY only). A manual restart
-  resets the crash-loop breaker — including while the breaker is parked
-  open, which is exactly when you need it. The inspector's dev-reload
-  entry reads "manual restart".
+  resets the crash-loop breaker — and while the breaker is parked open,
+  ANY trigger (a file save counts — one human attempt is not a loop)
+  brings the runtime back. An external `pylair restart` narrates in the
+  dev terminal (`reload: manual restart requested, restarting Python`).
+  The inspector's dev-reload entry reads "manual restart".
 
 ## npm-v0.1.0-rc.33 (2026-11-26)
 

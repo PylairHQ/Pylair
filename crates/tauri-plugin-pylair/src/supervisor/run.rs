@@ -78,17 +78,16 @@ pub fn strip_dev_runtime_status(spec: &mut crate::supervisor::config::SpawnSpec)
 /// reload visibility. Never honoured in release builds.
 pub const RUNTIME_STATUS_ENV: &str = "PYLAIR_RUNTIME_STATUS";
 
-/// Write `.pylair/runtime-status.json` for the dev CLI's reload lines.
-/// Dev-only twice over: the variable is only ever set by `pylair dev`,
-/// and the write is compiled out of release builds entirely — a release
-/// app launched from a dev shell must not gain the file.
-pub(crate) fn note_runtime_status(generation: u64, state: &str, exit_code: Option<i32>) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(path) = std::env::var_os(RUNTIME_STATUS_ENV) else {
-        return;
-    };
+/// Write one runtime-status JSON object to `path` — the pure writer the
+/// dev CLI's reload lines consume. Kept pure (explicit path, no env) so
+/// tests exercise it without touching process state.
+pub(crate) fn write_runtime_status(
+    path: &std::path::Path,
+    generation: u64,
+    state: &str,
+    exit_code: Option<i32>,
+    detail: Option<&str>,
+) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -96,11 +95,29 @@ pub(crate) fn note_runtime_status(generation: u64, state: &str, exit_code: Optio
     let code = exit_code
         .map(|c| c.to_string())
         .unwrap_or_else(|| "null".into());
+    let detail = detail
+        .map(|d| format!("{:?}", d)) // debug-format quotes+escapes as JSON string
+        .unwrap_or_else(|| "null".into());
     let body = format!(
-        "{{\"generation\":{generation},\"state\":\"{state}\",\"exit_code\":{code},\"ts\":{ts}}}"
+        "{{\"generation\":{generation},\"state\":\"{state}\",\"exit_code\":{code},\"detail\":{detail},\"ts\":{ts}}}"
     );
     // A nicety like the codegen status file: never a reason to break the loop.
     let _ = std::fs::write(path, body);
+}
+
+impl Supervisor {
+    /// The reload-visibility write, when this dev session carries the
+    /// status file at all (debug builds, `PYLAIR_RUNTIME_STATUS` set).
+    pub(crate) fn note_runtime_status(
+        &self,
+        state: &str,
+        exit_code: Option<i32>,
+        detail: Option<&str>,
+    ) {
+        if let Some(path) = &self.config.runtime_status_path {
+            write_runtime_status(path, self.generation, state, exit_code, detail);
+        }
+    }
 }
 
 pub(super) fn classify_pong(stale: Duration, kill: Option<Duration>) -> PongVerdict {
@@ -408,8 +425,8 @@ impl Supervisor {
         let from = *self.state_tx.borrow();
         if from != to {
             match to {
-                State::Starting => note_runtime_status(self.generation, "starting", None),
-                State::Ready => note_runtime_status(self.generation, "ready", None),
+                State::Starting => self.note_runtime_status("starting", None, None),
+                State::Ready => self.note_runtime_status("ready", None, None),
                 _ => {}
             }
             self.health.lock().unwrap().note_transition();
@@ -590,6 +607,7 @@ impl Supervisor {
                     self.health.lock().unwrap().note_generation(self.generation);
                 }
                 ExitCause::Fatal(reason) => {
+                    self.note_runtime_status("failed", None, Some(&reason));
                     self.health
                         .lock()
                         .unwrap()
@@ -659,7 +677,7 @@ impl Supervisor {
                                     self.config.breaker_window
                                 ),
                             });
-                        note_runtime_status(self.generation, "breaker_open", None);
+                        self.note_runtime_status("breaker_open", None, None);
                         self.set_state(
                             State::Failed,
                             format!(
@@ -710,7 +728,7 @@ impl Supervisor {
         // (or `r` key) is exactly how the operator says "I fixed it" —
         // watch the trigger for the manual marker and treat it as Retry.
         // File-change saves stay ignored here: the reset is manual-only.
-        let mut trigger_mtime = restart_trigger.as_deref().and_then(mtime);
+        let trigger_mtime = restart_trigger.as_deref().and_then(mtime);
         let mut poll = tokio::time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
@@ -735,14 +753,11 @@ impl Supervisor {
                 _ = poll.tick(), if restart_trigger.is_some() => {
                     let m = restart_trigger.as_deref().and_then(mtime);
                     if m != trigger_mtime {
-                        trigger_mtime = m;
-                        let manual = restart_trigger
-                            .as_deref()
-                            .and_then(|t| std::fs::read_to_string(t).ok())
-                            .is_some_and(|c| c.split_whitespace().nth(1) == Some("manual"));
-                        if manual {
-                            return true;
-                        }
+                        // Any trigger while parked is one human attempt,
+                        // not a loop: the trigger only exists in dev, and
+                        // a save while parked means "I fixed it" exactly
+                        // like the manual marker does.
+                        return true;
                     }
                 }
             }
@@ -955,33 +970,30 @@ mod runtime_status_tests {
     use super::*;
 
     #[test]
-    fn runtime_status_written_in_debug_when_env_set() {
-        // cargo test compiles with debug assertions — the write must land.
+    fn runtime_status_writer_emits_the_dev_cli_shape() {
+        // The pure writer with an explicit temp path — no process-env
+        // mutation, so no parallel supervisor test can interfere. The
+        // env-resolution half is compile-time gated in SupervisorConfig:
+        // debug builds read PYLAIR_RUNTIME_STATUS once, release never does.
         let dir = std::env::temp_dir().join(format!("pylair-rtstat-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runtime-status.json");
-        unsafe {
-            std::env::set_var(RUNTIME_STATUS_ENV, &path);
-        }
-        note_runtime_status(4, "ready", None);
-        let body = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        write_runtime_status(&path, 4, "ready", None, None);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["generation"], 4);
         assert_eq!(v["state"], "ready");
         assert!(v["exit_code"].is_null());
         assert!(v["ts"].as_u64().unwrap() > 0);
-        note_runtime_status(4, "exited", Some(1));
+        write_runtime_status(&path, 4, "exited", Some(1), None);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["exit_code"], 1);
-        unsafe {
-            std::env::remove_var(RUNTIME_STATUS_ENV);
-        }
-        // unset: nothing new is written (file keeps the last content — no crash)
-        note_runtime_status(5, "ready", None);
+        write_runtime_status(&path, 5, "failed", None, Some("protocol version mismatch"));
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["generation"], 4, "no write may happen once unset");
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["detail"], "protocol version mismatch");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

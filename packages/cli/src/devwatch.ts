@@ -65,8 +65,10 @@ export function manualTriggerContent(): string {
   return `${Date.now()} manual`;
 }
 
-export function writeManualTrigger(trigger: string): void {
-  writeFileSync(trigger, manualTriggerContent());
+export function writeManualTrigger(trigger: string): string {
+  const content = manualTriggerContent();
+  writeFileSync(trigger, content);
+  return content;
 }
 
 /** Watch `srcDir` recursively; on a matching change, debounce 150ms and
@@ -77,6 +79,9 @@ export function startDevWatch(opts: {
   trigger: string;
   set: WatchSet;
   onTrigger: (file: string) => void;
+  /** Fired with the exact trigger content after each own write, so the
+   * external-trigger watcher can tell self from `pylair restart`. */
+  onWrite?: (content: string) => void;
   debounceMs?: number;
 }): { close: () => void } {
   const debounce = opts.debounceMs ?? 150;
@@ -92,7 +97,9 @@ export function startDevWatch(opts: {
       if (!changed) return;
       const f = changed;
       changed = null;
-      writeFileSync(opts.trigger, triggerContent(f));
+      const content = triggerContent(f);
+      writeFileSync(opts.trigger, content);
+      opts.onWrite?.(content);
       opts.onTrigger(f);
     }, debounce);
   });
@@ -109,7 +116,7 @@ export function startDevWatch(opts: {
  * trigger poll - no fs-watch aliasing puzzles on Windows. */
 export function pollStatusFile(
   path: string,
-  cb: (status: { generation?: number; state?: string; exit_code?: number | null; ts?: number }) => void,
+  cb: (status: { generation?: number; state?: string; exit_code?: number | null; detail?: string | null; ts?: number }) => void,
   intervalMs = 200,
 ): { close: () => void } {
   let lastKey = "";

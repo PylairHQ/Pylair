@@ -128,7 +128,7 @@ interface ReloadTracker {
  * lines. Shared by bridge and wrap - wrap's "ready" is the port answering,
  * which is the same supervisor state. */
 export function reloadVisibility(appDir: string): {
-  onTrigger: (file: string) => void;
+  onTrigger: (label: string) => void;
   close: () => void;
 } {
   const tracker: ReloadTracker = { since: null, seenReadyFor: -1 };
@@ -146,33 +146,67 @@ export function reloadVisibility(appDir: string): {
         `reload: Python exited during startup (code ${st.exit_code ?? "?"}), see the error above; fix and save to retry`,
         { bare: true },
       );
+    } else if (st.state === "failed" && ts >= tracker.since) {
+      ui.warn(`reload: Python failed: ${st.detail ?? "see the error above"}`, { bare: true });
     } else if (st.state === "breaker_open" && ts >= tracker.since) {
       ui.warn(
-        "reload: crash-loop breaker is open - fix the bug, then press r or run `pylair restart`",
+        "reload: crash-loop breaker is open - fix and save, or press r / run `pylair restart`",
         { bare: true },
       );
     }
   });
   return {
-    onTrigger: (file) => {
+    onTrigger: (label) => {
       tracker.since = Date.now();
-      ui.info(`reload: ${file} changed, restarting Python`);
+      ui.info(`reload: ${label}, restarting Python`);
     },
     close: () => poller.close(),
   };
+}
+
+/** External restart visibility: the supervisor restarts on ANY trigger
+ * content, whoever wrote it - `pylair restart` from a second terminal
+ * must narrate in this one. Poll the trigger file; content the dev
+ * process did not write itself is an external trigger. */
+export function watchExternalTriggers(
+  trigger: string,
+  ownWrites: Set<string>,
+  onExternal: (label: string) => void,
+): { close: () => void } {
+  let last = "";
+  try {
+    last = readFileSync(trigger, "utf-8");
+  } catch {
+    // created momentarily
+  }
+  const timer = setInterval(() => {
+    let content: string;
+    try {
+      content = readFileSync(trigger, "utf-8");
+    } catch {
+      return;
+    }
+    if (content === last) return;
+    last = content;
+    if (ownWrites.has(content)) return; // we narrated this one already
+    const token = content.trim().split(/\s+/)[1];
+    if (!token) return;
+    onExternal(token === "manual" ? "manual restart requested" : `${token} changed`);
+  }, 200);
+  return { close: () => clearInterval(timer) };
 }
 
 /** Line-buffered stdin listener for the `r` key: manual restart without
  * editing a file (the main use: the breaker is open and the bug is fixed).
  * Never raw mode - tauri dev inherits stdin. Skipped entirely when stdin
  * is not a TTY (CI, pipes). */
-function armRestartKey(trigger: string, onManual: () => void): void {
+function armRestartKey(trigger: string, ownWrites: Set<string>, onManual: () => void): void {
   if (!process.stdin.isTTY) return;
   import("node:readline").then((rl) => {
     const iface = rl.createInterface({ input: process.stdin, terminal: false });
     iface.on("line", (line) => {
       if (line.trim() !== "r") return; // line-buffered: every other key is ignored
-      writeManualTrigger(trigger);
+      ownWrites.add(writeManualTrigger(trigger));
       onManual();
     });
   });
@@ -245,8 +279,16 @@ async function devWrap(
   writeRuntimeFile(runtime, cfg, srcDir);
 
   const vis = reloadVisibility(appDir);
-  startDevWatch({ srcDir, trigger, set: cfg.watch, onTrigger: vis.onTrigger });
-  armRestartKey(trigger, () => vis.onTrigger("manual restart"));
+  const ownWrites = new Set<string>();
+  startDevWatch({
+    srcDir,
+    trigger,
+    set: cfg.watch,
+    onWrite: (c) => ownWrites.add(c),
+    onTrigger: (file) => vis.onTrigger(`${file} changed`),
+  });
+  watchExternalTriggers(trigger, ownWrites, vis.onTrigger);
+  armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
   writeDevPidFile(appDir);
 
   ensureDevResources(appDir, resourceKeys(appDir));
@@ -336,17 +378,20 @@ export async function dev(opts: {
   // trigger content carries the changed file after the timestamp - the
   // inspector's dev-reload timeline entry names it (docs/inspector.md).
   const vis = reloadVisibility(appDir);
+  const ownWrites = new Set<string>();
   startDevWatch({
     srcDir,
     trigger,
     set: cfg.watch,
+    onWrite: (c) => ownWrites.add(c),
     onTrigger: (file) => {
-      vis.onTrigger(file);
+      vis.onTrigger(`${file} changed`);
       const ok = runCodegen(appDir, cfg.appModule, stubs, cfg.source);
       if (!ok) ui.warn("codegen: failed, see inspector", { bare: true });
     },
   });
-  armRestartKey(trigger, () => vis.onTrigger("manual restart"));
+  watchExternalTriggers(trigger, ownWrites, vis.onTrigger);
+  armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
   writeDevPidFile(appDir);
 
   const env = {

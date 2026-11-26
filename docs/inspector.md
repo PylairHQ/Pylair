@@ -128,8 +128,14 @@ debug builds, stripped from the child environment in release.
   ignored; skipped entirely in CI/pipes.
 
 The breaker reset is the point: you fixed the bug, the breaker is open,
-and you want the runtime back without editing a file. The dev-reload
-timeline entry reads "manual restart" for these.
+and you want the runtime back. While the breaker is parked open ANY
+trigger — a file save or a manual restart — brings the runtime back (one
+human attempt is not a crash loop); while the runtime is up, only the
+manual marker resets the crash accounting. `pylair restart` run from a
+second terminal narrates in the dev terminal too (`reload: manual
+restart requested, restarting Python`, then the ready or failed line).
+The dev-reload timeline entry reads "manual restart" for manual
+restarts.
 
 ## Outcomes
 

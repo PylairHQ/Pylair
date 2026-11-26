@@ -534,7 +534,7 @@ impl Session<'_> {
         status: Result<io::Result<ExitStatus>, RecvError>,
     ) -> ExitCause {
         if let Ok(Ok(s)) = &status {
-            super::note_runtime_status(self.sup.generation, "exited", s.code());
+            self.sup.note_runtime_status("exited", s.code(), None);
         }
         let detail = match status {
             Ok(Ok(s)) => format!("exited {s}"),

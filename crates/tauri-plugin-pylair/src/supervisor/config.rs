@@ -386,6 +386,11 @@ pub struct SupervisorConfig {
     /// runtime (no crash accounting). Falls back to the
     /// PYLAIR_RESTART_TRIGGER env var when unset.
     pub restart_trigger: Option<PathBuf>,
+    /// Dev reload visibility: where runtime-status.json is written at
+    /// every state transition. Resolved ONCE from PYLAIR_RUNTIME_STATUS
+    /// in debug builds only — a release build never reads the variable
+    /// and never writes the file.
+    pub runtime_status_path: Option<PathBuf>,
     /// Root of the per-generation blob directories (decision 0010):
     /// `<blob_root>/gen-<n>` is created per spawn, exported to the child
     /// as `PYLAIR_BLOB_DIR` and deleted at generation end. `None` (the
@@ -425,6 +430,11 @@ impl Default for SupervisorConfig {
             cancel_timeout: Duration::from_secs(5),
             max_frame: proto::max_frame(),
             restart_trigger: None,
+            runtime_status_path: if cfg!(debug_assertions) {
+                std::env::var_os(crate::supervisor::run::RUNTIME_STATUS_ENV).map(PathBuf::from)
+            } else {
+                None
+            },
             blob_root: None,
             blob_limits: None,
             limits: Limits::default(),
