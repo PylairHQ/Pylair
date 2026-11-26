@@ -1,0 +1,9 @@
+[project]
+name = "p0-pydantic"
+version = "0.1.0"
+description = "Design spike: Pydantic v2 models in the typed bridge (decision 0012)"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.7"]
+
+[tool.uv]
+package = false
