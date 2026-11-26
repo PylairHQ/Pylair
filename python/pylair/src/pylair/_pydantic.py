@@ -558,3 +558,26 @@ def dump_model(instance: Any) -> dict:
             "Expose the payload as a declared bytes field instead."
         ) from e
     return _restore_bytes(dumped, sentinels)
+
+
+def serializer_return_annotation(cls: type, field_name: str) -> Any:
+    """The return annotation of a field's custom serializer function,
+    when statically inspectable — else None. Covers @field_serializer
+    methods; Annotated PlainSerializer lambdas rarely annotate, and their
+    declared return_type lives in pydantic's metadata rather than the
+    function signature — best-effort there too."""
+    core = getattr(cls, "__pydantic_core_schema__", None) or {}
+    fields = (core.get("schema") or {}).get("fields") or {}
+    fschema = fields.get(field_name) or {}
+    ser = ((fschema.get("schema") or {}).get("serialization")) or {}
+    fn = ser.get("function")
+    if fn is None:
+        return None
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    ret = sig.return_annotation
+    if ret is inspect.Signature.empty:
+        return None
+    return ret

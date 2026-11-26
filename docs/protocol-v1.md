@@ -661,8 +661,8 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 The codegen schema names types; the wire forms below are the contract
 both validation directions share. `int`/`str`/`bool`/`float`/`list`/
 `dict`/`tuple`/`dataclass`/`typeddict`/`enum`/`bytes`/`datetime` are the
-established set. Decision 0012 adds provisional names (codegen support
-lands in a later PR):
+established set. Decision 0012 adds the names below — final, with
+codegen support in place:
 
 | schema name | wire form |
 |---|---|

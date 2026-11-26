@@ -395,6 +395,56 @@ test("generated fixture compiles under tsc --strict", () => {
       FN({ name: "stream", kind: "generator", returns: { type: "bytes" } }),
       FN({ name: "foo_bar" }),
       FN({ name: "fooBar" }),
+      // pydantic coverage: split aliases both ways, computed fields,
+      // serializer-owned fields, nested + concretized-generic models,
+      // enums, tuples, sets-as-lists and the shared stringly types
+      FN({
+        name: "pydantic_roundtrip",
+        params: [
+          {
+            name: "order",
+            kind: "P",
+            required: true,
+            schema: {
+              type: "pydantic",
+              name: "Order",
+              in_fields: [
+                { name: "orderId", required: true, schema: { type: "str" } },
+                { name: "user_id", required: true, schema: { type: "int" } },
+                { name: "color", required: true, schema: { type: "enum", values: ["red", "blue"] } },
+                { name: "pair", required: true, schema: { type: "tuple", items: [{ type: "int" }, { type: "str" }] } },
+                { name: "tags", required: true, schema: { type: "list", items: { type: "str" } } },
+                { name: "ttl", required: false, schema: { type: "timedelta" } },
+                { name: "ident", required: true, schema: { type: "uuid" } },
+                { name: "price", required: true, schema: { type: "decimal" } },
+                { name: "dest", required: true, schema: { type: "path" } },
+                { name: "blob", required: true, schema: { type: "bytes" } },
+                { name: "box", required: true, schema: { type: "pydantic", name: "IntBox", fields: [{ name: "item", required: true, schema: { type: "int" } }] } },
+              ],
+              out_fields: [
+                { name: "orderId", required: true, schema: { type: "str" } },
+                { name: "userId", required: true, schema: { type: "int" } },
+                { name: "color", required: true, schema: { type: "enum", values: ["red", "blue"] } },
+                { name: "pair", required: true, schema: { type: "tuple", items: [{ type: "int" }, { type: "str" }] } },
+                { name: "tags", required: true, schema: { type: "list", items: { type: "str" } } },
+                { name: "ttl", required: true, schema: { type: "timedelta" } },
+                { name: "ident", required: true, schema: { type: "uuid" } },
+                { name: "price", required: true, schema: { type: "decimal" } },
+                { name: "dest", required: true, schema: { type: "path" } },
+                { name: "blob", required: true, schema: { type: "str" }, serializer: true },
+                { name: "box", required: true, schema: { type: "pydantic", name: "IntBox", fields: [{ name: "item", required: true, schema: { type: "int" } }] } },
+                { name: "total", required: true, schema: { type: "int" }, computed: true },
+              ],
+            },
+          },
+        ],
+        returns: {
+          type: "pydantic",
+          name: "Order",
+          in_fields: [],
+          out_fields: [],
+        },
+      }),
     ]),
     "fixture",
   );
@@ -484,4 +534,109 @@ test("loadManifest surfaces module errors", { skip: !hasPython }, () => {
     () => loadManifest({ python: "python3", module: "no_such_xyz" }),
     /codegen manifest failed/,
   );
+});
+
+// ---- pydantic models (decision 0012) -----------------------------------------
+
+const ORDER = {
+  type: "pydantic",
+  name: "Order",
+  in_fields: [
+    { name: "orderId", required: true, schema: { type: "str" } },
+    { name: "user_id", required: true, schema: { type: "int" } },
+    { name: "note", required: false, schema: { type: "str" } },
+  ],
+  out_fields: [
+    { name: "orderId", required: true, schema: { type: "str" } },
+    { name: "userId", required: true, schema: { type: "int" } },
+    { name: "note", required: true, schema: { type: "str" } },
+    { name: "total", required: true, schema: { type: "int" }, computed: true },
+  ],
+};
+
+test("pydantic split shapes emit FooInput for params and Foo for results", () => {
+  const ts = emit(
+    M([
+      FN({
+        name: "place_order",
+        params: [{ name: "order", kind: "P", required: true, schema: ORDER }],
+        returns: ORDER,
+      }),
+    ]),
+    "m",
+  );
+  assert.match(ts, /export interface OrderInput \{/);
+  assert.match(ts, /user_id: number;/); // validation alias on input
+  assert.match(ts, /note\?: string;/); // defaulted field optional on input
+  assert.match(ts, /export interface Order \{/);
+  assert.match(ts, /userId: number;/); // serialization alias on output
+  assert.match(ts, /total: number; \/\/ computed field/);
+  assert.match(ts, /placeOrder\(order: OrderInput/);
+  assert.match(ts, /Promise<Order>/);
+});
+
+test("pydantic symmetric shapes emit one interface", () => {
+  const sym = {
+    type: "pydantic",
+    name: "Sym",
+    fields: [
+      { name: "a", required: true, schema: { type: "int" } },
+      { name: "b", required: false, schema: { type: "str" } },
+    ],
+  };
+  const ts = emit(M([FN({ params: [{ name: "s", kind: "P", required: true, schema: sym }], returns: sym })]), "m");
+  assert.match(ts, /export interface Sym \{/);
+  assert.doesNotMatch(ts, /SymInput/);
+});
+
+test("serializer-owned fields typed from return annotation with comment", () => {
+  const m = {
+    type: "pydantic",
+    name: "Hexed",
+    in_fields: [{ name: "blob", required: true, schema: { type: "bytes" } }],
+    out_fields: [{ name: "blob", required: true, schema: { type: "str" }, serializer: true }],
+  };
+  const ts = emit(M([FN({ returns: m })]), "m");
+  assert.match(ts, /blob: string; \/\/ custom serializer owns this field's wire shape/);
+  // input side keeps the validation type
+  assert.match(ts, /blob: Uint8Array;/);
+});
+
+test("shared types map to their wire forms", () => {
+  const ts = emit(
+    M([
+      FN({
+        params: [
+          { name: "td", kind: "P", required: true, schema: { type: "timedelta" } },
+          { name: "u", kind: "P", required: true, schema: { type: "uuid" } },
+          { name: "d", kind: "P", required: true, schema: { type: "decimal" } },
+          { name: "p", kind: "P", required: true, schema: { type: "path" } },
+        ],
+      }),
+    ]),
+    "m",
+  );
+  assert.match(ts, /td: string, u: string, d: string, p: string/);
+});
+
+test("nested and generic-concretized models collect and emit", () => {
+  const inner = {
+    type: "pydantic",
+    name: "IntBox",
+    fields: [{ name: "item", required: true, schema: { type: "int" } }],
+  };
+  const outer = {
+    type: "pydantic",
+    name: "Outer",
+    fields: [
+      { name: "box", required: true, schema: inner },
+      { name: "boxes", required: true, schema: { type: "list", items: inner } },
+      { name: "maybe", required: false, schema: { type: "union", opts: [inner, { type: "none" }] } },
+    ],
+  };
+  const ts = emit(M([FN({ returns: outer })]), "m");
+  assert.match(ts, /export interface IntBox \{/);
+  assert.match(ts, /box: IntBox;/);
+  assert.match(ts, /boxes: IntBox\[\];/);
+  assert.match(ts, /maybe\?: IntBox \| null;/);
 });

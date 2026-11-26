@@ -137,17 +137,26 @@ def _pydantic_model_schema(cls: Any, seen: frozenset) -> dict[str, Any]:
                 "schema": schema_of(f.annotation, seen),
             }
         )
+    owned = _pydantic._serializer_owned_fields(cls)
     out_fields = []
     for name, f in cls.model_fields.items():
         key = f.serialization_alias or f.alias or name
-        out_fields.append(
-            {
-                "name": key,
-                "field": name,
-                "required": True,
-                "schema": schema_of(f.annotation, seen),
-            }
-        )
+        entry = {
+            "name": key,
+            "field": name,
+            "required": True,
+            "schema": schema_of(f.annotation, seen),
+        }
+        if name in owned:
+            # the serializer owns the wire representation — type it from
+            # the serializer's return annotation when statically known,
+            # else unknown; the field annotation would lie (decision §5)
+            entry["serializer"] = True
+            ret = _pydantic.serializer_return_annotation(cls, name)
+            entry["schema"] = (
+                schema_of(ret, seen) if ret is not None else {"type": "any"}
+            )
+        out_fields.append(entry)
     for cname, cf in cls.model_computed_fields.items():
         out_fields.append(
             {
@@ -161,9 +170,16 @@ def _pydantic_model_schema(cls: Any, seen: frozenset) -> dict[str, Any]:
             }
         )
     out: dict[str, Any] = {"type": "pydantic", "name": cls.__name__}
-    if [f["name"] for f in in_fields] == [
-        f["name"] for f in out_fields[: len(in_fields)]
-    ] and len(in_fields) == len(out_fields):
+    # collapse to one shape only when the wire keys match in both
+    # directions AND no serializer retypes anything — a serializer-owned
+    # field is typed by its annotation on input but by the serializer's
+    # return on output, so it forces the split even with symmetric aliases
+    if (
+        [f["name"] for f in in_fields]
+        == [f["name"] for f in out_fields[: len(in_fields)]]
+        and len(in_fields) == len(out_fields)
+        and not owned
+    ):
         out["fields"] = in_fields
     else:
         out["in_fields"] = in_fields
