@@ -20,18 +20,76 @@ Neither flag has any effect on `pylair build`.
 A separate window titled **pylair inspector** opens next to your app
 once it starts. It polls the host every ~250 ms and shows:
 
+- **Timeline** — one interleaved view of everything the inspector
+  knows, newest first: calls, lifecycle events, Python stderr lines,
+  codegen results and permission denials. Filter by kind with the
+  checkboxes. Every row expands on click.
 - **Calls** — the last 1000 calls (oldest dropped), newest first:
   function, window, mode (`inline`/`isolated`/`warm`), start time,
   latency, outcome, request/response sizes, and for streams the chunk
   count. Filter by function, outcome or window; errors, cancellations
-  and limit refusals are highlighted. The copy button on each row puts
-  the row's JSON on the clipboard. **Pause** freezes the display.
+  and limit refusals are highlighted. Rows expand to the same detail
+  as in the timeline; the copy button puts the row's JSON on the
+  clipboard. **Pause** freezes the display.
 - **Per-function latency** — call count, error count, p50/p95 latency
   over the recorded window.
 - **Health** — the `health()` snapshot: transport and loop verdicts,
   missed pongs, RTT, load totals, restart accounting, app-readiness
   components, and the update state for updater-enabled apps.
 - **Warm pools** — per-function pool status (see below).
+
+## The timeline
+
+The timeline correlates what happened, in order, across four kinds of
+entries. Ordering is exact: calls, events and stderr lines share one
+sequence counter, so a restart always sorts between the stderr lines
+that preceded it and the ones that followed.
+
+**Lifecycle** entries are the supervisor's own story:
+
+| event | meaning |
+|---|---|
+| `spawn` | a runtime generation spawned — generation number and pid |
+| `exit` | the generation ended — the exit detail (code or signal) or the kill reason |
+| `restart` | the supervisor decided to respawn — the crash reason is the why |
+| `breaker` | the crash breaker tripped; the runtime parks Failed instead of restarting |
+| `dev reload` | hot reload fired — names the changed file when the CLI reported one |
+| `warm spawn/death/reap` | warm-pool member churn |
+| `stall` / `recovered` | the loop-stall warning fired, and when the loop freed |
+
+Warm-pool entries are diffed off the pong-carried pool stats — the
+host's only window into member churn (pools are runtime-side).
+Approximate by construction: several spawns inside one ping interval
+arrive as one entry with a count.
+
+**stderr** entries are the runtime's own stderr lines, generation-tagged
+and timestamped. A call row expands to the lines inside its time
+window — labeled *stderr during this call*, not *from* it: attribution
+is by time window, not causation. Lines are capped and the ring is
+bounded separately from lifecycle entries, so a log burst evicts old
+stderr but never a spawn or a breaker.
+
+**Failed calls explain themselves.** An error row shows the wire error
+code and message, plus — when the runtime enriches them — the Python
+traceback (monospace, in the expanded row), the suggestions list and
+the per-field errors (`path`/`expected`/`received`). These are
+dev-only optional `error.data` fields: the inspector displays whatever
+is present and never depends on any of it existing.
+
+**Codegen** entries mirror `pylair dev`'s stub regeneration. The CLI
+writes `.pylair/codegen-status.json` after every attempt and points
+the app at it (`PYLAIR_CODEGEN_STATUS`, dev-only by construction); the
+inspector turns changes into timeline entries and, while the last
+status is a failure, a banner on top of the page — a broken stub
+regeneration is never buried in terminal scrollback. The banner
+disappearing is the recovery signal.
+
+**Denials.** When the host refuses a call for capability reasons (the
+per-function scope check on `pylair:allow-python-call(-stream)`), the
+entry carries the command, the window and its origin, the function —
+and the fix: the permission identifier and `src-tauri/capabilities/`
+to add it to. Tauri-level denials of an entire command never reach
+the plugin and cannot be recorded.
 
 ## Outcomes
 

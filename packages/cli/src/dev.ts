@@ -38,6 +38,28 @@ export function codegenEnv(appDir: string, source: string): Record<string, strin
   } as Record<string, string>;
 }
 
+/** The dev-only codegen status file the inspector reads (docs/inspector.md):
+ * written after every codegen attempt, so a broken stub regeneration is a
+ * banner and a timeline entry instead of scrollback. The app finds it
+ * through PYLAIR_CODEGEN_STATUS — dev-only by construction: the variable
+ * only ever reaches the dev child. */
+export function codegenStatusPath(appDir: string): string {
+  return join(appDir, ".pylair", "codegen-status.json");
+}
+
+/** Write the inspector-visible codegen status. Exported for tests. */
+export function writeCodegenStatus(appDir: string, status: Record<string, unknown>): void {
+  try {
+    mkdirSync(join(appDir, ".pylair"), { recursive: true });
+    writeFileSync(
+      codegenStatusPath(appDir),
+      JSON.stringify({ at: Date.now(), ...status }),
+    );
+  } catch {
+    // The status file is a nicety, never a reason to break codegen itself.
+  }
+}
+
 function runCodegen(appDir: string, cfgModule: string, out: string, source: string): boolean {
   const python = venvPython(appDir);
   const env = codegenEnv(appDir, source);
@@ -45,13 +67,16 @@ function runCodegen(appDir: string, cfgModule: string, out: string, source: stri
     const manifest = loadManifest({ python, module: cfgModule, env });
     const ts = emit(manifest, cfgModule);
     const prev = existsSync(out) ? readFileSync(out, "utf-8") : null;
+    writeCodegenStatus(appDir, { ok: true, functions: manifest.functions?.length ?? 0 });
     if (prev !== ts) {
       writeFileSync(out, ts);
       ui.info(`pylair: codegen wrote ${out} (${manifest.functions?.length ?? 0} functions)`);
       return true;
     }
   } catch (e) {
-    ui.warn(`pylair: codegen failed (${(e as Error).message}); keeping last stubs`, { bare: true });
+    const message = (e as Error).message;
+    writeCodegenStatus(appDir, { ok: false, error: message });
+    ui.warn(`pylair: codegen failed (${message}); keeping last stubs`, { bare: true });
   }
   return false;
 }
@@ -133,10 +158,12 @@ async function devWrap(
   writeRuntimeFile(runtime, cfg, srcDir);
 
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let changedFile: string | null = null;
   watch(srcDir, { recursive: true }, (_ev, file) => {
     if (!file?.endsWith(".py")) return;
+    changedFile = file;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => writeFileSync(trigger, String(Date.now())), 150);
+    timer = setTimeout(() => writeFileSync(trigger, `${Date.now()} ${changedFile}`), 150);
   });
 
   ensureDevResources(appDir, resourceKeys(appDir));
@@ -221,17 +248,20 @@ export async function dev(opts: {
   mkdirSync(join(appDir, "src"), { recursive: true });
   runCodegen(appDir, cfg.appModule, stubs, cfg.source);
 
-  // Watch python source; debounce bursts (saves, formatter runs).
+  // Watch python source; debounce bursts (saves, formatter runs). The
+  // trigger content carries the changed file after the timestamp — the
+  // inspector's dev-reload timeline entry names it (docs/inspector.md).
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let changed = false;
+  let changed: string | null = null;
   watch(srcDir, { recursive: true }, (_ev, file) => {
     if (!file?.endsWith(".py")) return;
-    changed = true;
+    changed = file;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       if (!changed) return;
-      changed = false;
-      writeFileSync(trigger, String(Date.now()));
+      const file = changed;
+      changed = null;
+      writeFileSync(trigger, `${Date.now()} ${file}`);
       runCodegen(appDir, cfg.appModule, stubs, cfg.source);
     }, 150);
   });
@@ -242,6 +272,7 @@ export async function dev(opts: {
     PYLAIR_PYTHON: venvPython(appDir),
     PYLAIR_PYTHONPATH: importRoot(appDir, cfg.source),
     PYLAIR_RESTART_TRIGGER: trigger,
+    PYLAIR_CODEGEN_STATUS: codegenStatusPath(appDir),
     PYLAIR_DEV: "1",
     ...inspectEnv,
   };

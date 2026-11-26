@@ -22,6 +22,27 @@ what the GitHub releases page publishes.
   client types all three on `PythonError` and gains `isCancelled(e)`
   plus the `ErrorCode` constants — the template's cancellation check no
   longer writes the `-32010` literal.
+- **The dev inspector correlates what happened** (`pylair dev
+  --inspect`). A new timeline view interleaves calls, lifecycle events,
+  Python stderr, codegen results and permission denials in exact order
+  (one shared sequence counter), filterable by kind, every row
+  expandable. Lifecycle entries record runtime spawn (generation, pid),
+  exit (code or signal), restarts and why, breaker trips, dev reloads
+  naming the changed file, warm-pool member spawn/death/reap and the
+  loop-stall warnings. Python stderr lines are recorded
+  generation-tagged in their own bounded ring (a log burst never evicts
+  a lifecycle event); a call row expands to the lines emitted "during
+  this call" — by time window, never claimed as causation. Failed calls
+  explain themselves: error code and message always, plus traceback,
+  suggestions and per-field errors when the runtime enriches them
+  (dev-only optional `error.data` fields — displayed when present,
+  never required). `pylair dev` writes `.pylair/codegen-status.json`
+  after every stub regeneration; the last failure is a banner on top of
+  the inspector and every run a timeline entry. Capability denials are
+  recorded with the command, window and origin plus a hint naming the
+  permission identifier and `src-tauri/capabilities/`. Everything keeps
+  the inspector's rules: dev builds only, compiled out of release,
+  bounded lossy rings, try-lock drops, never the events channel.
 
 ## npm-v0.1.0-rc.32 (2026-11-26)
 

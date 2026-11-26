@@ -6,6 +6,46 @@ use serde_json::{json, Value};
 use tauri::ipc::CommandScope;
 use tauri::{Emitter, Manager, Runtime};
 
+/// Record a capability denial in the dev inspector (docs/inspector.md):
+/// the command, window and origin — plus the fix, since the entry is
+/// what a developer sees instead of a silent refusal. Inert in release
+/// (the tap is a zero-sized shell) and when the inspector is off.
+#[cfg(debug_assertions)]
+fn note_scope_denial<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    rt: &PyRuntime,
+    command: &str,
+    permission: &str,
+    fn_name: &str,
+) {
+    let tap = rt.0.inspect();
+    if !tap.enabled() {
+        return;
+    }
+    let origin = window
+        .url()
+        .ok()
+        .map(|u| {
+            let o = u.origin().ascii_serialization();
+            if o == "null" {
+                u.scheme().to_string()
+            } else {
+                o
+            }
+        })
+        .unwrap_or_else(|| "unknown".into());
+    tap.note_event(crate::inspect::TimelineEvent::Denial {
+        command: command.to_string(),
+        window: window.label().to_string(),
+        origin,
+        function: fn_name.to_string(),
+        hint: format!(
+            "grant {permission} with a \"name\" scope entry covering \"{fn_name}\" \
+             in the window's capability under src-tauri/capabilities/"
+        ),
+    });
+}
+
 #[tauri::command]
 async fn python_call<R: Runtime>(
     window: tauri::WebviewWindow<R>,
@@ -17,7 +57,17 @@ async fn python_call<R: Runtime>(
 ) -> Result<Value, ErrorObj> {
     // Per-function permissions: checked before the window is subscribed or
     // anything reaches the supervisor, so a denial touches no state.
-    fn_scope::check(&scope, window.label(), &fn_name)?;
+    if let Err(e) = fn_scope::check(&scope, window.label(), &fn_name) {
+        #[cfg(debug_assertions)]
+        note_scope_denial(
+            &window,
+            &rt,
+            "python_call",
+            "pylair:allow-python-call",
+            &fn_name,
+        );
+        return Err(e);
+    }
     python_call_impl(&window, &reg, &rt, fn_name, input).await
 }
 
@@ -82,7 +132,20 @@ async fn python_call_stream<R: Runtime>(
     input: Value,
     stream: Option<bool>,
 ) -> Result<StreamAck, ErrorObj> {
-    fn_scope::check(&scope, window.label(), &fn_name)?;
+    if let Err(e) = fn_scope::check(&scope, window.label(), &fn_name) {
+        #[cfg(debug_assertions)]
+        {
+            let rt = window.state::<PyRuntime>();
+            note_scope_denial(
+                &window,
+                &rt,
+                "python_call_stream",
+                "pylair:allow-python-call-stream",
+                &fn_name,
+            );
+        }
+        return Err(e);
+    }
     let reg = window.state::<Registry>();
     let rt = window.state::<PyRuntime>();
     python_call_stream_impl(&window, &reg, &rt, on_event, fn_name, input, stream).await
@@ -395,12 +458,16 @@ pub fn python_inspect_snapshot_impl<R: Runtime>(
             data: None,
         });
     }
+    let codegen = crate::inspect::poll_codegen(&rt.0.inspect());
     let mut snap = rt.0.inspect().snapshot();
     snap["health"] = serde_json::to_value(rt.0.health(None)).map_err(|e| ErrorObj {
         code: protocol::INTERNAL,
         message: format!("health snapshot failed to serialize: {e}"),
         data: None,
     })?;
+    if let Some(c) = codegen {
+        snap["codegen"] = c;
+    }
     Ok(snap)
 }
 

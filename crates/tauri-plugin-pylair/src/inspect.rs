@@ -23,6 +23,27 @@ use serde_json::Value;
 
 /// Default ring capacity â€” the last N completed calls.
 pub const DEFAULT_CAPACITY: usize = 1000;
+/// Timeline (lifecycle/codegen/denial) capacity. Small entries, but the
+/// point of giving stderr its own ring below is that a log burst can
+/// never evict them. One `next_seq` counter orders everything across
+/// rings, so the page interleaves them exactly.
+pub const TIMELINE_CAPACITY: usize = 500;
+/// stderr ring capacity — separate from the timeline so a log burst
+/// evicts old stderr lines, never lifecycle events.
+pub const STDERR_CAPACITY: usize = 1000;
+/// A stderr line is already byte-capped upstream (protocol §9); the
+/// ring caps it further so a full ring stays small even at the
+/// upstream cap.
+pub const STDERR_RING_CHARS: usize = 2048;
+/// Error-detail caps (failed calls explain themselves): the message,
+/// traceback, suggestions and field errors the wire carried — dev-only
+/// optional `error.data` fields, truncated rather than ever growing
+/// the ring without bound.
+pub const ERR_MESSAGE_CHARS: usize = 1024;
+pub const TRACEBACK_CHARS: usize = 8192;
+pub const MAX_SUGGESTIONS: usize = 8;
+pub const SUGGESTION_CHARS: usize = 512;
+pub const MAX_FIELD_ERRORS: usize = 16;
 /// Hard cap on in-flight entries: normal operation is bounded by
 /// `max_concurrent_tasks`, but a lost start/end pair must never grow
 /// memory â€” past the cap the oldest in-flight entries are dropped.
@@ -47,8 +68,20 @@ struct Inner {
     /// In-flight insertion order for the hard-cap eviction.
     in_flight_order: VecDeque<u64>,
     payloads: bool,
-    /// Monotonic row id, survives ring eviction.
+    /// Monotonic row id, survives ring eviction. Shared by calls,
+    /// timeline events and stderr lines — the page interleaves rings
+    /// by it, so ordering across kinds is exact.
     next_seq: u64,
+    /// Lifecycle, codegen and denial entries — the timeline minus
+    /// stderr, which is high-volume enough to need its own ring.
+    timeline: VecDeque<TimelineRow>,
+    /// Python stderr lines, generation-tagged and timestamped. A call
+    /// row expands to the lines inside its time window — "during this
+    /// call", never "from this call" (docs/inspector.md).
+    stderr: VecDeque<StderrRow>,
+    /// The last codegen-status file content seen — timeline entries
+    /// fire on CHANGE only, not on every snapshot poll.
+    last_codegen: Option<String>,
 }
 
 struct InFlight {
@@ -111,9 +144,114 @@ pub struct StreamStats {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
     Ok,
-    Error { code: i64 },
-    Cancelled { verdict: Option<String> },
-    Limit { limit: Option<String> },
+    Error {
+        code: i64,
+        /// The wire error message, truncated — a failed call explains
+        /// itself without a trip through terminal scrollback.
+        message: String,
+        /// Dev-only optional `error.data` fields (protocol-v1): shown
+        /// when the runtime enriches them, absent otherwise — the
+        /// inspector never depends on them existing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        traceback: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        suggestions: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        errors: Option<Vec<Value>>,
+    },
+    Cancelled {
+        verdict: Option<String>,
+    },
+    Limit {
+        limit: Option<String>,
+    },
+}
+
+/// One entry of the lifecycle/codegen/denial timeline. Serde-flattened
+/// into its row, so the wire shape is `{seq, at_unix_ms, kind, event,
+/// ...fields}` — `kind` is the page's filter grouping.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum TimelineEvent {
+    /// A runtime generation spawned — carries the child pid when the
+    /// platform reported one.
+    Spawn { generation: u64, pid: Option<u32> },
+    /// The generation ended unexpectedly — the exit detail (code or
+    /// signal) or the kill reason that ended it.
+    Exit { generation: u64, detail: String },
+    /// The supervisor decided to respawn — the crash reason is the why.
+    Restart { generation: u64, detail: String },
+    /// The crash breaker tripped: too many crashes inside the window —
+    /// the runtime parks Failed instead of restarting.
+    Breaker { generation: u64, detail: String },
+    /// Dev hot reload: the restart trigger fired. `file` names the
+    /// changed source file when the CLI reported one.
+    DevReload {
+        generation: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+    },
+    /// A warm pool's live-members count rose — diffed off the pong
+    /// stats (host-observed, approximate: several spawns inside one
+    /// ping interval arrive as one entry).
+    WarmSpawn { function: String, n: u64, live: u64 },
+    /// A warm pool's consecutive-deaths counter rose.
+    WarmDeath { function: String, n: u64 },
+    /// A warm pool's idle-TTL reap counter rose.
+    WarmReap { function: String, n: u64 },
+    /// The loop-stall warning fired (one per stall episode).
+    StallWarn { detail: String },
+    /// The stall episode ended — how long the loop was blocked at peak.
+    StallRecovered { blocked_ms: u64 },
+    /// `pylair dev`'s codegen result changed (ok, or the failure with
+    /// Python's error) — mirrored off the status file the CLI writes.
+    Codegen {
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// The host refused a call for capability reasons — with the fix:
+    /// the permission identifier and file the window needs.
+    Denial {
+        command: String,
+        window: String,
+        origin: String,
+        function: String,
+        hint: String,
+    },
+}
+
+impl TimelineEvent {
+    /// The page's filter grouping — lifecycle is everything the
+    /// supervisor itself did; codegen/denial are their own kinds.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TimelineEvent::Codegen { .. } => "codegen",
+            TimelineEvent::Denial { .. } => "denial",
+            _ => "lifecycle",
+        }
+    }
+}
+
+/// A timeline entry as serialized: the shared sequence number and the
+/// wall-clock timestamp flattened with the event itself.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineRow {
+    pub seq: u64,
+    pub at_unix_ms: u64,
+    pub kind: &'static str,
+    #[serde(flatten)]
+    pub ev: TimelineEvent,
+}
+
+/// One Python stderr line — generation-tagged so lines on either side
+/// of a restart never confuse, timestamped for the call-window join.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StderrRow {
+    pub seq: u64,
+    pub at_unix_ms: u64,
+    pub generation: u64,
+    pub line: String,
 }
 
 fn unix_ms() -> u64 {
@@ -178,6 +316,9 @@ impl InspectRef {
                     in_flight_order: VecDeque::new(),
                     payloads,
                     next_seq: 1,
+                    timeline: VecDeque::new(),
+                    stderr: VecDeque::new(),
+                    last_codegen: None,
                 })
             } else {
                 None
@@ -333,8 +474,109 @@ impl InspectRef {
         });
     }
 
+    /// One lifecycle/codegen/denial entry into the timeline ring. Same
+    /// rules as calls: drop the sample on a contended lock, evict the
+    /// oldest at capacity, never touch the events channel.
+    pub fn note_event(&self, ev: TimelineEvent) {
+        if !self.enabled() {
+            return;
+        }
+        let Ok(mut guard) = self.inner.try_lock() else {
+            return;
+        };
+        let Some(inner) = guard.as_mut() else {
+            return;
+        };
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        if inner.timeline.len() >= TIMELINE_CAPACITY {
+            inner.timeline.pop_front();
+        }
+        inner.timeline.push_back(TimelineRow {
+            seq,
+            at_unix_ms: unix_ms(),
+            kind: ev.kind(),
+            ev,
+        });
+    }
+
+    /// One Python stderr line, tapped in the drain before the event
+    /// channel — the tap must not depend on that channel's delivery
+    /// (drop-oldest there would silently truncate the timeline too).
+    /// The line is re-capped to `STDERR_RING_CHARS` even though the
+    /// upstream assembler already caps it: the ring's memory bound is
+    /// its own contract.
+    pub fn note_stderr(&self, generation: u64, line: &str) {
+        if !self.enabled() {
+            return;
+        }
+        let Ok(mut guard) = self.inner.try_lock() else {
+            return;
+        };
+        let Some(inner) = guard.as_mut() else {
+            return;
+        };
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        if inner.stderr.len() >= STDERR_CAPACITY {
+            inner.stderr.pop_front();
+        }
+        inner.stderr.push_back(StderrRow {
+            seq,
+            at_unix_ms: unix_ms(),
+            generation,
+            line: truncate_chars(line, STDERR_RING_CHARS),
+        });
+    }
+
+    /// The codegen-status file's content, polled by the snapshot path.
+    /// Records a timeline entry only when the content CHANGED — the
+    /// file is rewritten per codegen run, so a change is a run.
+    pub fn note_codegen_status(&self, raw: &str) {
+        if !self.enabled() {
+            return;
+        }
+        let parsed: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Ok(mut guard) = self.inner.try_lock() else {
+            return; // contended — the next poll re-reads the same file
+        };
+        let Some(inner) = guard.as_mut() else {
+            return;
+        };
+        if inner.last_codegen.as_deref() == Some(raw) {
+            return;
+        }
+        inner.last_codegen = Some(raw.to_string());
+        let ok = parsed["ok"].as_bool().unwrap_or(false);
+        let detail = if ok {
+            parsed["functions"]
+                .as_u64()
+                .map(|n| format!("{n} functions"))
+        } else {
+            parsed["error"]
+                .as_str()
+                .map(|e| truncate_chars(e, ERR_MESSAGE_CHARS))
+        };
+        let ev = TimelineEvent::Codegen { ok, detail };
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        if inner.timeline.len() >= TIMELINE_CAPACITY {
+            inner.timeline.pop_front();
+        }
+        inner.timeline.push_back(TimelineRow {
+            seq,
+            at_unix_ms: unix_ms(),
+            kind: ev.kind(),
+            ev,
+        });
+    }
+
     /// The inspector snapshot: every recorded call plus the still-open
-    /// in-flight rows (so the table shows long-running calls live).
+    /// in-flight rows (so the table shows long-running calls live),
+    /// the timeline and stderr rings the page interleaves by `seq`.
     pub fn snapshot(&self) -> Value {
         let Ok(guard) = self.inner.lock() else {
             return serde_json::json!({"enabled": false, "records": []});
@@ -371,12 +613,58 @@ impl InspectRef {
                 })
             })
             .collect();
+        let timeline: Vec<&TimelineRow> = inner.timeline.iter().collect();
+        let stderr: Vec<&StderrRow> = inner.stderr.iter().collect();
         serde_json::json!({
             "enabled": true,
             "capacity": inner.capacity,
             "records": done,
             "in_flight": open,
+            "timeline": timeline,
+            "stderr": stderr,
         })
+    }
+}
+
+/// Char-capped copy — truncation never splits a multibyte character.
+fn truncate_chars(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(cap).collect();
+    format!("{cut}…")
+}
+
+/// Extract the dev-only optional error detail a wire error carries
+/// (protocol-v1: `traceback`, `suggestions`, `errors` under `data`).
+/// Every field is independently optional — the inspector displays
+/// what is present and never depends on any of it existing.
+fn error_outcome(e: &crate::protocol::ErrorObj) -> Outcome {
+    let message = truncate_chars(&e.message, ERR_MESSAGE_CHARS);
+    let (mut traceback, mut suggestions, mut errors) = (None, None, None);
+    if let Some(data) = e.data.as_ref() {
+        traceback = data
+            .get("traceback")
+            .and_then(Value::as_str)
+            .map(|t| truncate_chars(t, TRACEBACK_CHARS));
+        suggestions = data.get("suggestions").and_then(Value::as_array).map(|xs| {
+            xs.iter()
+                .filter_map(Value::as_str)
+                .take(MAX_SUGGESTIONS)
+                .map(|s| truncate_chars(s, SUGGESTION_CHARS))
+                .collect()
+        });
+        errors = data
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(|xs| xs.iter().take(MAX_FIELD_ERRORS).cloned().collect());
+    }
+    Outcome::Error {
+        code: e.code,
+        message,
+        traceback,
+        suggestions,
+        errors,
     }
 }
 
@@ -403,11 +691,57 @@ pub fn classify(result: &Result<Value, crate::protocol::ErrorObj>) -> (Outcome, 
                     .map(str::to_string);
                 Outcome::Cancelled { verdict }
             } else {
-                Outcome::Error { code: e.code }
+                error_outcome(e)
             };
             (outcome, None)
         }
     }
+}
+
+/// Diff one pong's warm-pool stats against the previous mirror — the
+/// host's only window into member churn (0008: pools are runtime-side;
+/// what the inspector can know is what the pong reported). Approximate
+/// by construction: several spawns/deaths inside one ping interval
+/// arrive as one entry with a count, and a deaths-counter reset (a
+/// success between deaths) is not an event. Pure for testing.
+pub fn diff_pools(
+    prev: &std::collections::BTreeMap<String, Value>,
+    next: &Value,
+) -> Vec<TimelineEvent> {
+    let mut out = Vec::new();
+    let Some(map) = next.as_object() else {
+        return out;
+    };
+    let get = |stats: &Value, key: &str| stats.get(key).and_then(Value::as_u64).unwrap_or(0);
+    for (fn_name, stats) in map {
+        let before = prev.get(fn_name);
+        let live_before = before.map(|b| get(b, "live")).unwrap_or(0);
+        let live = get(stats, "live");
+        let deaths_before = before.map(|b| get(b, "deaths")).unwrap_or(0);
+        let deaths = get(stats, "deaths");
+        let reaps_before = before.map(|b| get(b, "reaps")).unwrap_or(0);
+        let reaps = get(stats, "reaps");
+        if deaths > deaths_before {
+            out.push(TimelineEvent::WarmDeath {
+                function: fn_name.clone(),
+                n: deaths - deaths_before,
+            });
+        }
+        if reaps > reaps_before {
+            out.push(TimelineEvent::WarmReap {
+                function: fn_name.clone(),
+                n: reaps - reaps_before,
+            });
+        }
+        if live > live_before {
+            out.push(TimelineEvent::WarmSpawn {
+                function: fn_name.clone(),
+                n: live - live_before,
+                live,
+            });
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------
@@ -450,14 +784,39 @@ pub fn serve<R: tauri::Runtime>(
     (404, "text/plain", b"not found".to_vec())
 }
 
+/// The dev-only codegen status file `pylair dev` writes next to its
+/// restart trigger (`.pylair/codegen-status.json`) and points the app
+/// at through `PYLAIR_CODEGEN_STATUS` — the simplest channel that
+/// stays dev-only: the variable only ever reaches the dev child, and
+/// the inspector merely reads a file it was explicitly handed.
+/// Absent variable or unreadable file: no banner, no timeline entries.
+pub fn read_codegen_status() -> Option<String> {
+    let path = std::env::var_os("PYLAIR_CODEGEN_STATUS")?;
+    std::fs::read_to_string(path).ok()
+}
+
+/// Poll the codegen status file into the tap (recording a timeline
+/// entry on change) and return the parsed status for the banner.
+/// Shared by the scheme snapshot and the command so both surfaces
+/// tell the same story.
+pub fn poll_codegen(tap: &InspectRef) -> Option<Value> {
+    let raw = read_codegen_status()?;
+    tap.note_codegen_status(&raw);
+    serde_json::from_str(&raw).ok()
+}
+
 /// The `/snapshot` body: tap records plus a health snapshot. Shared by
 /// the scheme handler and the `python_inspect_snapshot` command.
 pub fn inspect_snapshot_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
     use tauri::Manager;
     let mut snap = serde_json::json!({"enabled": false, "records": [], "in_flight": []});
     if let Some(rt) = app.try_state::<crate::PyRuntime>() {
+        let codegen = poll_codegen(&rt.0.inspect());
         snap = rt.0.inspect().snapshot();
         snap["health"] = serde_json::to_value(rt.0.health(None)).unwrap_or(Value::Null);
+        if let Some(c) = codegen {
+            snap["codegen"] = c;
+        }
     }
     snap
 }

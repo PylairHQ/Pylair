@@ -46,6 +46,11 @@ pub(super) async fn spawn_child(
     spec: &SpawnSpec,
     config: &SupervisorConfig,
     events: &crate::eventbus::EventBus,
+    // The dev-only inspector tap and the generation being spawned —
+    // stderr lines are recorded generation-tagged before the event
+    // channel ever sees them (docs/inspector.md). Inert in release.
+    inspect: &crate::inspect::InspectRef,
+    generation: u64,
     #[cfg(target_os = "linux")] pdeath_anchor: &mut Option<PdeathAnchor>,
 ) -> io::Result<ChildIo> {
     // Simplify a canonicalized (Windows \\?\-prefixed) program path so the
@@ -95,7 +100,6 @@ pub(super) async fn spawn_child(
     };
     #[cfg(target_os = "linux")]
     let mut child = spawn_via_pdeathsig_anchor(spec, pdeath_anchor)?;
-    #[cfg(windows)]
     let pid = child.id();
     let stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
@@ -253,6 +257,11 @@ pub(super) async fn spawn_child(
     let sink = Arc::new(StderrSink::new());
     {
         let sink = sink.clone();
+        // The inspector tap records lines BEFORE the bounded channel
+        // policy can drop them — the timeline's own ring owns its
+        // lossiness instead of inheriting the channel's. One atomic
+        // load per line when the flag is off, nothing in release.
+        let inspect = inspect.clone();
         tokio::spawn(async move {
             let mut rdr = BufReader::with_capacity(16 * 1024, stderr);
             let mut lines = StderrLines::new();
@@ -262,6 +271,7 @@ pub(super) async fn spawn_child(
                     Ok(b) => {
                         let n = b.len();
                         for line in lines.feed(b) {
+                            inspect.note_stderr(generation, &line);
                             sink.push(line);
                         }
                         rdr.consume(n);
@@ -272,6 +282,7 @@ pub(super) async fn spawn_child(
                 }
             }
             if let Some(last) = lines.finish() {
+                inspect.note_stderr(generation, &last);
                 sink.push(last);
             }
             sink.finish();
@@ -288,6 +299,7 @@ pub(super) async fn spawn_child(
         msg_in: msg_rx,
         exited: exit_rx,
         kill: kill_tx,
+        pid,
     })
 }
 
