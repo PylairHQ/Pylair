@@ -29,7 +29,7 @@ import datetime, enum, uuid
 from decimal import Decimal
 from pathlib import Path
 from typing import Generic, TypeVar
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic import BaseModel, Field, computed_field, field_serializer
 from pylair import expose
 
 class Color(enum.Enum):
@@ -46,7 +46,6 @@ class Sym(BaseModel):
     b: str = "x"
 
 class Order(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
     order_id: str = Field(alias="orderId")
     user_ident: int = Field(validation_alias="user_id", serialization_alias="userId")
     color: Color
@@ -126,7 +125,12 @@ function valueMatchesType(value, tsType, interfaces) {
   }
   if (tsType.includes(" | ")) return tsType.split(" | ").some((t) => valueMatchesType(value, t, interfaces));
   if (/^".*"$/.test(tsType)) return value === JSON.parse(tsType);
-  if (interfaces[tsType]) return value && typeof value === "object";
+  if (interfaces[tsType]) {
+    if (!value || typeof value !== "object") return false;
+    // recurse: nested interface keys and types are part of the contract
+    assertMatchesInterface(value, interfaces[tsType], interfaces, tsType);
+    return true;
+  }
   return true; // Record<>/unmodelled — presence already checked
 }
 
@@ -204,7 +208,36 @@ test("contract: generated interfaces match real runtime behavior", { skip: !hasP
     const hello = await rt.next();
     assert.ok(hello.params.exposes.some((e) => e.name === "place_order"));
 
-    // split-alias model: input per INPUT interface accepted, output matches OUTPUT interface
+    // split-alias model: params per the INPUT interface accepted,
+    // result matches the OUTPUT interface exactly
+    rt.send({ id: 1, method: "call", params: { fn: "place_order", task: 1, input: { order: INPUT_ORDER } } });
+    const rep = await rt.next();
+    assert.ok(!rep.error, `call failed: ${JSON.stringify(rep.error)}`);
+    assertMatchesInterface(rep.result, interfaces.Order, interfaces, "Order result");
+    // spot checks: the contract-critical transformations
+    assert.ok("userId" in rep.result, "serialization alias present on output");
+    assert.ok(!("user_id" in rep.result), "validation alias absent on output");
+    assert.ok("orderId" in rep.result, "symmetric alias present");
+    assert.equal(rep.result.total, 42, "computed field present and correct");
+    assert.equal(rep.result.blob, "ff00", "serializer-owned blob is the hex string");
+    assert.equal(typeof rep.result.ttl, "string", "timedelta is a string");
+    assert.equal(typeof rep.result.ident, "string", "uuid is a string");
+    assert.equal(typeof rep.result.price, "string", "decimal is a string");
+    assert.equal(typeof rep.result.dest, "string", "path is a string");
+    assert.equal(rep.result.color, "red", "enum by value");
+    assert.deepEqual(rep.result.pair, [1, "a"], "tuple round-trips");
+    assert.equal(rep.result.note, "default-note", "default applied");
+
+    // negative check: the INPUT interface's key name is the one the
+    // runtime requires — the python field name must be rejected
+    const badOrder = { ...INPUT_ORDER };
+    delete badOrder.user_id;
+    badOrder.user_ident = 21;
+    rt.send({ id: 3, method: "call", params: { fn: "place_order", task: 3, input: { order: badOrder } } });
+    const rep3 = await rt.next();
+    assert.ok(rep3.error, "python field name user_ident must be rejected — input interface uses user_id");
+
+    // symmetric model: input keys per the single interface accepted, output matches it
     rt.send({ id: 2, method: "call", params: { fn: "echo_sym", task: 2, input: { s: { a: 3 } } } });
     const rep2 = await rt.next();
     assert.ok(!rep2.error, `call failed: ${JSON.stringify(rep2.error)}`);
