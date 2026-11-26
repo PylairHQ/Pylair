@@ -64,6 +64,71 @@ async fn wait_ready(h: &tauri_plugin_pylair::supervisor::Handle) {
 }
 
 #[tokio::test]
+async fn real_error_data_fields_reach_the_records() {
+    // PR A's wire format, end to end: the real testapp's enriched
+    // error.data (traceback/suggestions/errors) must survive extraction
+    // into the recorded outcome — not just the fixture shapes.
+    unsafe { std::env::set_var("PYLAIR_INSPECT", "1") };
+    let (ev_tx, _ev_rx) = tauri_plugin_pylair::supervisor::event_pair(256);
+    let mut spec = real_runtime_spec();
+    // What spec.rs adds automatically in dev builds; manual specs don't
+    // go through it.
+    spec.env.push(("PYLAIR_DEV_TRACEBACKS".into(), "1".into()));
+    let (handle, actor) = spawn(spec, cfg(), ev_tx);
+    tokio::spawn(actor);
+    wait_ready(&handle).await;
+
+    let boom = handle
+        .call("boom", json!(null), Some("main".into()), Some(false))
+        .await
+        .unwrap_err();
+    assert!(boom.data.is_some(), "boom carries data");
+
+    let bad = handle
+        .call(
+            "add",
+            json!({"a": "notanint", "b": 2}),
+            Some("main".into()),
+            Some(false),
+        )
+        .await
+        .unwrap_err();
+
+    let misspelled = handle
+        .call("boomm", json!(null), Some("main".into()), Some(false))
+        .await
+        .unwrap_err();
+
+    let snap = handle.inspect().snapshot();
+    let records = snap["records"].as_array().unwrap();
+    let rec = |f: &str| {
+        records
+            .iter()
+            .find(|r| r["function"] == f)
+            .unwrap_or_else(|| panic!("{f} recorded"))
+    };
+    let boom_tb = rec("boom")["outcome"]["traceback"]
+        .as_str()
+        .expect("real traceback recorded");
+    assert!(
+        boom_tb.contains("testapp.py") && boom_tb.contains("ValueError: boom"),
+        "the traceback is the real one, app frames included: {boom_tb}"
+    );
+    let errs = rec("add")["outcome"]["errors"]
+        .as_array()
+        .expect("errors list");
+    assert_eq!(errs[0]["path"], "args.a");
+    assert_eq!(errs[0]["expected"], "int");
+    assert_eq!(errs[0]["received"], "string");
+    let sugg = rec("boomm")["outcome"]["suggestions"]
+        .as_array()
+        .expect("suggestions");
+    assert_eq!(sugg[0], "boom");
+    let _ = (bad, misspelled);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn tap_records_real_calls_and_events_channel_unaffected() {
     // The tap reads the HOST env at spawn (same process here) — set it
     // before spawning. Debug-only codepath; the flag is additive so
