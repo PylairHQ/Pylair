@@ -35,6 +35,19 @@ test("the vendored preflight module is byte-identical to packages/cli/src", () =
   );
 });
 
+/** compat.ts + compat.json are vendored the same way: the compatibility
+ * manifest lives in packages/cli (the pins PR edits exactly that one
+ * file) and the scaffolder derives its pins from the identical copy. */
+test("the vendored compat module and manifest are byte-identical to packages/cli/src", () => {
+  for (const f of ["compat.ts", "compat.json"]) {
+    assert.equal(
+      readFileSync(join(SRC, f), "utf8"),
+      readFileSync(join(CLI_SRC, f), "utf8"),
+      `${f} drifted from packages/cli/src; run pnpm build to re-sync`,
+    );
+  }
+});
+
 /** The character policy: printed strings are ASCII except the shared
  * symbol set (vendored, guarded by the CLI's own tests) and the wordmark's
  * box-drawing art (fancy+unicode only). No em dashes, no stray Unicode. */

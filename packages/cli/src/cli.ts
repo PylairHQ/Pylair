@@ -16,6 +16,7 @@ import { loadManifest } from "./manifest.js";
 import { initUi, ui } from "./ui/index.js";
 import { interactive, PromptCancelled } from "./ui/prompts.js";
 import { updateManifestCommand } from "./update.js";
+import { upgradeCheck } from "./upgrade.js";
 import { initWrap } from "./wrap.js";
 import { WRAP_FRAMEWORKS, type WrapFramework } from "./wrapconfig.js";
 import { cliVersion } from "./version.js";
@@ -39,6 +40,7 @@ Commands:
   init      pylair init --mode wrap  (the same as \`pylair wrap\`)
   keys      Update signing keys (pylair keys init)
   update    Auto-update artifacts (pylair update manifest)
+  upgrade   Version alignment (pylair upgrade --check [--online])
 
 dev options:
   --dir <path>          App directory (default: cwd)
@@ -410,6 +412,17 @@ export function main(rawArgv: string[]): number | Promise<number> {
   if (command === "doctor") {
     const dir = resolveAppDir(argValue(rest, "--dir"));
     return doctor(dir).then((code) => code);
+  }
+  if (command === "upgrade") {
+    if (!rest.includes("--check")) {
+      ui.error("pylair upgrade: pass --check (read-only). Automatic edits are not implemented yet.");
+      return 2;
+    }
+    const dir = resolveAppDir(argValue(rest, "--dir"));
+    return upgradeCheck({ appDir: dir, online: rest.includes("--online") }).then(
+      (code) => code,
+      (e) => failed("upgrade", e),
+    );
   }
   ui.error(`pylair: unknown command '${command}'. Run 'pylair --help'.`);
   return 1;

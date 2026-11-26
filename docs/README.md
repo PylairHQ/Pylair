@@ -27,6 +27,8 @@ Specs and guides for building on Pylair, plus the design history.
   live inspector window: per-call latency, verdicts and pool status.
 - [updates.md](updates.md): opt-in auto-update — signed artifacts, the
   rollback watchdog, `pylair keys`/`update` and app-side checks.
+- [upgrading.md](upgrading.md): how versioning works across the three
+  registries, `pylair upgrade --check`, and a manual upgrade walkthrough.
 - [wrap-mode-brief.md](wrap-mode-brief.md): the wrap-mode design brief.
 - [performance.md](performance.md): bridge latency baseline: method,
   first numbers per OS, and how to run the three bench layers.

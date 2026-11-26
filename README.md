@@ -153,6 +153,8 @@ crate at `0.1.0-rc.24`). Check each registry for its latest RC.
   and the [wrap guide](docs/wrap.md).
 - Auto-update: [docs/updates.md](docs/updates.md) — signed updates with a
   readiness-gated rollback watchdog (decision 0011).
+- Upgrading an app to a newer RC: [docs/upgrading.md](docs/upgrading.md)
+  — `pylair upgrade --check` prints the exact edits, offline.
 - Security model: [docs/security.md](docs/security.md); reporting a
   vulnerability: [SECURITY.md](SECURITY.md).
 - Design history: [docs/decisions/](docs/decisions/).

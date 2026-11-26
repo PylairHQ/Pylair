@@ -1,0 +1,63 @@
+{
+  "current": "0.1.0-rc.31",
+  "releases": [
+    {
+      "npm": "0.1.0-rc.31",
+      "crate": "0.1.0-rc.24",
+      "pylair": "0.1.0rc17",
+      "date": "2026-11-25",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.30",
+      "crate": "0.1.0-rc.23",
+      "pylair": "0.1.0rc16",
+      "date": "2026-11-24",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.29",
+      "crate": "0.1.0-rc.23",
+      "pylair": "0.1.0rc15",
+      "date": "2026-11-23",
+      "notes": [
+        "CSP for blob/media payloads: in src-tauri/tauri.conf.json, allow the pylair-blob scheme in connect-src, img-src and media-src (both spellings: `pylair-blob:` and `http://pylair-blob.localhost`), plus `blob:` in the same directives for mediaUrl() object URLs - and keep 'self' in media-src or bundled audio/video is blocked. Only needed if the app uses Blob payloads or media; diff against a fresh scaffold's csp/devCsp (docs/blobs.md)."
+      ]
+    },
+    {
+      "npm": "0.1.0-rc.28",
+      "crate": "0.1.0-rc.22",
+      "pylair": "0.1.0rc14",
+      "date": "2026-11-22",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.27",
+      "crate": "0.1.0-rc.21",
+      "pylair": "0.1.0rc13",
+      "date": "2026-11-22",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.26",
+      "crate": "0.1.0-rc.20",
+      "pylair": "0.1.0rc12",
+      "date": "2026-11-22",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.25",
+      "crate": "0.1.0-rc.19",
+      "pylair": "0.1.0rc11",
+      "date": "2026-11-21",
+      "notes": []
+    },
+    {
+      "npm": "0.1.0-rc.24",
+      "crate": "0.1.0-rc.18",
+      "pylair": "0.1.0rc11",
+      "date": "2026-11-20",
+      "notes": []
+    }
+  ]
+}

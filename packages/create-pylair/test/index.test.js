@@ -8,6 +8,15 @@ import { fileURLToPath } from "node:url";
 
 const bin = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
+// Pin expectations derive from the vendored compatibility manifest - the
+// release-bump PR edits compat.json (plus the train's Cargo.lock regen)
+// and these tripwires keep verifying consistency, never version literals.
+const COMPAT = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../src/compat.json", import.meta.url)), "utf8"),
+);
+const CURRENT = COMPAT.releases.find((r) => r.npm === COMPAT.current);
+const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 function scaffold(args, cwd) {
   return spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", cwd });
 }
@@ -60,13 +69,16 @@ test("scaffolds a complete app skeleton", () => {
     assert.ok(gi.includes(line), `.gitignore missing "${line}"`);
   const py = readFileSync(join(app, "pyproject.toml"), "utf8");
   assert.match(py, /app-module = "backend\.app"/);
-  assert.match(py, /pylair==0\.1\.0rc17/);
+  assert.match(py, new RegExp(`pylair==${esc(CURRENT.pylair)}`));
   const pkg = readFileSync(join(app, "package.json"), "utf8");
-  assert.match(pkg, /"@pylair\/client": "0\.1\.0-rc\.31"/);
-  assert.match(pkg, /"@pylair\/cli": "0\.1\.0-rc\.31"/);
+  assert.match(pkg, new RegExp(`"@pylair/client": "${esc(CURRENT.npm)}"`));
+  assert.match(pkg, new RegExp(`"@pylair/cli": "${esc(CURRENT.npm)}"`));
   const lock = readFileSync(join(app, "src-tauri/Cargo.lock"), "utf8");
   assert.match(lock, /name = "my-app"/);
-  assert.match(lock, /name = "tauri-plugin-pylair"\nversion = "0\.1\.0-rc\.24"/);
+  assert.match(
+    lock,
+    new RegExp(`name = "tauri-plugin-pylair"\\nversion = "${esc(CURRENT.crate)}"`),
+  );
   // Tripwire: the shipped lock must carry exactly the crate version the
   // scaffold pins in Cargo.toml, or a registry-mode build re-resolves.
   const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
@@ -126,7 +138,7 @@ test("--mode wrap works without --local since wrap mode is published", () => {
   const app = join(dir, "w-app");
   const py = readFileSync(join(app, "pyproject.toml"), "utf8");
   assert.match(py, /mode = "wrap"/);
-  assert.match(py, /pylair==0\.1\.0rc17/);
+  assert.match(py, new RegExp(`pylair==${esc(CURRENT.pylair)}`));
   // Same tripwire as the bridge scaffold: the shipped lock must carry
   // exactly the crate version the wrap Cargo.toml pins.
   const cargo = readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8");
