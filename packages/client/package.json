@@ -29,7 +29,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "pnpm build",
-    "test": "node --test"
+    "test": "node --test --test-timeout=120000"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
