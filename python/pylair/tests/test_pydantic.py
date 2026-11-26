@@ -338,3 +338,84 @@ def test_pre_coerce_lenient_on_garbage():
                 "p": "/x",
             },
         )
+
+
+# ---- output encoding matrix (review: json fidelity, bytes excepted) -----------
+
+
+def test_special_types_json_fidelity():
+    pytest.importorskip("email_validator")
+    from pydantic import EmailStr, HttpUrl, IPvAnyAddress, SecretStr
+
+    class S(BaseModel):
+        url: HttpUrl
+        email: EmailStr
+        secret: SecretStr
+        ip: IPvAnyAddress
+
+    m = S(url="https://x.com/a", email="a@b.com", secret="s3cr3t", ip="10.0.0.1")
+    out = json.loads(dumps(m))
+    # exactly pydantic's own json-mode output — strings, not objects
+    assert out == {
+        "url": "https://x.com/a",
+        "email": "a@b.com",
+        "secret": "**********",
+        "ip": "10.0.0.1",
+    }
+
+
+def test_json_only_field_serializer_honored():
+    from pydantic import field_serializer
+
+    class J(BaseModel):
+        x: int
+
+        @field_serializer("x", when_used="json")
+        def ser_x(self, v):
+            return f"x-is-{v}"
+
+    assert json.loads(dumps(J(x=5))) == {"x": "x-is-5"}
+
+
+def test_json_only_serializer_honored_in_bytes_model():
+    """the intersection: bytes fields AND json-only serializers both work —
+    the sentinel swap preserves json-mode machinery for everything else."""
+    from pydantic import field_serializer
+
+    class JB(BaseModel):
+        blob: bytes
+        x: int
+
+        @field_serializer("x", when_used="json")
+        def ser_x(self, v):
+            return f"x-is-{v}"
+
+    out = json.loads(dumps(JB(blob=b"\xff", x=5)))
+    assert out["x"] == "x-is-5"
+    assert "$b64" in dumps(JB(blob=b"\xff", x=5))
+
+
+def test_bytes_nested_everywhere():
+    class N(BaseModel):
+        items: list[bytes]
+        deep: dict
+
+    n = N(items=[b"\xff", b"abc"], deep={"k": [b"\x00"]})
+    out = dumps(n)
+    assert out.count("$b64") == 3
+    # the user's instance is never mutated by the sentinel swap
+    assert n.items == [b"\xff", b"abc"]
+    assert n.deep == {"k": [b"\x00"]}
+
+
+def test_bytes_in_computed_field_named_error():
+    class C(BaseModel):
+        x: bytes
+
+        @computed_field
+        @property
+        def extra(self) -> bytes:
+            return b"\xff"
+
+    with pytest.raises((TypeError, UnicodeDecodeError)):
+        dumps(C(x=b"ok"))

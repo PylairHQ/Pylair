@@ -232,39 +232,45 @@ distinguish).
   `type: value_error` with `msg` carrying the user's text — the human
   `message` field uses it verbatim, the machine shape comes from `loc`.
 
-## 5. Results out: `model_dump(mode="json", by_alias=True)`
+## 5. Results out: json mode with sentinel byte-swapping
 
-Evidence (`q3_q4_q5_wire.py`):
+`model_dump(mode="json", by_alias=True)` — with declared bytes fields
+exchanged for sentinel strings beforehand and restored afterwards. This
+supersedes the earlier python-mode recommendation; the encoding matrix
+below (spike-verified, pydantic 2.14.x) settled it:
 
-- **`computed_field`** — included in the dump, and statically visible:
-  `Model.model_computed_fields` carries the return annotation
-  (`area -> int` in the spike). **Supported**: the TS type includes
-  computed fields, read-only by nature.
-- **`model_serializer`** — can emit literally any shape
-  (`{"totally": "different", ...}` in the spike). There is nothing to
-  walk: **unsupported in v1**, loudly — the schema generator raises
-  with the model name and the reason when it detects one, rather than
-  emitting a type that lies. (Escape hatch documented: annotate the
-  function's return as a TypedDict/dataclass mirror of the real shape.)
-- **`field_serializer`** — changes the wire type of one field (datetime
-  became `15/01/2026`). Statically visible, but return annotations are
-  often absent in practice. v1: honor it when a return annotation
-  exists; absent one, the field degrades to its JSON-schema-emitted
-  type with a documented-lossy note. Not a lie only because pydantic's
-  own schema applies the same serializer — worth one test either way
-  in implementation.
-- **exclude/include** — `model_dump(exclude=...)` is a *call-site*
-  choice; the bridge always dumps the full model. No interaction.
-- **Pylair's own encodings** — `mode="json"` keeps python ints exact,
-  so the `$bigint` tag wrapping applies to pydantic output exactly as
-  it does to dataclass output — **consistent, not conflicting**: the
-  tag layer runs after `model_dump`, in pylair's encoder, unchanged.
-  Datetimes come out of `mode="json"` as ISO strings, the same wire
-  shape the dataclass path produces. Bytes need the existing base64
-  handling rather than pydantic's (pydantic emits utf-8-ish strings in
-  json mode — the implementation must verify byte-fidelity in a test;
-  worst case the bridge encodes bytes itself after the dump, before the
-  tag pass).
+| case | python mode | json mode | hybrid (python + to_jsonable_python) |
+|---|---|---|---|
+| bytes valid utf-8 | bytes object | utf-8 string — wrong | bytes object |
+| bytes arbitrary | bytes object | **crash** UnicodeDecodeError | bytes object |
+| HttpUrl / EmailStr / SecretStr / IPvAnyAddress / NameEmail | objects, not strings | correct JSON strings | **crash** — to_jsonable_python doesn't know them |
+| datetime / UUID / Decimal | objects | correct JSON strings | correct — matches json exactly |
+| `@field_serializer(when_used="json")` | **silently skipped** | honored | **silently skipped** |
+| `PlainSerializer(when_used="json")` | **silently skipped** | honored | **silently skipped** |
+
+Nothing may be silently different from pydantic's JSON output other than
+bytes becoming `$b64`. Python mode fails that twice (silent serializer
+skips, special types as objects) and the to_jsonable_python hybrid can't
+even run on the special types. Json mode is the only correct base — so
+bytes are handled around it:
+
+- **No bytes in the annotation tree** (decoration-time analysis, cached):
+  straight `model_dump(mode="json", by_alias=True)` — output identical
+  to pydantic's own JSON.
+- **Bytes present**: `model_copy(deep=True)`, every bytes/bytearray leaf
+  swapped for a random-uuid sentinel string, json-mode dump of the copy,
+  sentinels restored to real bytes in the output. pylair's encoder then
+  applies `$b64` — the single intended divergence. The user's instance
+  is never mutated. The serializer warnings the swap triggers are scoped-
+  suppressed (they are correct from pydantic's perspective and noise here).
+- **Bytes inside computed-field or custom-serializer output** cannot be
+  swapped (they don't exist before the dump): json mode raises
+  UnicodeDecodeError, surfaced as a named TypeError telling the author to
+  expose the payload as a declared bytes field.
+- `computed_field` output included in the response shape as before;
+  `model_serializer` remains loud-unsupported at decoration (§7).
+- `$bigint` tagging composes after the dump as before: json mode passes
+  Python ints through untouched, pylair's encoder tags the big ones.
 
 ## 6. Performance
 

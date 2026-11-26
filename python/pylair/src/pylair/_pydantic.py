@@ -402,10 +402,123 @@ def validate_model(cls: type, value: Any, path: str) -> Any:
 # ---- dumping out (decision 0012 §5) ------------------------------------------
 
 
+def _has_bytes(annotation: Any, seen: frozenset = frozenset()) -> bool:
+    """True when the annotation tree contains bytes anywhere — nested
+    models, containers, unions. Cached per top model by dump_model."""
+    if annotation in (bytes, bytearray):
+        return True
+    if annotation in seen or annotation is Any or annotation is None:
+        return False
+    seen = seen | {annotation}
+    if is_model_class(annotation):
+        return any(
+            _has_bytes(f.annotation, seen) for f in annotation.model_fields.values()
+        )
+    return any(_has_bytes(a, seen) for a in typing.get_args(annotation))
+
+
+def _model_has_bytes(cls: type) -> bool:
+    cached = getattr(cls, "__pylair_has_bytes__", None)
+    if cached is None:
+        try:
+            cached = _has_bytes(cls)
+        except Exception:  # noqa: BLE001 - exotic annotations: assume bytes-free path
+            cached = False
+        try:
+            cls.__pylair_has_bytes__ = cached
+        except (AttributeError, TypeError):
+            pass
+    return cached
+
+
+def _swap_bytes(obj: Any, sentinels: dict, prefix: str, counter: list) -> Any:
+    """Rebuild the deep-copied model graph with every bytes/bytearray leaf
+    replaced by a unique sentinel string. The sentinel embeds a random
+    per-dump uuid, so collision with real user data is not a practical
+    concern. Runs on a model_copy(deep=True) — the user's instance is
+    never mutated."""
+    if isinstance(obj, (bytes, bytearray)):
+        token = f"{prefix}{counter[0]}"
+        counter[0] += 1
+        sentinels[token] = bytes(obj)
+        return token
+    base = _base_model()
+    if base is not None and isinstance(obj, base):
+        for fname in type(obj).model_fields:
+            if hasattr(obj, fname):
+                try:
+                    setattr(
+                        obj,
+                        fname,
+                        _swap_bytes(getattr(obj, fname), sentinels, prefix, counter),
+                    )
+                except (AttributeError, ValueError):
+                    pass  # frozen/exotic field — bytes inside raise at json dump
+        return obj
+    if isinstance(obj, dict):
+        return {k: _swap_bytes(v, sentinels, prefix, counter) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_swap_bytes(v, sentinels, prefix, counter) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [_swap_bytes(v, sentinels, prefix, counter) for v in obj]
+    return obj
+
+
+def _restore_bytes(obj: Any, sentinels: dict) -> Any:
+    if isinstance(obj, str) and obj in sentinels:
+        return sentinels[obj]
+    if isinstance(obj, dict):
+        return {k: _restore_bytes(v, sentinels) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_restore_bytes(v, sentinels) for v in obj]
+    return obj
+
+
 def dump_model(instance: Any) -> dict:
-    """model_dump for the wire. mode='python', NOT 'json': json mode
-    crashes on non-UTF-8 bytes (UnicodeDecodeError — verified in the
-    p0-pydantic spike) and utf8-flattens the rest; python mode keeps
-    real objects so pylair's own encoder applies the SAME bytes/datetime/
-    bigint handling as the dataclass path. by_alias per decision §3."""
-    return instance.model_dump(mode="python", by_alias=True)
+    """model_dump for the wire — JSON-mode fidelity everywhere except
+    bytes, which stay bytes so pylair's encoder can apply $b64 (decision
+    0012 §5, revised with the encoding matrix evidence).
+
+    mode='json' is the only mode that honours when_used='json' serializers
+    and stringifies pydantic's special types (HttpUrl, EmailStr, SecretStr,
+    IPvAnyAddress, ...) — python mode skips the serializers and
+    to_jsonable_python CRASHES on the special types. But json mode crashes
+    on non-UTF-8 bytes. So:
+
+    - models without bytes in their annotation tree dump straight in json
+      mode — output identical to pydantic's own JSON;
+    - models with bytes dump a deep copy in which every bytes leaf is
+      swapped for a random-uuid sentinel string, then restore the real
+      bytes into the json output. pylair's encoder turns them into $b64,
+      the single intended divergence from pydantic JSON output.
+
+    Bytes emitted by computed fields or custom serializer output cannot
+    be swapped (they don't exist before the dump) — json mode then raises
+    UnicodeDecodeError, surfaced as a named TypeError."""
+    cls = type(instance)
+    if not _model_has_bytes(cls):
+        return instance.model_dump(mode="json", by_alias=True)
+
+    import uuid as _u
+
+    sentinels: dict[str, bytes] = {}
+    prefix = f"pylair-bytes-sentinel-{_u.uuid4().hex}-"
+    copy = instance.model_copy(deep=True)
+    swapped = _swap_bytes(copy, sentinels, prefix, [0])
+    import warnings
+
+    try:
+        # the sentinel swap means the serializer sees strings where it
+        # expects bytes — it warns (correctly, from its perspective) but
+        # still emits the sentinel verbatim, which is all we need
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            dumped = swapped.model_dump(mode="json", by_alias=True)
+    except UnicodeDecodeError as e:
+        raise TypeError(
+            f"model {cls.__name__!r} emits bytes outside its declared fields "
+            "(a computed field or custom serializer returning bytes) — "
+            "JSON cannot carry bytes, so the bridge cannot send them. "
+            "Expose the payload as a declared bytes field instead."
+        ) from e
+    return _restore_bytes(dumped, sentinels)
