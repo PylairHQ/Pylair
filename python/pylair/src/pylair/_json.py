@@ -29,12 +29,16 @@ import base64
 import binascii
 import dataclasses
 import datetime as _dt
+import decimal as _decimal
 import enum
 import inspect
 import json
 import math
+import pathlib as _pathlib
+import re as _re
 import types
 import typing
+import uuid as _uuid
 import weakref
 from typing import Any
 
@@ -42,6 +46,66 @@ from pylair._bigint import BIGINT_MAX_DIGITS, BIGINT_RE, BIGINT_TAG, BigInt
 from pylair._blob import Blob, BlobFallbackExceeded  # noqa: F401 — re-export for senders
 
 _B64_TAG = "$b64"
+
+# ---- shared wire conversions (decision 0012 §4) ---------------------------
+# One conversion table used by every validation path — plain params,
+# dataclasses, TypedDicts and the pydantic pre-coercion walk. Wire forms:
+#   timedelta -> ISO-8601 duration ("PT1H30M5.5S"); UUID -> canonical string
+#   Decimal -> string (lossless) or number;  Path -> string
+# Enum-by-value, tuples/sets-from-arrays and datetime/date/time were already
+# pylair types; these four complete the doc's matrix.
+
+_DURATION_RE = _re.compile(
+    r"^P(?:(?P<weeks>[\d.]+)W)?(?:(?P<days>[\d.]+)D)?"
+    r"(?:T(?:(?P<hours>[\d.]+)H)?(?:(?P<minutes>[\d.]+)M)?(?:(?P<seconds>[\d.]+)S)?)?$"
+)
+
+
+def parse_duration(text: str) -> _dt.timedelta:
+    """ISO-8601 duration -> timedelta. Weeks/days/hours/minutes/seconds —
+    the parts timedelta can hold; years/months are ambiguous by design
+    and rejected. Raises ValueError on anything malformed."""
+    m = _DURATION_RE.fullmatch(text)
+    if not m or not any(m.groupdict().values()):
+        raise ValueError(f"invalid ISO-8601 duration: {text!r}")
+    parts = {k: float(v) for k, v in m.groupdict().items() if v is not None}
+    return _dt.timedelta(
+        weeks=parts.get("weeks", 0),
+        days=parts.get("days", 0),
+        hours=parts.get("hours", 0),
+        minutes=parts.get("minutes", 0),
+        seconds=parts.get("seconds", 0),
+    )
+
+
+def format_duration(td: _dt.timedelta) -> str:
+    """timedelta -> ISO-8601 duration, the exact inverse of parse_duration
+    for the representable range (weeks fold into days)."""
+    total = td.total_seconds()
+    if total == 0:
+        return "PT0S"
+    sign = "-" if total < 0 else ""
+    total = abs(total)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    def num(x: float) -> str:
+        return str(int(x)) if x == int(x) else repr(round(x, 6)).rstrip("0").rstrip(".")
+
+    out = sign + "P"
+    if days:
+        out += f"{num(days)}D"
+    if hours or minutes or seconds or not days:
+        out += "T"
+        if hours:
+            out += f"{num(hours)}H"
+        if minutes:
+            out += f"{num(minutes)}M"
+        if seconds or (not hours and not minutes):
+            out += f"{num(seconds)}S"
+    return out
+
 
 # JS Number.MAX_SAFE_INTEGER — the largest int that survives JSON.parse.
 _SAFE_INT = (1 << 53) - 1
@@ -73,8 +137,18 @@ def _default(obj: Any) -> Any:
         return {_B64_TAG: base64.b64encode(bytes(obj)).decode("ascii")}
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
+    from pylair import _pydantic  # lazy: pylair never requires pydantic
+
+    if _pydantic.is_model_instance(obj):
+        return _pydantic.dump_model(obj)
     if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
         return obj.isoformat()
+    if isinstance(obj, _dt.timedelta):
+        return format_duration(obj)
+    if isinstance(obj, (_uuid.UUID, _pathlib.PurePath)):
+        return str(obj)
+    if isinstance(obj, _decimal.Decimal):
+        return str(obj)  # lossless — the wire form per decision 0012 §4
     if isinstance(obj, enum.Enum):
         return obj.value
     if isinstance(obj, (set, frozenset)):
@@ -500,6 +574,14 @@ def coerce(annotation: Any, value: Any, _path: str = "args") -> Any:
             return value
         _fail("str", value, _path)
 
+    # pydantic v2 models validate through their own strict machinery
+    # (decision 0012 §4) — lazy import: pylair never requires pydantic
+    if inspect.isclass(annotation):
+        from pylair import _pydantic
+
+        if _pydantic.is_model_class(annotation):
+            return _pydantic.validate_model(annotation, value, _path)
+
     if inspect.isclass(annotation) and dataclasses.is_dataclass(annotation):
         if not isinstance(value, dict):
             raise InvalidParams(
@@ -681,6 +763,65 @@ def coerce(annotation: Any, value: Any, _path: str = "args") -> Any:
                     "received": _json_type(value),
                 }
             ],
+        )
+
+    # decision 0012 §4 shared types — same wire forms in plain params,
+    # dataclasses, TypedDicts and pydantic fields.
+    if annotation is _dt.timedelta:
+        if isinstance(value, _dt.timedelta):
+            return value
+        if isinstance(value, str):
+            try:
+                return parse_duration(value)
+            except ValueError:
+                pass
+        raise InvalidParams(
+            f"expected ISO-8601 duration, got {_short(value)}",
+            errors=[
+                {"path": _path, "expected": "timedelta", "received": _json_type(value)}
+            ],
+        )
+
+    if annotation is _uuid.UUID:
+        if isinstance(value, _uuid.UUID):
+            return value
+        if isinstance(value, str):
+            try:
+                return _uuid.UUID(value)
+            except ValueError:
+                pass
+        raise InvalidParams(
+            f"expected UUID string, got {_short(value)}",
+            errors=[{"path": _path, "expected": "uuid", "received": _json_type(value)}],
+        )
+
+    if annotation is _decimal.Decimal:
+        if isinstance(value, _decimal.Decimal):
+            return value
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            try:
+                return _decimal.Decimal(value)
+            except _decimal.InvalidOperation:
+                pass
+        elif isinstance(value, float):
+            # a JSON number is exactly what the client meant — str() keeps
+            # the decimal form rather than the binary expansion
+            return _decimal.Decimal(str(value))
+        raise InvalidParams(
+            f"expected decimal string or number, got {_short(value)}",
+            errors=[
+                {"path": _path, "expected": "decimal", "received": _json_type(value)}
+            ],
+        )
+
+    if inspect.isclass(annotation) and issubclass(annotation, _pathlib.PurePath):
+        if isinstance(value, _pathlib.PurePath):
+            return value
+        if isinstance(value, str):
+            return annotation(value)
+        raise InvalidParams(
+            f"expected path string, got {_short(value)}",
+            errors=[{"path": _path, "expected": "path", "received": _json_type(value)}],
         )
 
     if inspect.isclass(annotation) and issubclass(annotation, enum.Enum):

@@ -656,6 +656,34 @@ JSON-RPC reserved plus app-specific, all in `-32000..-32099`:
 | -32040 | LIMIT_EXCEEDED | a configured resource limit was hit |
 | -32050 | PERMISSION_DENIED | host-side: the window's capability does not permit `fn` (never reaches Python) |
 
+## 8a. Type wire forms (schema names)
+
+The codegen schema names types; the wire forms below are the contract
+both validation directions share. `int`/`str`/`bool`/`float`/`list`/
+`dict`/`tuple`/`dataclass`/`typeddict`/`enum`/`bytes`/`datetime` are the
+established set. Decision 0012 adds provisional names (codegen support
+lands in a later PR):
+
+| schema name | wire form |
+|---|---|
+| `timedelta` | ISO-8601 duration string (`"PT1H30M5.5S"`) — never bare seconds |
+| `uuid` | canonical UUID string |
+| `decimal` | string (lossless; a JSON number is also accepted on input) |
+| `path` | string |
+| `pydantic` | object — a pydantic v2 model, fields keyed by wire alias |
+
+Pydantic v2 models (decision 0012): when the app uses pydantic, exposed
+functions may take and return models. Input validates strict after a
+pre-coercion pass converts the wire forms above at the annotated paths —
+stringly-typed input (`"1"` for an int) is rejected exactly as in the
+dataclass path, and `INVALID_PARAMS` `data.errors` carries the same
+`{path, expected, received}` shape. Output dumps by-alias with computed
+fields included; pylair's own `$b64`/`$bigint` encodings apply to the
+result exactly as for dataclasses. pylair never requires pydantic and
+never imports it — detection reads `sys.modules` only.
+
+## 8b. Error codes (continued)
+
 `LIMIT_EXCEEDED` errors carry `data: {"limit": "<name>", "max": <n>}`
 naming which cap fired — e.g. `"max_concurrent_tasks"`,
 `"stream_buffer_bytes"`, `"max_stream_credit"`, `"max_frame"`,

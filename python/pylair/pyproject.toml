@@ -12,6 +12,11 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
     "typing-extensions>=4.12",
+    # test-only: decision 0012's bridge support is proven against the real
+    # thing. pylair itself never requires pydantic (tests/test_no_pydantic.py
+    # proves import-and-work without it).
+    "pydantic>=2.14.4",
+    "email-validator>=2.2",  # test-only: EmailStr/NameEmail matrix coverage
 ]
 # Test-only: real frameworks for the wrap-adapter tests. Not a runtime
 # dependency of pylair; the default `uv sync` stays light. Pin the

@@ -8,6 +8,17 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+- **Pydantic v2 models in the typed bridge (runtime, decision 0012).**
+  Exposed functions may take and return pydantic v2 models when the app
+  uses pydantic — strict validation with pre-coerced wire forms, the
+  same structured `INVALID_PARAMS` errors as dataclasses, by-alias
+  output with computed fields. pylair never requires or imports
+  pydantic itself; v1 models, RootModel and `model_serializer` shapes
+  fail with named errors at decoration. Shared types now wire identically
+  in plain params, dataclasses, TypedDicts and pydantic fields:
+  timedelta (ISO-8601 durations), UUID, Decimal, Path, enums by value,
+  tuples/sets from arrays. TypeScript codegen lands in a follow-up PR.
+
 - **TypedDict support in the typed bridge.** A `TypedDict` (typing or
   typing_extensions) used as a param, return or nested field is now a
   first-class wire shape: codegen emits a deduped TS `interface` with
