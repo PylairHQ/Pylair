@@ -83,6 +83,9 @@ jobs:
     name: JS (${{ matrix.os }})
     needs: changes
     runs-on: ${{ matrix.os }}
+    # Suites finish in 1-3 minutes when healthy; a hung child process or a
+    # prompt waiting on stdin must fail fast (the runner default is 6h).
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -110,14 +113,23 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         with:
           enable-cache: false
+      # bash, not the pwsh default: under pwsh pnpm resolves to pnpm.cmd,
+      # and a console control event anywhere in the test tree leaves cmd.exe
+      # sitting on a "Terminate batch job (Y/N)?" prompt that no CI stdin
+      # ever answers (run 45750280136 stalled 72 minutes that way). The
+      # shell-script shim has no batch layer - a kill fails fast instead.
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.code == 'true'
+        shell: bash
       - run: pnpm build
         if: needs.changes.outputs.code == 'true'
+        shell: bash
       - run: pnpm typecheck
         if: needs.changes.outputs.code == 'true'
+        shell: bash
       - run: pnpm test
         if: needs.changes.outputs.code == 'true'
+        shell: bash
 
   rust:
     name: Rust (${{ matrix.os }})
