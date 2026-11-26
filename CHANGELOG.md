@@ -8,6 +8,8 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.33 (unreleased)
+
 - **Pydantic v2 codegen and client types (decision 0012, PR 2 of 2).**
   Models emit one interface each — `FooInput`/`Foo` pairs when validation
   and serialization aliases split the wire shape, keyed by exact alias,
