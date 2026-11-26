@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { build } from "./build.js";
 import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
+import { devSessionAlive, writeManualTrigger } from "./devwatch.js";
 import { doctor } from "./doctor.js";
 import { keysInit } from "./keys.js";
 import { loadManifest } from "./manifest.js";
@@ -408,6 +409,28 @@ export function main(rawArgv: string[]): number | Promise<number> {
       (code) => code,
       (e) => failed("dev", e),
     );
+  }
+  if (command === "restart") {
+    const dir = resolveAppDir(argValue(rest, "--dir"));
+    try {
+      const trigger = join(dir, ".pylair", "restart-trigger");
+      const session = devSessionAlive(dir);
+      if (!session.alive || !existsSync(trigger)) {
+        ui.error(
+          "pylair restart: no `pylair dev` session is running for this app" +
+            (existsSync(trigger)
+              ? " (stale trigger - the dev pid is gone)"
+              : " (no .pylair/restart-trigger)") +
+            " - start one first",
+        );
+        return 1;
+      }
+      writeManualTrigger(trigger);
+      ui.info(`pylair: manual restart requested (dev pid ${session.pid}) - the runtime restarts within ~250ms`);
+      return 0;
+    } catch (e) {
+      return failed("restart", e);
+    }
   }
   if (command === "doctor") {
     const dir = resolveAppDir(argValue(rest, "--dir"));

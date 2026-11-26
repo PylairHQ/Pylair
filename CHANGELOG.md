@@ -8,6 +8,27 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### `pylair dev` reload visibility, watch config and manual restart (DX item 10)
+
+- **Watch configuration**: `[tool.pylair.watch]` in pyproject.toml —
+  `include` (default `["**/*.py"]`) and `ignore` glob arrays, relative to
+  the source dir. Built-in ignores always apply: venvs, `__pycache__`,
+  `node_modules`, `.git`, editor temp files and `.pylair/` itself. The dev
+  header prints the effective set. One watcher implementation now serves
+  both bridge and wrap mode.
+- **Reload visibility in the terminal**: `reload: backend/app.py changed,
+  restarting Python` on each trigger, `reload: ready in 340ms
+  (generation 4)` when the new runtime is up, a named line when Python
+  exits during startup, and a named line when the crash-loop breaker
+  opens. The plugin writes `.pylair/runtime-status.json` at every state
+  transition — dev-only (debug builds, `PYLAIR_RUNTIME_STATUS` set by the
+  CLI), never in release builds.
+- **Manual restart**: `pylair restart` from a second terminal, or `r` +
+  Enter in the dev terminal (line-buffered, TTY only). A manual restart
+  resets the crash-loop breaker — including while the breaker is parked
+  open, which is exactly when you need it. The inspector's dev-reload
+  entry reads "manual restart".
+
 ## npm-v0.1.0-rc.33 (2026-11-26)
 
 - **Pydantic v2 codegen and client types (decision 0012, PR 2 of 2).**

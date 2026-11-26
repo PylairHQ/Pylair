@@ -91,6 +91,46 @@ and the fix: the permission identifier and `src-tauri/capabilities/`
 to add it to. Tauri-level denials of an entire command never reach
 the plugin and cannot be recorded.
 
+## Reloading
+
+`pylair dev` watches the Python source tree and restarts the runtime on
+change (bridge mode) or restarts the server (wrap mode — "ready" there
+means the port answered). Both modes share one watcher.
+
+**Watch configuration** — `[tool.pylair.watch]` in pyproject.toml:
+
+```toml
+[tool.pylair.watch]
+include = ["**/*.py"]   # default; globs relative to `source`
+ignore  = []            # added to the built-in ignores
+```
+
+Built-in ignores always apply: `**/.venv/**`, `**/venv/**`,
+`**/__pycache__/**`, `**/node_modules/**`, `**/.git/**`, editor temp files
+(`**/.#*`, `**/*~`, `**/*.swp`, `**/*.tmp`, `**/4913`) and `.pylair/`
+itself. Unknown keys and non-string globs are config errors. The dev
+header prints the effective set.
+
+**Terminal visibility** — one line per event: `reload: <file> changed,
+restarting Python` on trigger, `reload: ready in <ms>ms (generation N)`
+when the new runtime is up, a named failure line when Python exits during
+startup, and a named line when the crash-loop breaker opens. The plugin
+writes `.pylair/runtime-status.json` at every state transition — dev-only:
+only when the CLI-set `PYLAIR_RUNTIME_STATUS` variable is present, only in
+debug builds, stripped from the child environment in release.
+
+**Manual restart** — two ways, both resetting the crash-loop breaker:
+
+- `pylair restart` from a second terminal (errors clearly when no dev
+  session is running for the app);
+- `r` + Enter in the dev terminal, when stdin is a TTY. Line-buffered —
+  never raw mode, so `tauri dev` keeps inheriting stdin; other input is
+  ignored; skipped entirely in CI/pipes.
+
+The breaker reset is the point: you fixed the bug, the breaker is open,
+and you want the runtime back without editing a file. The dev-reload
+timeline entry reads "manual restart" for these.
+
 ## Outcomes
 
 Every recorded call ends in exactly one outcome:
