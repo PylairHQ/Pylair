@@ -963,3 +963,39 @@ def test_absent_stream_flag_keeps_legacy_behaviour(runtime):
     runtime.send(grant(2))
     terminal = runtime.recv_until(lambda m: m.get("id") == 2, timeout=10)
     assert terminal["result"] == {"done": True}, terminal
+
+
+def test_typeddict_end_to_end(runtime):
+    """A TypedDict round-trips the real runtime as a plain object: input
+    coercion validates keys and types, and the declared return schema
+    re-widens a plain-int balance into the $bigint tag."""
+    runtime.recv()
+    # echo_opts round-trips the object untouched.
+    runtime.send(
+        call(1, "echo_opts", task=1, input={"opts": {"limit": 5, "label": "x"}})
+    )
+    assert runtime.recv()["result"] == {"limit": 5, "label": "x"}
+    # a missing required key is INVALID_PARAMS with the structured path.
+    runtime.send(call(2, "echo_opts", task=2, input={"opts": {"label": "x"}}))
+    err = runtime.recv()["error"]
+    assert err["code"] == proto.INVALID_PARAMS
+    assert err["data"]["errors"] == [
+        {"path": "args.opts.limit", "expected": "int", "received": "missing"}
+    ]
+    # an unknown key is rejected, not dropped.
+    runtime.send(call(3, "echo_opts", task=3, input={"opts": {"limit": 1, "bogus": 2}}))
+    err = runtime.recv()["error"]
+    assert err["code"] == proto.INVALID_PARAMS
+    assert err["data"]["errors"][0]["path"] == "args.opts.bogus"
+    # read_wallet: nested dataclass input coerced, plain-int result widened.
+    runtime.send(
+        call(
+            4,
+            "read_wallet",
+            task=4,
+            input={"w": {"balance": 41, "owner": {"x": 1.0, "y": 2.0}, "note": "n"}},
+        )
+    )
+    res = runtime.recv()["result"]
+    assert res["balance"] == {"$bigint": "42"}  # 41 + 1, re-widened by schema
+    assert res["owner"] == {"x": 1.0, "y": 2.0, "label": ""}

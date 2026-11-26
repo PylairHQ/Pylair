@@ -81,6 +81,7 @@ Annotation → `{"type": ...}` JSON:
 | `Literal[...]`                | `literal` + `values`       | literal union      |
 | `Enum`                        | `enum` + `values`          | literal union      |
 | `@dataclass`                  | `dataclass` + `name`,`fields` | `interface`     |
+| `TypedDict`                   | `typeddict` + `name`,`fields` | `interface`     |
 | `AsyncGenerator[X,_]`         | yield `X` in `returns`     | `stream<X>`        |
 | missing / anything else       | `any`                      | `unknown`          |
 
@@ -132,8 +133,26 @@ parameters strictly, on every call mode including isolated workers:
   the function may still handle it; failures there surface as
   `INTERNAL` as usual. Scalar coercion (e.g. `"5"` → `int`) is *not*
   attempted — a wrong primitive is rejected, not converted.
-- **Honest gaps**: unknown keys inside a structured value are ignored
-  (a dataclass is built only from keys matching its fields), `Literal`
+- **TypedDicts**: a `TypedDict` annotation (typing or typing_extensions)
+  validates the incoming object against the class: every key's value is
+  coerced per its declared type (nested dataclasses, `BigInt`, datetimes
+  all work inside), missing required keys and wrong types are
+  `INVALID_PARAMS` with the exact `data.errors` path
+  (`args.opts.limit`), and **unknown keys are rejected** — stricter than
+  dataclasses on purpose: a TypedDict is a closed wire shape, so an extra
+  key is a caller bug, not forward compatibility. The value stays a
+  plain dict — there is no class to construct. `total=False`,
+  `Required[]`/`NotRequired[]` and inheritance between TypedDicts are
+  respected (requiredness comes from `__required_keys__`); `ReadOnly[]`
+  is accepted with no runtime effect. On the way out the declared return
+  type drives `BigInt` widening inside the dict like any other
+  container. Generic subscription (`Page[int]`) is a clear error — there
+  is no type-parameter machinery — and recursive TypedDicts error the
+  same way, because the schema embeds fields inline and a cycle can't
+  terminate (recursive dataclasses are unsupported for the same reason).
+- **Honest gaps**: unknown keys inside a *dataclass* value are ignored
+  (it is built only from keys matching its fields — TypedDicts reject
+  them instead, see above), `Literal`
   annotations are mapped for codegen but not validated at the boundary,
   and a `None` default admits `null` even without `Optional`
   (`x: str = None`).
@@ -199,7 +218,11 @@ Rules:
 - `kind: "generator"` → `stream<T>` (async iterator + credit pull);
   everything else → `call<T>` (Promise). `isolated` is transparent.
 - TS reserved-word param names get a `_` suffix; the wire key is unchanged.
-- Dataclasses dedupe into named `interface`s; unknown annotations emit
+- Dataclasses and TypedDicts dedupe into named `interface`s; a TypedDict's
+  optional keys emit `key?: T` and its keys are kept exactly as written —
+  they are wire names, so there is no camelCasing and no renaming of
+  reserved words (property names can't collide in TS); keys that aren't
+  valid identifiers emit quoted (`"foo-bar": T`). Unknown annotations emit
   `unknown` — never a guess.
 
 ## CLI
@@ -216,7 +239,7 @@ pylair codegen --module myapp.backend [--python path/to/python]
 
 ## Non-goals (v1)
 
-- Pydantic/attrs models, `TypedDict` — map as `unknown` for now.
+- Pydantic/attrs models — map as `unknown` for now.
 - Overloads, generics beyond containers, Protocol classes → `unknown`.
 - ~~Watch mode~~ — done: `pylair dev` regenerates the stubs on every python
   save, and `pylair build` regenerates them before the frontend build.

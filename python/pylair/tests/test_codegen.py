@@ -23,6 +23,12 @@ class Nested:
     n: int = 0
 
 
+class RecursiveNode(typing.TypedDict):
+    # Module-level so the forward ref resolves — local classes can't be
+    # resolved by get_type_hints and degrade to any instead of erroring.
+    nxt: "RecursiveNode | None"
+
+
 # ---- schema mapping --------------------------------------------------------
 
 
@@ -397,3 +403,102 @@ def test_typed_values_over_the_wire(runtime):
     )
     resp = runtime.recv()
     assert resp["result"] == {"$b64": "AgEA"}
+
+
+# ---- TypedDict schema (docs/codegen.md) -------------------------------------
+
+
+def test_schema_typeddict_total_and_qualifiers():
+    sc = _schema.schema_of(testapp.SearchOpts)
+    assert sc["type"] == "typeddict" and sc["name"] == "SearchOpts"
+    fields = {f["name"]: f for f in sc["fields"]}
+    # total=False + Required[]: limit is required, label optional — the
+    # qualifier wrappers are stripped from the value schema.
+    assert fields["limit"]["required"] is True
+    assert fields["limit"]["schema"] == {"type": "int"}
+    assert fields["label"]["required"] is False
+    assert fields["label"]["schema"] == {"type": "str"}
+
+
+def test_schema_typeddict_inheritance_flattened():
+    class Base(typing.TypedDict):
+        a: int
+
+    class Child(Base, total=False):
+        b: str
+
+    sc = _schema.schema_of(Child)
+    fields = {f["name"]: f for f in sc["fields"]}
+    assert set(fields) == {"a", "b"}
+    assert fields["a"]["required"] is True
+    assert fields["b"]["required"] is False
+
+
+def test_schema_typeddict_readonly_accepted():
+    try:
+        from typing_extensions import ReadOnly
+    except ImportError:
+        ReadOnly = typing.__dict__.get("ReadOnly")
+    if ReadOnly is None:
+        pytest.skip("no ReadOnly in typing or typing_extensions")
+
+    class Cfg(typing.TypedDict):
+        mode: ReadOnly[str]
+
+    sc = _schema.schema_of(Cfg)
+    f = sc["fields"][0]
+    # ReadOnly is accepted with no runtime effect — the schema is the
+    # plain value type and the key stays required.
+    assert f["schema"] == {"type": "str"}
+    assert f["required"] is True
+
+
+def test_schema_typeddict_typing_extensions():
+    te = pytest.importorskip("typing_extensions")
+
+    class Te(te.TypedDict):
+        q: int
+
+    sc = _schema.schema_of(Te)
+    assert sc["type"] == "typeddict"
+    assert sc["fields"][0]["schema"] == {"type": "int"}
+
+
+def test_schema_typeddict_nested_members():
+    sc = _schema.schema_of(testapp.Wallet)
+    fields = {f["name"]: f for f in sc["fields"]}
+    assert fields["balance"]["schema"] == {"type": "bigint"}
+    assert fields["owner"]["schema"]["type"] == "dataclass"
+    assert fields["owner"]["schema"]["name"] == "Point"
+    assert fields["note"]["required"] is False
+    assert _schema.has_bigint_leaf(sc) is True
+    noleaf = _schema.schema_of(testapp.SearchOpts)
+    assert _schema.has_bigint_leaf(noleaf) is False
+
+
+def test_schema_typeddict_generic_subscript_is_a_clear_error():
+    T = typing.TypeVar("T")
+
+    class Page(typing.TypedDict, typing.Generic[T]):
+        items: list[T]
+
+    with pytest.raises(TypeError, match="generic TypedDict"):
+        _schema.schema_of(Page[int])
+    # The bare class degrades like a generic dataclass: the TypeVar key
+    # maps to any rather than erroring.
+    sc = _schema.schema_of(Page)
+    assert sc["fields"][0]["schema"] == {
+        "type": "list",
+        "items": {"type": "any"},
+    }
+
+
+def test_schema_typeddict_recursive_is_a_clear_error():
+    with pytest.raises(TypeError, match="recursive TypedDict"):
+        _schema.schema_of(RecursiveNode)
+
+
+def test_schema_typeddict_key_order_stable():
+    # Interface emission consumes fields in order — definition order.
+    sc = _schema.schema_of(testapp.Wallet)
+    assert [f["name"] for f in sc["fields"]] == ["balance", "owner", "note"]

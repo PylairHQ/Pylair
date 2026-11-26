@@ -11,6 +11,7 @@ dependencies = []
 dev = [
     "pytest>=8.3",
     "ruff>=0.8",
+    "typing-extensions>=4.12",
 ]
 # Test-only: real frameworks for the wrap-adapter tests. Not a runtime
 # dependency of pylair; the default `uv sync` stays light. Pin the

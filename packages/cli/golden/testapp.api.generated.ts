@@ -4,14 +4,42 @@
 // gitignored, never committed.
 import { call as pylairCall, stream as pylairStream, type CallOptions as PylairCallOptions } from "@pylair/client";
 
+export interface BenchShape {
+  name: string;
+  origin: BenchPoint;
+  points: BenchPoint[];
+  meta: Record<string, number>;
+}
+
+export interface BenchPoint {
+  x: number;
+  y: number;
+  label: string;
+}
+
+export interface SearchOpts {
+  limit: number;
+  label?: string;
+}
+
 export interface Point {
   x: number;
   y: number;
   label?: string;
 }
 
+export interface Wallet {
+  balance: bigint;
+  owner: Point;
+  note?: string;
+}
+
 export function add(a: number, b: number, opts?: PylairCallOptions): Promise<number> {
   return pylairCall<number>("add", { "a": a, "b": b }, opts);
+}
+
+export function appDataDirEnv(opts?: PylairCallOptions): Promise<string | null> {
+  return pylairCall<string | null>("app_data_dir_env", {}, opts);
 }
 
 /** A stream whose second chunk can't be serialized. */
@@ -19,16 +47,79 @@ export function badStream(opts?: PylairCallOptions): AsyncGenerator<number, void
   return pylairStream<number>("bad_stream", {}, opts);
 }
 
+export function benchEcho(s: string, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("bench_echo", { "s": s }, opts);
+}
+
+export function benchNested(shape: BenchShape, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("bench_nested", { "shape": shape }, opts);
+}
+
+export function benchNoop(opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("bench_noop", {}, opts);
+}
+
+/** Exact big-int arithmetic over the tag — codegen maps the */
+export function bigintAdd(a: bigint, b: bigint, opts?: PylairCallOptions): Promise<bigint> {
+  return pylairCall<bigint>("bigint_add", { "a": a, "b": b }, opts);
+}
+
+/** Unannotated passthrough: a $bigint param decodes to pylair.BigInt */
+export function bigintEcho(value: unknown, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("bigint_echo", { "value": value }, opts);
+}
+
+/** Each element comes back a plain int (x + 1 drops the subclass); */
+export function bigintList(xs: bigint[], opts?: PylairCallOptions): Promise<bigint[]> {
+  return pylairCall<bigint[]>("bigint_list", { "xs": xs }, opts);
+}
+
+/** Optional[BigInt]: a plain int tags, None stays null. */
+export function bigintMaybe(n: number, opts?: PylairCallOptions): Promise<bigint | null> {
+  return pylairCall<bigint | null>("bigint_maybe", { "n": n }, opts);
+}
+
+/** AsyncGenerator[BigInt]: base + i is a plain int per chunk — the */
+export function bigintStream(n: number, base: bigint, opts?: PylairCallOptions): AsyncGenerator<bigint, void, void> {
+  return pylairStream<bigint>("bigint_stream", { "n": n, "base": base }, opts);
+}
+
+/** A non-int under a BigInt declaration keeps its own encoding — */
+export function bigintWeird(opts?: PylairCallOptions): Promise<bigint> {
+  return pylairCall<bigint>("bigint_weird", {}, opts);
+}
+
 export function blockLoop(seconds: number, opts?: PylairCallOptions): Promise<string> {
   return pylairCall<string>("block_loop", { "seconds": seconds }, opts);
+}
+
+/** Raises on purpose - error-field tests drive the traceback path. */
+export function boom(opts?: PylairCallOptions): Promise<null> {
+  return pylairCall<null>("boom", {}, opts);
 }
 
 export function counter(n: number, opts?: PylairCallOptions): AsyncGenerator<unknown, void, void> {
   return pylairStream<unknown>("counter", { "n": n }, opts);
 }
 
+export function deep(n: number, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("deep", { "n": n }, opts);
+}
+
+export function deepStream(n: number, opts?: PylairCallOptions): AsyncGenerator<unknown, void, void> {
+  return pylairStream<unknown>("deep_stream", { "n": n }, opts);
+}
+
 export function echoLater(text: string, delay?: number, opts?: PylairCallOptions): Promise<string> {
   return pylairCall<string>("echo_later", { "text": text, "delay": delay }, opts);
+}
+
+export function echoOpts(opts: SearchOpts, opts_?: PylairCallOptions): Promise<SearchOpts> {
+  return pylairCall<SearchOpts>("echo_opts", { "opts": opts }, opts_);
+}
+
+export function firstOpt(options: SearchOpts[], opts?: PylairCallOptions): Promise<SearchOpts | null> {
+  return pylairCall<SearchOpts | null>("first_opt", { "options": options }, opts);
 }
 
 export function infinite(opts?: PylairCallOptions): AsyncGenerator<unknown, void, void> {
@@ -40,16 +131,69 @@ export function infiniteCounted(opts?: PylairCallOptions): AsyncGenerator<number
   return pylairStream<number>("infinite_counted", {}, opts);
 }
 
+export function intOrStr(v: number | string, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("int_or_str", { "v": v }, opts);
+}
+
 export function isolatedAdd(a: number, b: number, opts?: PylairCallOptions): Promise<number> {
   return pylairCall<number>("isolated_add", { "a": a, "b": b }, opts);
+}
+
+/** A Blob made in an isolated worker — the registration must ride */
+export function isolatedBlob(opts?: PylairCallOptions): Promise<Record<string, unknown>> {
+  return pylairCall<Record<string, unknown>>("isolated_blob", {}, opts);
+}
+
+export function isolatedDeep(n: number, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("isolated_deep", { "n": n }, opts);
+}
+
+/** Report the env the isolated WORKER actually inherited — the proof */
+export function isolatedEnvFlag(opts?: PylairCallOptions): Promise<Record<string, unknown>> {
+  return pylairCall<Record<string, unknown>>("isolated_env_flag", {}, opts);
+}
+
+export function isolatedMaybe(x?: string, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("isolated_maybe", { "x": x }, opts);
+}
+
+export function isolatedPick(c?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("isolated_pick", { "c": c }, opts);
 }
 
 export function isolatedPrint(text: string, opts?: PylairCallOptions): Promise<string> {
   return pylairCall<string>("isolated_print", { "text": text }, opts);
 }
 
-export function isolatedSleep(seconds: number, opts?: PylairCallOptions): Promise<string> {
-  return pylairCall<string>("isolated_sleep", { "seconds": seconds }, opts);
+export function isolatedSleep(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("isolated_sleep", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+export function isolatedSpy(a: number, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("isolated_spy", { "a": a }, opts);
+}
+
+/** Blocks the EVENT LOOP with a sync sleep - the pathological */
+export function loopBlock(seconds: number, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("loop_block", { "seconds": seconds }, opts);
+}
+
+export function makeBlob(opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("make_blob", {}, opts);
+}
+
+/** copy=True forces the plain-copy path even when a hardlink would */
+export function makeBlobCopy(src: string, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("make_blob_copy", { "src": src }, opts);
+}
+
+/** from_path — hardlink into the blob dir (source lives beside the */
+export function makeBlobPath(tmp_name: string, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("make_blob_path", { "tmp_name": tmp_name }, opts);
+}
+
+export function maybe(x?: string, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("maybe", { "x": x }, opts);
 }
 
 /** Translate a point; dataclass in, dataclass out. */
@@ -76,6 +220,10 @@ export function orphanMaker(pidfile: string, opts?: PylairCallOptions): Promise<
   return pylairCall<string>("orphan_maker", { "pidfile": pidfile }, opts);
 }
 
+export function passthrough(x: unknown, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("passthrough", { "x": x }, opts);
+}
+
 export function pick(c: "red" | "blue", fallback?: string | null, opts?: PylairCallOptions): Promise<string> {
   return pylairCall<string>("pick", { "c": c, "fallback": fallback }, opts);
 }
@@ -88,16 +236,147 @@ export function producedCount(opts?: PylairCallOptions): Promise<number> {
   return pylairCall<number>("produced_count", {}, opts);
 }
 
+export function readWallet(w: Wallet, opts?: PylairCallOptions): Promise<Wallet> {
+  return pylairCall<Wallet>("read_wallet", { "w": w }, opts);
+}
+
 export function roundtrip(data: Uint8Array, opts?: PylairCallOptions): Promise<Uint8Array> {
   return pylairCall<Uint8Array>("roundtrip", { "data": data }, opts);
+}
+
+export function sharedBlob(opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("shared_blob", {}, opts);
+}
+
+/** Sleeps while ignoring SIGTERM: the kill path must burn the full */
+export function sigtermIgnoringSleep(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("sigterm_ignoring_sleep", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+/** Worker that ignores SIGTERM and sleeps: its terminate path must */
+export function sigtermImmune(ready_file: string, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("sigterm_immune", { "ready_file": ready_file }, opts);
+}
+
+/** A Blob of exactly n bytes — the crate's limit tests drive the */
+export function sizedBlob(n: number, opts?: PylairCallOptions): Promise<unknown> {
+  return pylairCall<unknown>("sized_blob", { "n": n }, opts);
 }
 
 export function sleepForever(opts?: PylairCallOptions): Promise<null> {
   return pylairCall<null>("sleep_forever", {}, opts);
 }
 
+export function spy(a: number, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("spy", { "a": a }, opts);
+}
+
+export function spyCount(opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("spy_count", {}, opts);
+}
+
+/** One scalar chunk, then a Blob chunk — ordering must hold for */
+export function streamBlob(opts?: PylairCallOptions): AsyncGenerator<unknown, void, void> {
+  return pylairStream<unknown>("stream_blob", {}, opts);
+}
+
+/** Chunk 1 carries one blob; chunk 2 carries three — the host's */
+export function streamMixedBlobs(opts?: PylairCallOptions): AsyncGenerator<unknown, void, void> {
+  return pylairStream<unknown>("stream_mixed_blobs", {}, opts);
+}
+
 export function syncSleep(seconds: number, opts?: PylairCallOptions): Promise<string> {
   return pylairCall<string>("sync_sleep", { "seconds": seconds }, opts);
+}
+
+/** One result carrying three $blob tags — three registers ahead of */
+export function threeBlobs(opts?: PylairCallOptions): Promise<unknown[]> {
+  return pylairCall<unknown[]>("three_blobs", {}, opts);
+}
+
+/** A plain int past ±2^53 — int annotations never tag, so this still */
+export function unboundedInt(opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("unbounded_int", {}, opts);
+}
+
+export function warm2Sleep(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("warm2_sleep", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+export function warmAppDataDirEnv(opts?: PylairCallOptions): Promise<string | null> {
+  return pylairCall<string | null>("warm_app_data_dir_env", {}, opts);
+}
+
+export function warmBlob(opts?: PylairCallOptions): Promise<Record<string, unknown>> {
+  return pylairCall<Record<string, unknown>>("warm_blob", {}, opts);
+}
+
+/** Installs its own interrupt handler that writes `witness` before */
+export function warmBreakWitness(witness: string, seconds: number, started?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("warm_break_witness", { "witness": witness, "seconds": seconds, "started": started }, opts);
+}
+
+/** Write a marker to stderr then die hard — the member's bounded */
+export function warmCrashStderr(marker: string, opts?: PylairCallOptions): Promise<null> {
+  return pylairCall<null>("warm_crash_stderr", { "marker": marker }, opts);
+}
+
+/** Write `marker` (carrying this worker's pid) then return a payload */
+export function warmGatedResult(marker: string, size: number, opts?: PylairCallOptions): Promise<Record<string, unknown>> {
+  return pylairCall<Record<string, unknown>>("warm_gated_result", { "marker": marker, "size": size }, opts);
+}
+
+/** Poll `gate` before doing the real work — the call sits inside the */
+export function warmGatedStart(gate: string, pidfile?: string | null, seconds?: number, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_gated_start", { "gate": gate, "pidfile": pidfile, "seconds": seconds }, opts);
+}
+
+/** Same ignoring worker with a 150 ms grace — proves the configured */
+export function warmImmuneFastgrace(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("warm_immune_fastgrace", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+/** SIGINT-immune member that dies on its own mid-grace — the cancel */
+export function warmImmuneThenCrash(die_after: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<null> {
+  return pylairCall<null>("warm_immune_then_crash", { "die_after": die_after, "pidfile": pidfile }, opts);
+}
+
+/** Ignores the interrupt signal entirely — the stuck path: the grace */
+export function warmInterruptImmune(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("warm_interrupt_immune", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+/** Append to a module global — a later call sees it, which proves both */
+export function warmMark(tag: string, delay?: number, opts?: PylairCallOptions): Promise<unknown[]> {
+  return pylairCall<unknown[]>("warm_mark", { "tag": tag, "delay": delay }, opts);
+}
+
+/** Hard-die on demand — WORKER_DIED and crash-loop proofs. With */
+export function warmMaybeCrash(crash?: boolean, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_maybe_crash", { "crash": crash }, opts);
+}
+
+export function warmPid(opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_pid", {}, opts);
+}
+
+export function warmSleep(seconds: number, pidfile?: string | null, opts?: PylairCallOptions): Promise<string> {
+  return pylairCall<string>("warm_sleep", { "seconds": seconds, "pidfile": pidfile }, opts);
+}
+
+/** Hard-die on demand inside a TTL pool — proves an idle reap burns */
+export function warmTtlMaybeCrash(crash?: boolean, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_ttl_maybe_crash", { "crash": crash }, opts);
+}
+
+/** Identity witness for the idle reap: same pid = member survived. */
+export function warmTtlPid(opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_ttl_pid", {}, opts);
+}
+
+/** A call longer than the TTL — the member must not be reaped while */
+export function warmTtlSleep(seconds: number, opts?: PylairCallOptions): Promise<number> {
+  return pylairCall<number>("warm_ttl_sleep", { "seconds": seconds }, opts);
 }
 
 export function wedgeTheLoop(opts?: PylairCallOptions): Promise<null> {

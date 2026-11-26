@@ -96,16 +96,18 @@ function ts(s: Schema | undefined): string {
       return (s.values as unknown[] ?? []).map((v) => JSON.stringify(v)).join(" | ") ||
         "unknown";
     case "dataclass":
+    case "typeddict":
       return ident(s.name ?? "Anonymous");
     default:
       return "unknown";
   }
 }
 
-/** Recursively collect every dataclass schema reachable from a schema. */
+/** Recursively collect every dataclass/TypedDict schema reachable from a
+ * schema — both are emitted as interfaces, deduped by name. */
 function collectDataclasses(s: Schema | undefined, out: Map<string, Schema>): void {
   if (!s) return;
-  if (s.type === "dataclass" && s.name) {
+  if ((s.type === "dataclass" || s.type === "typeddict") && s.name) {
     if (!out.has(s.name)) {
       out.set(s.name, s);
       for (const f of s.fields ?? []) collectDataclasses(f.schema, out);
@@ -157,8 +159,15 @@ export function emit(m: Manifest, source: string): string {
   ];
 
   for (const dc of dataclasses.values()) {
+    // TypedDict keys are wire names — kept exactly: valid identifiers
+    // emit bare (reserved words are legal property names in TS), anything
+    // else emits quoted. Dataclass fields keep the historical ident().
+    const keyOf =
+      dc.type === "typeddict"
+        ? (k: string) => (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k))
+        : ident;
     const lines = (dc.fields ?? []).map(
-      (f) => `  ${ident(f.name)}${f.required ? "" : "?"}: ${ts(f.schema)};`,
+      (f) => `  ${keyOf(f.name)}${f.required ? "" : "?"}: ${ts(f.schema)};`,
     );
     out.push(`export interface ${ident(dc.name!)} {\n${lines.join("\n")}\n}\n`);
   }
