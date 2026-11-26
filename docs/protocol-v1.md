@@ -167,10 +167,14 @@ they don't know):
   to the app's own frames plus the raise site (pylair-internal frames
   dropped) and capped at about 8 KB. **Dev builds only**: the runtime
   includes it only when launched with `PYLAIR_DEV_TRACEBACKS=1`, which
-  the host sets exclusively under `cfg(debug_assertions)` — a release
-  build never carries it, so source paths and code can't leak onto
-  end-user machines. Applies to exceptions raised by exposed functions,
-  in both `call` and `stream`.
+  the host sets exclusively under `cfg(debug_assertions)`. Release
+  builds additionally strip the variable from the child's environment
+  (both any spec-carried value and inheritance from the launching
+  process), so even a release app started from a dev shell never
+  carries it — and since isolated/warm workers inherit the runtime's
+  environment, they can't re-acquire it either. Source paths and code
+  can't leak onto end-user machines. Applies to exceptions raised by
+  exposed functions, in both `call` and `stream`.
 - `data.suggestions` (string array) — on `FUNCTION_NOT_FOUND`, up to 3
   close matches among the exposed names (best first). Safe in all
   builds: the names are already public via the `exposes` manifest.

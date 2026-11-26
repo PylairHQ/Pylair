@@ -52,6 +52,18 @@ pub(super) enum PongVerdict {
     StallKill,
 }
 
+/// Release-mode defense in depth: remove PYLAIR_DEV_TRACEBACKS from both
+/// channels a child could receive it through — any value the spec itself
+/// carries, and inheritance from this process's environment (a release
+/// app launched from a dev shell). Not cfg-gated so tests can drive it
+/// directly; the only caller is the !debug_assertions branch above.
+pub fn strip_dev_tracebacks(spec: &mut crate::supervisor::config::SpawnSpec) {
+    spec.env.retain(|(k, _)| k != "PYLAIR_DEV_TRACEBACKS");
+    if !spec.env_remove.iter().any(|k| k == "PYLAIR_DEV_TRACEBACKS") {
+        spec.env_remove.push("PYLAIR_DEV_TRACEBACKS".into());
+    }
+}
+
 pub(super) fn classify_pong(stale: Duration, kill: Option<Duration>) -> PongVerdict {
     if kill.is_some_and(|l| stale >= l) {
         PongVerdict::StallKill
@@ -421,6 +433,16 @@ impl Supervisor {
             // export this generation's own dir when the root resolved.
             let mut spec = self.spec.clone();
             spec.env.retain(|(k, _)| k != crate::blobs::BLOB_DIR_ENV);
+            // Release builds must never carry tracebacks: the constructors
+            // only SET PYLAIR_DEV_TRACEBACKS under cfg(debug_assertions),
+            // but the child also inherits this process's environment — a
+            // release app launched from a dev shell would otherwise leak
+            // source paths into the webview. Strip both channels. Isolated
+            // and warm workers inherit the runtime's env, so a clean
+            // runtime env is the whole defense in depth.
+            if !cfg!(debug_assertions) {
+                strip_dev_tracebacks(&mut spec);
+            }
             let blob_dir =
                 BlobRegistry::generation_dir(self.config.blob_root.as_deref(), self.generation);
             match &blob_dir {
