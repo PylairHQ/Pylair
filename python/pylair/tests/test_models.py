@@ -190,6 +190,25 @@ def test_disk_space_preflight(server, tmp_path, monkeypatch):
     assert "not enough disk space" in (_component("m1").detail or "")
 
 
+def test_preflight_credits_banked_part_bytes(server, tmp_path, monkeypatch):
+    """The preflight need is size minus the banked .part prefix, not the
+    whole file again: free space between (size - banked) and size must
+    pass. Here 1000 bytes with 400 banked need 600; free is 700."""
+    body = os.urandom(1000)
+    url = server.add("/f", File(body))
+    d = _model_dir(tmp_path)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "m1.part").write_bytes(body[:400])
+
+    class _Usage:
+        total, used, free = 10**9, 10**9 - 700, 700
+
+    monkeypatch.setattr("shutil.disk_usage", lambda p: _Usage())
+    p = models.fetch("m1", url=url, sha256=_sha(body), size=len(body))
+    assert p.read_bytes() == body
+    assert server.last_headers("/f")["range"] == "bytes=400-"
+
+
 def test_https_only_by_default(server, monkeypatch):
     monkeypatch.delenv("PYLAIR_MODELS_ALLOW_INSECURE")
     with pytest.raises(models.ModelError, match="https"):

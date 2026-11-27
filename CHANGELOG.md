@@ -21,10 +21,14 @@ what the GitHub releases page publishes.
   cancellation, exact-byte progress callbacks, disk preflight and
   cross-process fetch locking. Explicit `{path, sha256, size}`
   manifests serve non-HF sources under a synthetic revision key.
-  Per-file transfer reuses the 0009 download machinery unchanged —
-  the single-file behavior and tests are unaffected. The public
+  Per-file transfer reuses the 0009 download machinery, refactored
+  (not forked) so both callers share it. The public
   `models.fetch_snapshot`/`path()` surface, the `current` pointer,
   reader locks, GC and readiness wiring are the next PR.
+- **User-visible 0009 fix riding the refactor**: the single-file disk
+  preflight now needs `size` minus the bytes already banked in `.part`,
+  not the whole file again. A resumed download no longer demands room
+  for the full file when most of it is already on disk.
 
 ### `pylair dev` reload visibility, watch config and manual restart (DX item 10)
 

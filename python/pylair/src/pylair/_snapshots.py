@@ -66,6 +66,15 @@ _RESERVED = {
 # Windows-hostile characters (plus control chars): a snapshot must be
 # representable on every supported OS.
 _BAD_PATH_CHARS = re.compile(r'[<>:"|?*\x00-\x1f\\]')
+# Windows reserved device names: matching is case-insensitive and
+# ignores any extension, so "aux", "AUX" and "aux.json" all alias the
+# device. Paths arrive from a remote tree — an entry the filesystem
+# silently aliases is a silent overwrite.
+_DEVICES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
 
 _name_locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
@@ -104,9 +113,41 @@ def _check_repo_path(path: object) -> str:
         or _BAD_PATH_CHARS.search(path)
     ):
         raise ValueError(f"unsafe manifest path {path!r}")
+    for seg in segments:
+        # Windows strips trailing dots and spaces, so "a." aliases
+        # "a" — and a device name with any extension ("aux.json",
+        # "nul/x") aliases the device. Both are silent-overwrite
+        # collisions waiting for a case-insensitive filesystem.
+        if seg.endswith((".", " ")):
+            raise ValueError(
+                f"unsafe manifest path {path!r}: segment {seg!r} ends in "
+                f"a dot or space, which Windows strips"
+            )
+        if seg.split(".")[0].rstrip(" .").casefold() in _DEVICES:
+            raise ValueError(
+                f"unsafe manifest path {path!r}: segment {seg!r} is a "
+                f"Windows reserved device name"
+            )
     if path.split("/")[0] in _RESERVED or path in _RESERVED:
         raise ValueError(f"manifest path {path!r} collides with the snapshot layout")
     return path
+
+
+def _check_plan_collisions(entries: list) -> None:
+    """Two entries equal under casefold collide on Windows and macOS —
+    one silently overwrites the other on disk. Reject the whole plan
+    up front, naming the pair; the tree is remote input, so this is a
+    security check, not a convenience."""
+    seen: dict[str, str] = {}
+    for e in entries:
+        key = e.path.casefold()
+        if key in seen:
+            raise ValueError(
+                f"entries {seen[key]!r} and {e.path!r} collide on "
+                f"case-insensitive filesystems — the snapshot cannot be "
+                f"represented safely"
+            )
+        seen[key] = e.path
 
 
 def _check_globs(globs: object, what: str) -> tuple[str, ...]:
@@ -730,6 +771,7 @@ def fetch_snapshot(
                     f"nothing to fetch: allow/ignore globs exclude every "
                     f"file of {name!r}"
                 )
+            _check_plan_collisions(entries)
             plan = _Plan(name, revision, entries, url_for, headers, sensitive)
             return _stage_and_fetch(plan, name_dir, abort, progress)
         finally:

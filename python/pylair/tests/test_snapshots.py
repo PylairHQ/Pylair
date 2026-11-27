@@ -238,6 +238,71 @@ def test_repo_paths_validated():
         assert _snapshots._check_repo_path(ok) == ok
 
 
+def test_repo_paths_device_names_rejected():
+    """Windows reserved device names alias the device with or without
+    an extension, in any segment — a remote tree must never write one."""
+    for bad in ["aux.json", "nul/x", "CON", "com1", "lpt9.txt", "sub/PRN.bin"]:
+        with pytest.raises(ValueError, match="device"):
+            _snapshots._check_repo_path(bad)
+    for ok in ["auxiliary", "com10", "nulll.json", "console.bin"]:
+        assert _snapshots._check_repo_path(ok) == ok
+
+
+def test_repo_paths_trailing_dot_space_rejected():
+    """Windows strips trailing dots and spaces, so "a." aliases "a" —
+    another silent overwrite."""
+    for bad in ["a./f", "sub/b ", "x.txt.", "y/z "]:
+        with pytest.raises(ValueError, match="dot or space"):
+            _snapshots._check_repo_path(bad)
+    for ok in ["a.b/f", "sub/dir with spaces/f.txt"]:
+        assert _snapshots._check_repo_path(ok) == ok
+
+
+def test_casefold_collision_rejects_plan():
+    entries = [
+        _snapshots._Entry("README.md", 3, "0" * 40, "blob-sha1"),
+        _snapshots._Entry("readme.md", 3, "1" * 40, "blob-sha1"),
+    ]
+    with pytest.raises(ValueError, match="README.md.*readme.md"):
+        _snapshots._check_plan_collisions(entries)
+    fine = [
+        _snapshots._Entry("README.md", 3, "0" * 40, "blob-sha1"),
+        _snapshots._Entry("readmex.md", 3, "1" * 40, "blob-sha1"),
+    ]
+    _snapshots._check_plan_collisions(fine)
+
+
+def test_casefold_collision_in_tree_fails_before_download(server, tmp_path):
+    r = Repo(REV, {"README.md": b"one", "readme.md": b"two"})
+    server.add_repo("org/model", r)
+    with pytest.raises(ValueError, match="collide"):
+        _fetch("m1", server, repo="org/model", revision=REV)
+    assert not any("/resolve/" in h["path"] for h in server.requests)
+    assert not (tmp_path / "models" / "m1" / REV).exists()
+
+
+def test_device_name_in_tree_fails_before_download(server, tmp_path):
+    r = Repo(REV, {"aux.json": b"{}", "config.json": b"{}"})
+    server.add_repo("org/model", r)
+    with pytest.raises(ValueError, match="aux"):
+        _fetch("m1", server, repo="org/model", revision=REV)
+    assert not any("/resolve/" in h["path"] for h in server.requests)
+
+
+def test_manifest_device_name_rejected():
+    with pytest.raises(ValueError, match="device"):
+        _snapshots._check_manifest([{"path": "nul.bin", "sha256": "0" * 64, "size": 1}])
+
+
+def test_manifest_casefold_collision_rejected(server):
+    manifest = [
+        {"path": "README.md", "sha256": "0" * 64, "size": 1},
+        {"path": "readme.md", "sha256": "1" * 64, "size": 1},
+    ]
+    with pytest.raises(ValueError, match="collide"):
+        _snapshots.fetch_snapshot("m1", base_url=server.base + "/x/", manifest=manifest)
+
+
 def test_tree_404_names_stage(server, tmp_path):
     with pytest.raises(ModelError, match=r"tree: 404"):
         _fetch("m1", server, repo="org/ghost", revision=REV)
