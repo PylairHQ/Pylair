@@ -8,6 +8,18 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### `pylair models resolve` — snapshot pin authoring helper
+
+- **`pylair models resolve org/model[@ref]`** in the dev CLI prints the
+  full 40-hex commit sha a branch or tag currently names, plus a
+  ready-to-paste `revision="..."` line with the date. Snapshot pins
+  require full shas; getting one is now one command. `HF_ENDPOINT` is
+  honoured, `HF_TOKEN` rides as a Bearer token when set and is never
+  printed, and unknown repos, gated repos without a token, bad refs and
+  offline each fail with their own clear error. Authoring-time only:
+  nothing ships into the runtime. Docs: the snapshots section of
+  `docs/models.md` covers the full multi-file workflow.
+
 ### Multi-file model snapshots: lifecycle and public API (decision 0013)
 
 - **`models.fetch_snapshot()` / `models.model_snapshot()` / snapshot-aware

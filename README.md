@@ -113,7 +113,8 @@ limitations: [docs/wrap.md](docs/wrap.md).
 - **Model downloads.** `pylair.models` fetches multi-GB models over
   https into the app data dir — sha256-verified, resumable,
   readiness-gated — with no Python or downloader for the user to
-  install ([docs/models.md](docs/models.md)).
+  install, including multi-file Hugging Face snapshots pinned to a
+  full commit sha ([docs/models.md](docs/models.md)).
 - **Blob payloads.** `pylair.Blob` returns large binaries as host-served
   URLs — no base64 in the frame, HTTP range streaming on the way out,
   per-window ownership enforced by the host

@@ -188,6 +188,7 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
   // so -32601 is the honest answer for these combos.
   const modelsPresent = models !== "missing" && health === "ok" && appReadiness === "ok";
   const MODEL_PATH = "/data/models/selftest-model";
+  const SNAP_PATH = "/data/models/selftest-snapshot/" + "a".repeat(40);
   const calls = [];
   const listens = [];
   const cancelHooks = new Map();
@@ -267,6 +268,12 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
                     ...(modelsPresent
                       ? {
                           "selftest-model": {
+                            phase: "ready",
+                            progress: null,
+                            detail: null,
+                            ms_ago: 5,
+                          },
+                          "selftest-snapshot": {
                             phase: "ready",
                             progress: null,
                             detail: null,
@@ -388,6 +395,22 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
           onEvent({ task, done: true, result: { path: MODEL_PATH, pid: 5150 } });
         } else if (fnName === "models_selftest_cleanup") {
           onEvent({ task, done: true, result: { removed: true } });
+        } else if (fnName === "snapshot_selftest_fetch") {
+          if (!modelsPresent)
+            onEvent({ task, done: true, error: { code: -32601, message: "no such function" } });
+          else
+            onEvent({
+              task,
+              done: true,
+              result: {
+                path: SNAP_PATH,
+                hits: { "config.json": 1, "weights.bin": 1 },
+              },
+            });
+        } else if (fnName === "snapshot_warm_path") {
+          onEvent({ task, done: true, result: { path: SNAP_PATH, pid: 5150 } });
+        } else if (fnName === "snapshot_selftest_cleanup") {
+          onEvent({ task, done: true, result: { removed: true } });
         } else if (fnName === "make_blob") {
           // The blob fixture; absent means FUNCTION_NOT_FOUND (a
           // resolved pylair that predates pylair.Blob). "b64" answers
@@ -476,6 +499,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "app-readiness",
     "warm-workers",
     "models",
+    "snapshot-models",
     "blob",
     "event-scoping",
     "fn-permission",

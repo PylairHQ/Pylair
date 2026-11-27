@@ -9,3 +9,16 @@ from this file — promote to a milestone or a decision doc first.
   external Ollama — owner question, section 12.
 - Unix socket / Windows named pipe transport behind the transport trait.
 - Svelte template (`packages/create-pylair/templates/svelte-ts`).
+- Snapshot xet protocol / chunk-level dedup for Hugging Face transfers
+  (decision 0013 §8: verification by `lfs.oid` sha256 is backend-independent;
+  the xet chunk API is bandwidth optimization).
+- Snapshot cross-revision file reuse: unchanged shards are re-downloaded in
+  v1; the content-addressed layout makes reuse a safe later addition
+  (decision 0013 §8).
+- Per-file parallel range download within one snapshot file (parallelism is
+  across files today).
+- Shared-machine model caches across apps (per-app data dir only, as in 0009).
+- Dataset repos in `pylair.models` snapshots (the `datasets/` API shape
+  differs; model repos only in v1).
+- Loading snapshots into inference frameworks (torch/transformers/llama.cpp)
+  behind a helper API — `pylair.models` ends at a verified directory path.
