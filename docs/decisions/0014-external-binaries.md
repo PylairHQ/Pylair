@@ -195,14 +195,30 @@ are wrong for single files (where externalBin is idiomatic and free),
 right for trees (where externalBin is structurally impossible).
 
 **Resolution.** The build writes `binaries/binaries.json` into the
-staged tree recording every declared binary, its shape, and its
-executable path relative to the payload root, for single-file and unit
-entries alike. The plugin reads that manifest at spawn to build the
-`PYLAIR_BINARIES` map, so resolution is one mechanism instead of two
-and dev can emit the same manifest into `.pylair/binaries/`. Exact
-placement mechanics belong to the implementation PRs; the decision is
-that a build-generated manifest, not host-side guesswork, is the
-source of truth.
+staged tree, and dev emits the same manifest into `.pylair/binaries/`;
+the plugin reads it at spawn to build the `PYLAIR_BINARIES` map, so
+resolution is one mechanism in both modes. The manifest contract is
+pinned here and in the crate (the CLI PR writes exactly this):
+
+```json
+{"version": 1, "binaries": {"<name>": {
+  "shape": "file" | "unit",
+  "root": "exe_dir" | "payload",
+  "path": "<relative path with forward slashes>"}}}
+```
+
+`shape` describes what the binary is: `file` is a single externalBin
+sidecar, `unit` is one executable inside a unit tree. `root` is the
+resolution key: in release, `exe_dir` resolves `path` relative to the
+directory holding the main executable (`Contents/MacOS` on macOS, the
+install dir on Windows, inside the AppImage mount on Linux), and
+`payload` resolves it relative to `<resource_dir>/binaries/`; in dev
+both shapes resolve against the binaries dir itself. The intended
+pairings are `file`/`exe_dir` and `unit`/`payload`. Unknown versions,
+absolute paths and `..` segments are hard errors naming the entry;
+entries whose file does not exist are omitted from the map and logged
+once by name, never an error. The decision is that a build-generated
+manifest, not host-side guesswork, is the source of truth.
 
 **Hashing.** The declared `sha256` covers the archive as downloaded
 when the source is a url, matching what upstream publishes, and is
@@ -274,9 +290,10 @@ story mirrors the `PYLAIR_APP_DATA_DIR` handoff (0009 section 1):
 
   The CLI passes the directory to the host as `PYLAIR_BINARIES_DIR`
   (inherited by the plugin process, same channel as
-  `PYLAIR_RESTART_TRIGGER`); in debug builds the plugin resolves each
-  name as `<dir>/<name>-<triple>[.exe]` and the JSON map it pushes is
-  built from there.
+  `PYLAIR_RESTART_TRIGGER`); in debug builds the plugin reads
+  `<dir>/binaries.json` with the pinned schema and resolves both
+  shapes relative to that dir - one mechanism in both modes, no
+  dev-specific naming scheme.
 - **The release-cannot-be-redirected rule, same as 0009.** In debug
   builds an inherited `PYLAIR_BINARIES` wins (tests and harnesses need
   to inject fixture binaries). In a release spawn the computed map is

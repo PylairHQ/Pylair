@@ -74,6 +74,35 @@ pub fn strip_dev_runtime_status(spec: &mut crate::supervisor::config::SpawnSpec)
     }
 }
 
+/// The release-cannot-be-redirected rule for external binaries (decision
+/// 0014 §3): a packaged app must not let the launching environment redirect
+/// which executables it runs. Unlike the dev-only variables above, a
+/// spec-carried `PYLAIR_BINARIES` is legitimate in release - it is the map
+/// the spec computed from the bundled manifest - so only the INHERITED
+/// channels close: both variables land in env_remove, and because spec.env
+/// applies after env_remove, the computed map still wins when present.
+/// Never merged: inheritance is overridden wholesale per key, and with no
+/// computed map the removal leaves nothing. An inherited map is logged
+/// once per process, not per generation.
+pub fn strip_inherited_binaries(spec: &mut crate::supervisor::config::SpawnSpec) {
+    for key in [
+        crate::binaries::BINARIES_ENV,
+        crate::binaries::BINARIES_DIR_ENV,
+    ] {
+        if !spec.env_remove.iter().any(|k| k == key) {
+            spec.env_remove.push(key.into());
+        }
+    }
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        && std::env::var_os(crate::binaries::BINARIES_ENV).is_some()
+    {
+        eprintln!(
+            "pylair: inherited PYLAIR_BINARIES ignored in a release build;              the bundled manifest is authoritative"
+        );
+    }
+}
+
 /// The dev-only env var naming the runtime-status file the CLI reads for
 /// reload visibility. Never honoured in release builds.
 pub const RUNTIME_STATUS_ENV: &str = "PYLAIR_RUNTIME_STATUS";
@@ -515,6 +544,7 @@ impl Supervisor {
             if !cfg!(debug_assertions) {
                 strip_dev_tracebacks(&mut spec);
                 strip_dev_runtime_status(&mut spec);
+                strip_inherited_binaries(&mut spec);
             }
             let blob_dir =
                 BlobRegistry::generation_dir(self.config.blob_root.as_deref(), self.generation);
