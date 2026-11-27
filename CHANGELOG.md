@@ -8,6 +8,8 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.34 (unreleased)
+
 ### `pylair models resolve` — snapshot pin authoring helper
 
 - **`pylair models resolve org/model[@ref]`** in the dev CLI prints the
