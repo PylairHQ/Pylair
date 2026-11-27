@@ -137,6 +137,24 @@ executable = "llama-server.exe"   # stage the whole tree; this is the entry poin
   way when it points at a directory. The two keys are mutually
   exclusive.
 
+**Extraction is a trust boundary of its own.** A verified archive
+says the bytes are what upstream published; it says nothing about
+whether the paths inside are safe to write. Extraction (unit trees and
+single-file `member` alike) rejects any entry with an absolute path,
+a `..` component, or a symlink or hard link whose target escapes the
+unit directory, and fails the build naming the offending entry:
+
+```
+error: archive for binaries.llama-server contains unsafe entry "lib/../../evil.dll"
+  archives may only carry relative paths inside the unit tree
+```
+
+  Upstream release archives are benign in practice, but the build runs
+  wherever the developer runs it, often with write access to the whole
+  project; a malicious or malformed archive must never write outside
+  the staging tree. Symlinks *within* the unit are preserved (some
+  dylib layouts need them); links pointing outside it are the failure.
+
 **Where the unit lives per OS.** The unit always stays together in one
 tree, so same-directory resolution does the work everywhere:
 
@@ -217,6 +235,22 @@ to the lazy-download path, where GPU detection at runtime makes the
 variant question natural. A first-class variant key belongs to the
 v2 download surface, where it interacts correctly with per-machine
 hardware.
+
+**GPU units are the extreme case of the size trade-off.** A CUDA build
+of llama-server pulls cuBLAS, cuBLASLt and the CUDA runtime libraries
+into the unit: hundreds of megabytes inside the installer, inside
+*every* 0011 update download, and again inside the rollback cache.
+That is the section-8 bundle-versus-lazy rule pushed firmly toward
+lazy: bundling a CUDA unit means every user, including those without
+an NVIDIA GPU, pays the size cost on every update. There is also a
+redistribution constraint unique to this case: NVIDIA's runtime
+libraries are redistributable only as the CUDA EULA's listed
+redistributable files, so a CUDA unit's `license` entry must cover
+them (the EULA text travels as the unit's `license_file` like any
+other), and an app shipping such a unit is making a EULA-compliant
+redistribution, not just a technical choice. The notices step carries
+it exactly like any other license file; the visibility argument of
+section 7 applies double here.
 
 ## 3. Python access: `pylair.binary(name) -> Path`
 
