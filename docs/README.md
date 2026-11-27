@@ -23,6 +23,9 @@ Specs and guides for building on Pylair, plus the design history.
   resumable model downloads into the app data dir.
 - [blobs.md](blobs.md): `pylair.Blob` — large binary payloads as
   host-served blob URLs instead of base64 in the frame.
+- [binaries.md](binaries.md): `pylair.binary`/`pylair.proc` - declared,
+  hash-verified external binaries, resolved per platform and run under
+  the cancellation ownership rules.
 - [inspector.md](inspector.md): `pylair dev --inspect` — the dev-only
   live inspector window: per-call latency, verdicts and pool status.
 - [updates.md](updates.md): opt-in auto-update — signed artifacts, the

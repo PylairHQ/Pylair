@@ -760,3 +760,104 @@ def shared_blob() -> pylair.Blob:
     if getattr(shared_blob, "_cached", None) is None:
         shared_blob._cached = pylair.Blob(b"shared-cached-payload", mime="text/plain")
     return shared_blob._cached
+
+
+# ---- external binaries (decision 0014) fixtures -------------------------
+
+
+def _write_tree_scripts(workdir: str) -> tuple[str, str]:
+    """The two-level tree fixture as real script files - no nested quoting.
+    Neither child nor grandchild creates a new session, so the grandchild
+    shares the child's process group: exactly what the POSIX killpg must
+    sweep, and what taskkill /T must walk on Windows."""
+    gc_py = os.path.join(workdir, "tree_grandchild.py")
+    with open(gc_py, "w") as f:
+        f.write(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(600)\n"
+        )
+    child_py = os.path.join(workdir, "tree_child.py")
+    with open(child_py, "w") as f:
+        f.write(
+            "import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, sys.argv[2], sys.argv[3]])\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(600)\n"
+        )
+    return child_py, gc_py
+
+
+@expose
+async def proc_tree_sleep(
+    child_pidfile: str, grandchild_pidfile: str, workdir: str
+) -> None:
+    # Spawns the two-level tree, then waits forever - only a cancel ends
+    # this task, so the terminal ordering proves the kill happened first.
+    child_py, gc_py = _write_tree_scripts(workdir)
+    await pylair.proc.spawn(
+        sys.executable, child_py, child_pidfile, gc_py, grandchild_pidfile
+    )
+    await asyncio.Event().wait()
+
+
+def _write_sleeper(workdir: str) -> str:
+    sleeper = os.path.join(workdir, "sleeper.py")
+    with open(sleeper, "w") as f:
+        f.write(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(600)\n"
+        )
+    return sleeper
+
+
+@expose
+async def proc_spawn_then_finish(pidfile: str, workdir: str) -> str:
+    # Normal completion: the child must NOT be killed when the task ends.
+    proc = await pylair.proc.spawn(sys.executable, _write_sleeper(workdir), pidfile)
+    return str(proc.pid)
+
+
+@expose
+async def proc_spawn_devnull_then_finish(pidfile: str, workdir: str) -> str:
+    # Same shape as proc_spawn_then_finish but with stdout=DEVNULL: the
+    # unread-PIPE warning must not fire for a child with no pipe to drain.
+    proc = await pylair.proc.spawn(
+        sys.executable,
+        _write_sleeper(workdir),
+        pidfile,
+        stdout=pylair.proc.DEVNULL,
+    )
+    return str(proc.pid)
+
+
+@expose
+async def proc_cat_lines() -> list[str]:
+    # Line iteration: the child prints three lines; the iterator must
+    # yield them as text in order.
+    proc = await pylair.proc.spawn(
+        sys.executable, "-c", "print('one');print('two');print('three')"
+    )
+    lines = []
+    assert proc.stdout is not None
+    async for line in proc.stdout:
+        lines.append(line.rstrip("\n").rstrip("\r"))
+    await proc.wait()
+    return lines
+
+
+@expose
+async def proc_binary_path(name: str) -> str:
+    return str(pylair.binary(name))
+
+
+@expose(worker={"mode": "process"})
+def proc_binary_path_isolated(name: str) -> str:
+    # Workers inherit the runtime env, so resolution is unchanged (0014 §3).
+    return str(pylair.binary(name))
+
+
+@expose(worker={"mode": "warm"})
+def proc_binary_path_warm(name: str) -> str:
+    return str(pylair.binary(name))

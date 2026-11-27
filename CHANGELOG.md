@@ -8,6 +8,24 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### External binaries: `pylair.binary()` and `pylair.proc` (decision 0014)
+
+- **`pylair.binary(name) -> Path`** resolves a declared binary through
+  the host-provided map: unknown names raise `KeyError` listing what is
+  available; running outside a Pylair spawn (or with no binaries
+  declared) raises `RuntimeError` saying the host did not resolve it.
+  No PATH fallback anywhere; warm and isolated workers inherit the same
+  resolution unchanged.
+- **`pylair.proc.spawn(exe, *args)`** runs a binary by name or path with
+  async line-iterator stdout/stderr, `wait()`/`kill()`/`pid`, and the
+  ownership rules of 0014 sec. 4: cancel the owning task and the
+  child's whole process tree - grandchildren included - dies before
+  `TASK_CANCELLED` is reported (process-group SIGTERM/SIGKILL on POSIX,
+  taskkill /T on Windows); a normally-completing task never kills its
+  children, so servers outlive the call that starts them.
+- `docs/binaries.md` covers declaring, resolving, running, the two
+  ownership rules and the long-running-server readiness pattern.
+
 ### External binaries: declaration and single-file staging (decision 0014)
 
 - **`[tool.pylair.binaries]` in pyproject.toml** declares native
