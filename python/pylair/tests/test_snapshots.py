@@ -388,7 +388,7 @@ def test_progress_callback_exact_total(server, tmp_path):
         server,
         repo="org/model",
         revision=REV,
-        progress=lambda done, total, cur: seen.append((done, total, cur)),
+        progress=lambda done, total, cur, fd, ft: seen.append((done, total, cur)),
     )
     assert out.exists()
     total = sum(len(b) for b in r.files.values())

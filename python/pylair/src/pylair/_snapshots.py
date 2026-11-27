@@ -329,12 +329,15 @@ def _resolve_tree(
 class _Progress:
     """Exact byte accounting across the fan-out (§4): verified files
     count in full plus the current length of each .part. The callback
-    shape is what PR 2's readiness wiring will consume:
-    (bytes_done, bytes_total, current_file)."""
+    shape is what the readiness wiring consumes:
+    (bytes_done, bytes_total, current_file, files_done, files_total)."""
 
-    def __init__(self, total: int, baseline: dict[str, int], callback) -> None:
+    def __init__(
+        self, total: int, baseline: dict[str, int], callback, sizes: dict
+    ) -> None:
         self.total = total
         self.done_by_file = dict(baseline)
+        self.sizes = sizes
         self.current_file: str | None = None
         self.callback = callback
         self.lock = threading.Lock()
@@ -348,9 +351,16 @@ class _Progress:
     def _emit(self) -> None:
         if self.callback is None:
             return
+        files_done = sum(
+            1 for p, sz in self.sizes.items() if self.done_by_file.get(p, 0) >= sz
+        )
         try:
             self.callback(
-                sum(self.done_by_file.values()), self.total, self.current_file
+                sum(self.done_by_file.values()),
+                self.total,
+                self.current_file,
+                files_done,
+                len(self.sizes),
             )
         except Exception as e:  # noqa: BLE001 - a progress callback must never kill a download
             _log(f"snapshots: progress callback failed: {e}")
@@ -532,6 +542,13 @@ def _finish_staging(
             "total_bytes": sum(e.size for e in entries),
         },
     )
+    # Note: the revision is not yet reader-protected at this instant —
+    # on Windows a directory cannot be renamed while any file inside it
+    # is open (at any share mode), so a pre-rename .use lock is
+    # impossible. The newborn-revision race is closed instead by the
+    # pair of: on_verified writing current inside the <name>/.lock
+    # hold, and GC skipping a name entirely while that lock is
+    # contended.
     os.rename(staging, rev_dir)
 
 
@@ -581,7 +598,12 @@ def _stage_and_fetch(
 
     baseline, verified = _scan_staging(staging, plan.entries)
     _preflight(staging, plan.entries, verified, baseline)
-    progress = _Progress(sum(e.size for e in plan.entries), baseline, progress_cb)
+    progress = _Progress(
+        sum(e.size for e in plan.entries),
+        baseline,
+        progress_cb,
+        {e.path: e.size for e in plan.entries},
+    )
     progress._emit()
 
     verify_path = staging / ".verify.json"
@@ -676,12 +698,14 @@ def fetch_snapshot(
     headers: dict[str, str] | None = None,
     sensitive_headers: Iterable[str] | None = None,
     abort: threading.Event | None = None,
-    progress: Callable[[int, int, str | None], None] | None = None,
+    progress: Callable[[int, int, str | None, int, int], None] | None = None,
+    on_verified: Callable[[Path], None] | None = None,
 ) -> Path:
     """Fetch one pinned revision into ``<data>/models/<name>/<revision>/``
-    and return that directory. Internal groundwork for PR 2's public
-    ``models.fetch_snapshot`` — no readiness wiring, no ``current``
-    pointer, no GC here."""
+    and return that directory. ``on_verified`` fires after a fresh
+    completion while the cross-process ``<name>/.lock`` is still held —
+    the lifecycle layer uses it to write ``current`` inside the window
+    GC cannot enter."""
     name = models._check_name(name)
     allow_g = _check_globs(allow, "allow")
     ignore_g = _check_globs(ignore, "ignore")
@@ -773,14 +797,334 @@ def fetch_snapshot(
                 )
             _check_plan_collisions(entries)
             plan = _Plan(name, revision, entries, url_for, headers, sensitive)
-            return _stage_and_fetch(plan, name_dir, abort, progress)
+            out = _stage_and_fetch(plan, name_dir, abort, progress)
+            if on_verified is not None:
+                on_verified(out)
+            return out
         finally:
             models._release_file_lock(fd)
     finally:
         name_lock.release()
 
 
+# ---- lifecycle: current, reader locks, GC (PR 2) ---------------------------
+#
+# The locking primitives need true shared semantics: any number of
+# reader processes may hold a revision's .use at once, while GC's
+# exclusive probe must fail if even one does. POSIX flock has LOCK_SH
+# natively; msvcrt.locking is exclusive-only, so Windows goes through
+# LockFileEx (ctypes, still stdlib) which has real shared locks.
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x2
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x1
+
+    _GENERIC_RW = 0xC0000000
+    _FILE_SHARE_ALL = 0x7
+    _OPEN_ALWAYS = 4
+    ctypes.windll.kernel32.CreateFileW.restype = ctypes.c_void_p
+
+    def _open_use(path: Path):
+        """Windows opens .use with FILE_SHARE_DELETE — the CRT default
+        (share read/write only) would let this very handle block the
+        staging rename and GC deletes, the exact sharing violations the
+        layout exists to avoid."""
+        handle = ctypes.windll.kernel32.CreateFileW(
+            str(path), _GENERIC_RW, _FILE_SHARE_ALL, None, _OPEN_ALWAYS, 0x80, None
+        )
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise OSError(f"could not open {path}")
+        return msvcrt.open_osfhandle(handle, os.O_RDWR)
+
+    def _open_read_shared(path: Path):
+        """Non-creating share-delete open for small control files."""
+        handle = ctypes.windll.kernel32.CreateFileW(
+            str(path), 0x80000000, _FILE_SHARE_ALL, None, 3, 0x80, None
+        )
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise OSError(f"could not open {path}")
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", ctypes.c_uint32),
+            ("OffsetHigh", ctypes.c_uint32),
+            ("hEvent", ctypes.c_void_p),
+        ]
+
+    def _lock_use(fd, shared: bool) -> bool:
+        flags = _LOCKFILE_FAIL_IMMEDIATELY
+        if not shared:
+            flags |= _LOCKFILE_EXCLUSIVE_LOCK
+        ov = _OVERLAPPED()
+        return bool(
+            ctypes.windll.kernel32.LockFileEx(
+                ctypes.c_void_p(msvcrt.get_osfhandle(fd)),
+                flags,
+                0,
+                1,
+                0,
+                ctypes.byref(ov),
+            )
+        )
+
+    def _unlock_use(fd) -> None:
+        ov = _OVERLAPPED()
+        ctypes.windll.kernel32.UnlockFileEx(
+            ctypes.c_void_p(msvcrt.get_osfhandle(fd)), 0, 1, 0, ctypes.byref(ov)
+        )
+
+else:
+    import fcntl
+
+    def _open_use(path: Path):
+        return os.open(path, os.O_CREAT | os.O_RDWR)
+
+    def _open_read_shared(path: Path):
+        return os.open(path, os.O_RDONLY)
+
+    def _lock_use(fd, shared: bool) -> bool:
+        op = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        try:
+            fcntl.flock(fd, op | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def _unlock_use(fd) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+# One fd per revision per process, held for the process lifetime and
+# never closed: the kernel releases on death, exactly like the 0009
+# fetch lock. The registry makes repeat path() calls idempotent.
+_readers: dict[str, int] = {}
+_readers_lock = threading.Lock()
+
+
+def read_current(name_dir: Path) -> str | None:
+    # Windows: read through the share-delete open — a CRT open would
+    # momentarily deny the os.replace in write_current, and under
+    # concurrent readers those windows overlap into a hard failure.
+    try:
+        fd = _open_read_shared(name_dir / "current")
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            data = f.read().decode().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return data or None
+
+
+def write_current(name_dir: Path, revision: str) -> None:
+    """The pointer switch: a small file plus os.replace, atomic on
+    every OS including Windows — no directory rename ever touches a
+    revision a reader might hold. The bounded retry is standard
+    Windows practice for atomic replace: virus scanners and indexers
+    transiently deny the destination, which is noise, not a signal."""
+    tmp = name_dir / "current.tmp"
+    tmp.write_text(revision)
+    for _ in range(100):
+        try:
+            os.replace(tmp, name_dir / "current")
+            return
+        except PermissionError:
+            time.sleep(0.01)
+    os.replace(tmp, name_dir / "current")
+
+
+def _adopt_reader_fd(rev_dir: Path, fd: int) -> None:
+    """Register a shared-locked .use fd for the process lifetime; if
+    another thread beat us to it theirs wins and ours is released."""
+    key = str(rev_dir)
+    with _readers_lock:
+        if key not in _readers:
+            _readers[key] = fd
+            return
+    _unlock_use(fd)
+    os.close(fd)
+
+
+def _hash_kind(f: Path, kind: str, size: int) -> str:
+    h = hashlib.sha1(b"blob %d\0" % size) if kind == "blob-sha1" else hashlib.sha256()
+    with open(f, "rb") as fh:
+        while b := fh.read(models._REHASH):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _cheap_check(rev_dir: Path) -> None:
+    """The §3 cheap check: .ready and .manifest.json present, then one
+    stat per verified file against the .verify.json record — size and
+    mtime. A changed mtime re-hashes just that file before deciding,
+    mirroring 0009 §1. Any failure is ModelNotReady, never a wrong Path."""
+    if not (rev_dir / ".ready").is_file():
+        raise models.ModelNotReady(f"snapshot at {rev_dir} has no .ready marker")
+    if not (rev_dir / ".manifest.json").is_file():
+        raise models.ModelNotReady(f"snapshot at {rev_dir} has no .manifest.json")
+    try:
+        verify = json.loads((rev_dir / ".verify.json").read_text())
+        files = verify["files"]
+    except (OSError, ValueError, KeyError) as e:
+        raise models.ModelNotReady(
+            f"snapshot at {rev_dir} has an unreadable verify record: {e}"
+        )
+    for path, rec in files.items():
+        f = rev_dir / Path(path)
+        try:
+            st = f.stat()
+        except OSError:
+            raise models.ModelNotReady(f"snapshot file {path} is missing")
+        if st.st_size != rec["size"]:
+            raise models.ModelNotReady(
+                f"snapshot file {path} changed size — the revision is corrupt"
+            )
+        if st.st_mtime_ns != rec["mtime_ns"] and (
+            _hash_kind(f, rec["kind"], rec["size"]) != rec["digest"]
+        ):
+            raise models.ModelNotReady(
+                f"snapshot file {path} failed re-verification — the revision is corrupt"
+            )
+
+
+def snapshot_path(name_dir: Path, revision: str | None = None) -> Path:
+    """The §7 reader protocol: read current, open and shared-lock
+    <rev>/.use, recheck .ready under the held lock, then cheap-check.
+    The ordering closes the race with a switching upgrade plus another
+    process's GC: a present .ready under a held shared lock proves the
+    directory is not being deleted, because GC deletes .ready first and
+    can only win the exclusive lock when no shared lock exists."""
+    pinned = revision is not None
+    last_current = None
+    for _attempt in range(1 if pinned else 3):
+        rev = revision or read_current(name_dir)
+        last_current = rev
+        if rev is None:
+            raise models.ModelNotReady(
+                f"snapshot in {name_dir} has no current revision — nothing has been fetched"
+            )
+        rev_dir = name_dir / rev
+        key = str(rev_dir)
+        with _readers_lock:
+            registered = key in _readers
+        if not registered:
+            try:
+                fd = _open_use(rev_dir / ".use")
+            except OSError:
+                if pinned:
+                    raise models.ModelNotReady(
+                        f"snapshot revision {rev} is not present"
+                    )
+                continue  # being deleted under us — re-read current
+            if not _lock_use(fd, shared=True):
+                os.close(fd)
+                if pinned:
+                    raise models.ModelNotReady(
+                        f"snapshot revision {rev} is being deleted"
+                    )
+                continue
+            if not (rev_dir / ".ready").is_file():
+                # GC won the race before we locked: .ready-first deletion
+                # means this revision is never handed out.
+                _unlock_use(fd)
+                os.close(fd)
+                if pinned:
+                    raise models.ModelNotReady(f"snapshot revision {rev} is not ready")
+                continue
+            _adopt_reader_fd(rev_dir, fd)
+        _cheap_check(rev_dir)
+        return rev_dir
+    raise models.ModelNotReady(
+        f"revision switched during lookup; current is {last_current} — "
+        f"retry, or pin revision= to ride out an upgrade"
+    )
+
+
+def gc_name(name_dir: Path) -> None:
+    """One GC pass over a snapshot name (§7). Never touches the
+    revision current names. A revision whose exclusive .use probe fails
+    has a live reader — skip silently. When the probe wins, delete
+    .ready FIRST, then the rest of the tree, holding the lock
+    throughout: a reader slipping in afterwards fails the recheck and
+    retries onto current, never landing in a partial directory. Windows
+    sharing violations mid-delete are 'still in use', never an error —
+    residue is retried at the next pass. .partial residue is collected
+    only when <name>/.lock proves there is no live writer."""
+    if not name_dir.is_dir():
+        return
+    current = read_current(name_dir)
+    lockpath = name_dir / ".lock"
+    name_lock_fd = models._try_file_lock(lockpath)
+    if name_lock_fd is None:
+        # A live fetch holds <name>/.lock: skip the whole name. This is
+        # what makes the newborn-revision window airtight — between the
+        # rename and the current write, no GC anywhere can probe the
+        # just-born revision.
+        return
+    try:
+        children = sorted(name_dir.iterdir())
+    except OSError:
+        models._release_file_lock(name_lock_fd)
+        return
+    for child in children:
+        if child.name in ("current", ".lock"):
+            continue
+        if child.is_dir() and child.name.endswith(".partial"):
+            # .lock is already ours — proof there is no live writer.
+            shutil.rmtree(child, ignore_errors=True)
+            continue
+        if not child.is_dir() or child.name == current or not _SHA_RE.match(child.name):
+            continue
+        try:
+            fd = _open_use(child / ".use")
+        except OSError:
+            continue
+        if not _lock_use(fd, shared=False):
+            os.close(fd)
+            continue  # a live reader — skip silently
+        try:
+            try:
+                (child / ".ready").unlink()
+            except OSError:
+                pass
+            shutil.rmtree(child, ignore_errors=True)
+        finally:
+            _unlock_use(fd)
+            os.close(fd)
+        # .use itself and the dir go once our fd is closed (Windows
+        # cannot delete an open file); leftover residue — a mmap'd
+        # shard in a dying process — is next pass's problem, never an
+        # error.
+        shutil.rmtree(child, ignore_errors=True)
+    models._release_file_lock(name_lock_fd)
+
+
+def gc_all(model_root: Path) -> None:
+    """Startup sweep: every directory in the models root is a snapshot
+    name (single-file models are files and never match). Never raises —
+    GC is bookkeeping, not correctness."""
+    try:
+        children = sorted(model_root.iterdir())
+    except OSError:
+        return
+    for d in children:
+        if d.is_dir():
+            try:
+                gc_name(d)
+            except Exception as e:  # noqa: BLE001 - GC must never crash a runtime
+                _log(f"snapshots: GC pass over {d} failed: {e}")
+
+
 def _reset() -> None:
-    """Test isolation: clear in-process lock state."""
+    """Test isolation: clear in-process lock state. Reader fds stay
+    registered — they model process-lifetime holds, and tests use fresh
+    tmp dirs so stale keys never collide."""
     with _registry_lock:
         _name_locks.clear()

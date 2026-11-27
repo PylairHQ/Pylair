@@ -703,6 +703,7 @@ def fetch(
             "worker use models.path() (read-only) with requires=(name,)"
         )
     spec = _make_spec(name, url, sha256, size, headers, sensitive_headers)
+    _check_kind(spec.name, "single")
     _readiness.declare(spec.name, managed=True)
     try:
         return _fetch_sync(spec, abort or threading.Event())
@@ -715,12 +716,25 @@ def fetch(
         raise
 
 
-def path(name: str) -> Path:
-    """The verified model file, else `ModelNotReady`. Resolve-and-check
-    only — never locks, downloads or touches the network (safe inside
-    isolated and warm workers, which inherit the same data dir)."""
+def path(name: str, *, revision: str | None = None) -> Path:
+    """The verified model file (single-file models) or snapshot
+    directory, else `ModelNotReady`. Resolve-and-check only — never
+    downloads or touches the network (safe inside isolated and warm
+    workers, which inherit the same data dir). For snapshots the §7
+    reader protocol applies: a shared `.use` lock taken and held for
+    the process lifetime, `.ready` rechecked under it, and the cheap
+    per-file stat check of §3. `revision=` pins a specific revision —
+    the escape hatch for riding out an upgrade in one process."""
     name = _check_name(name)
     model_dir = _data_dir()
+    if _is_snapshot(name, model_dir):
+        p = _snapshots().snapshot_path(model_dir / name, revision)
+        _readiness.ready(name)
+        return p
+    if revision is not None:
+        raise ValueError(
+            f"{name!r} is a single-file model — revision pins apply to snapshots"
+        )
     spec = _registry.get(name)
     p = _sidecar_match(model_dir, spec, name)
     if p is None:
@@ -755,6 +769,7 @@ def model(
     alone is unmanaged, so a model must be declared here or fetched
     during startup, never lazily behind its own gate."""
     spec = _make_spec(name, url, sha256, size, headers, sensitive_headers)
+    _check_kind(spec.name, "single")
     _readiness.declare(spec.name, managed=True)
     with _registry_lock:
         _registry[spec.name] = spec
@@ -770,6 +785,258 @@ def model(
         _start_download(spec)
 
 
+# ---- snapshots (decision 0013) ----------------------------------------------
+#
+# The storage mechanics live in pylair._snapshots; this layer owns the
+# public surface: readiness wiring, the declarative form, worker rules,
+# auth env adoption and the single-file/snapshot kind split.
+
+_snapshot_registry: dict[str, dict] = {}
+
+
+def _snapshots():
+    # Deferred: _snapshots imports models for the transfer machinery,
+    # so a top-level import here would be circular.
+    from pylair import _snapshots as mod
+
+    return mod
+
+
+def _check_kind(name: str, want: str) -> None:
+    """A name is one kind or the other, never both: a single-file model
+    is the FILE <data>/models/<name>, a snapshot the DIRECTORY
+    <data>/models/<name>/. Mixing them is a clear error at the call
+    site, not undefined behaviour."""
+    other = _snapshot_registry if want == "single" else _registry
+    kind = "single-file model" if want == "snapshot" else "snapshot"
+    if name in other:
+        raise ValueError(
+            f"{name!r} is already registered as a {kind} — a name is "
+            f"one kind or the other, never both"
+        )
+    try:
+        shape = _data_dir() / name
+    except ModelNotReady:
+        return  # no data dir yet — the registration check still fired
+    if want == "snapshot" and shape.is_file():
+        raise ValueError(
+            f"{name!r} exists on disk as a single-file model — a name "
+            f"is one kind or the other, never both"
+        )
+    if want == "single" and shape.is_dir():
+        raise ValueError(
+            f"{name!r} exists on disk as a snapshot — a name is one "
+            f"kind or the other, never both"
+        )
+
+
+def _is_snapshot(name: str, model_dir: Path) -> bool:
+    if name in _snapshot_registry:
+        return True
+    if name in _registry:
+        return False
+    return (model_dir / name).is_dir()
+
+
+def fetch_snapshot(
+    name: str,
+    *,
+    repo: str | None = None,
+    revision: str | None = None,
+    endpoint: str | None = None,
+    base_url: str | None = None,
+    manifest: list[dict] | None = None,
+    allow: Iterable[str] | None = None,
+    ignore: Iterable[str] | None = None,
+    headers: dict[str, str] | None = None,
+    sensitive_headers: Iterable[str] | None = None,
+    abort: threading.Event | None = None,
+) -> Path:
+    """Idempotent snapshot fetch (decision 0013): download and verify
+    one pinned revision of a directory-shaped model, switch ``current``
+    to it and return the revision directory. Hugging Face sources pin a
+    full commit sha; anything else pins an explicit
+    ``{path, sha256, size}`` manifest.
+
+    Readiness (§4): one component per snapshot name — exact-byte
+    ``loading`` on first install, ``ready`` on a verified current,
+    ``failed`` naming the file. Upgrades never flicker: while a
+    verified current exists the component stays ``ready`` (progress
+    surfaces in its detail), because ``path()`` keeps resolving the old
+    revision until the pointer's atomic move.
+
+    Auth: explicit ``headers`` win; otherwise ``HF_TOKEN`` is adopted
+    as a Bearer token when set, and ``HF_ENDPOINT`` overrides the
+    default endpoint. Tokens are stripped on cross-origin redirects
+    and never logged. Workers never fetch — they resolve with
+    ``path()``."""
+    if _in_worker():
+        raise ModelError(
+            "models can only be fetched by the main runtime — in a "
+            "worker use models.path() (read-only) with requires=(name,)"
+        )
+    name = _check_name(name)
+    _check_kind(name, "snapshot")
+    snap = _snapshots()
+    if endpoint is None:
+        endpoint = os.environ.get("HF_ENDPOINT") or snap.DEFAULT_ENDPOINT
+    if headers is not None:
+        headers = {str(k): str(v) for k, v in dict(headers).items()}
+    if not any(k.lower() == "authorization" for k in (headers or {})):
+        token = os.environ.get("HF_TOKEN")
+        if token:
+            headers = dict(headers or {})
+            headers["Authorization"] = f"Bearer {token}"
+    _readiness.declare(name, managed=True)
+    model_root = _data_dir()
+    name_dir = model_root / name
+
+    # An upgrade keeps serving the old revision throughout: the
+    # component never leaves ready while one verified current exists.
+    cur = snap.read_current(name_dir)
+    serving = bool(cur) and (name_dir / cur / ".ready").is_file()
+
+    def progress(
+        done: int, total: int, current_file, files_done: int, files_total: int
+    ) -> None:
+        detail = f"{_fmt_bytes(done)} of {_fmt_bytes(total)}"
+        if files_total:
+            detail += f" ({files_done} of {files_total} files)"
+        fraction = min(done / total, 1.0) if total else None
+        if serving:
+            _readiness.report(name, "ready", fraction, f"upgrading: {detail}")
+        else:
+            _readiness.loading(name, fraction, detail)
+
+    try:
+        snap.gc_name(name_dir)
+    except Exception as e:  # noqa: BLE001 - GC is bookkeeping, never fatal
+        _log(f"models: GC before fetch failed: {e}")
+    try:
+        rev_dir = snap.fetch_snapshot(
+            name,
+            repo=repo,
+            revision=revision,
+            endpoint=endpoint,
+            base_url=base_url,
+            manifest=manifest,
+            allow=allow,
+            ignore=ignore,
+            headers=headers,
+            sensitive_headers=sensitive_headers,
+            abort=abort,
+            progress=progress,
+            # current is written inside the cross-process fetch lock
+            # hold: GC skips this name entirely while that lock is
+            # contended, so the newborn revision is never deletable.
+            on_verified=lambda rd: snap.write_current(name_dir, rd.name),
+        )
+        # Fast-path repeats never fire on_verified — the write is
+        # idempotent, so covering them here costs nothing.
+        snap.write_current(name_dir, rev_dir.name)
+        _readiness.ready(name)
+        try:
+            snap.gc_name(name_dir)
+        except Exception as e:  # noqa: BLE001
+            _log(f"models: GC after fetch failed: {e}")
+        return rev_dir
+    except ModelCancelled:
+        if serving:
+            _readiness.report(
+                name,
+                "ready",
+                None,
+                "upgrade cancelled — still serving the previous revision",
+            )
+        else:
+            _readiness.loading(name, None, "cancelled — .partial kept for resume")
+        raise
+    except ModelError as e:
+        if serving:
+            _readiness.report(
+                name,
+                "ready",
+                None,
+                f"upgrade failed: {e} — still serving the previous revision",
+            )
+        else:
+            _readiness.failed(name, str(e))
+        raise
+
+
+def model_snapshot(
+    name: str,
+    *,
+    repo: str | None = None,
+    revision: str | None = None,
+    endpoint: str | None = None,
+    base_url: str | None = None,
+    manifest: list[dict] | None = None,
+    allow: Iterable[str] | None = None,
+    ignore: Iterable[str] | None = None,
+    headers: dict[str, str] | None = None,
+    sensitive_headers: Iterable[str] | None = None,
+) -> None:
+    """Declarative snapshot form, mirroring model(): registers the spec,
+    declares the readiness component managed at import, and auto-starts
+    the fetch after hello beside @on_startup hooks — never blocking
+    dispatch, never downloading on a mere codegen-scan import."""
+    name = _check_name(name)
+    _check_kind(name, "snapshot")
+    kwargs = {
+        "repo": repo,
+        "revision": revision,
+        "endpoint": endpoint,
+        "base_url": base_url,
+        "manifest": manifest,
+        "allow": allow,
+        "ignore": ignore,
+        "headers": headers,
+        "sensitive_headers": sensitive_headers,
+    }
+    _readiness.declare(name, managed=True)
+    with _registry_lock:
+        _snapshot_registry[name] = kwargs
+    if _in_worker():
+        return
+    _register_autostart()
+    if _readiness.startup_begun():
+        _start_snapshot_download(name)
+
+
+def _start_snapshot_download(name: str) -> None:
+    key = f"snapshot:{name}"
+    with _registry_lock:
+        if key in _started:
+            return
+        _started.add(key)
+    t = threading.Thread(
+        target=_run_snapshot_download,
+        args=(name,),
+        name=f"snapshot-fetch:{name}",
+        daemon=True,
+    )
+    t.start()
+
+
+def _run_snapshot_download(name: str) -> None:
+    try:
+        fetch_snapshot(name, **_snapshot_registry[name], abort=_abort)
+    except ModelError as e:
+        _readiness.failed(name, str(e))
+    except Exception as e:  # noqa: BLE001 - the fetch thread must never die quietly
+        _readiness.failed(name, f"{type(e).__name__}: {e}")
+
+
+def _gc_sweep() -> None:
+    """Runtime-startup GC in a daemon thread: never blocks startup or
+    readiness, never crashes the runtime — bookkeeping only."""
+    try:
+        _snapshots().gc_all(_data_dir())
+    except Exception as e:  # noqa: BLE001
+        _log(f"models: startup GC failed: {e}")
+
+
 def _register_autostart() -> None:
     global _autostart_hooked
     with _registry_lock:
@@ -781,11 +1048,17 @@ def _register_autostart() -> None:
 
 def _autostart() -> None:
     """Post-hello start, beside user hooks: spawn one daemon thread per
-    registered model and return at once — dispatch is never blocked."""
+    registered model and return at once — dispatch is never blocked.
+    The startup GC sweep rides along in its own thread: it never
+    blocks startup or readiness."""
     with _registry_lock:
         specs = list(_registry.values())
+        snap_names = list(_snapshot_registry)
+    threading.Thread(target=_gc_sweep, name="models-gc", daemon=True).start()
     for spec in specs:
         _start_download(spec)
+    for name in snap_names:
+        _start_snapshot_download(name)
 
 
 def _start_download(spec: _Spec) -> None:
@@ -813,6 +1086,7 @@ def _reset() -> None:
     global _autostart_hooked
     with _registry_lock:
         _registry.clear()
+        _snapshot_registry.clear()
         _name_locks.clear()
         _started.clear()
         _autostart_hooked = False

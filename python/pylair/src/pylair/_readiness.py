@@ -436,6 +436,17 @@ def loading(
     _default.report(name, "loading", progress=progress, detail=detail)
 
 
+def report(
+    name: str,
+    phase: str,
+    progress: float | None = None,
+    detail: str | None = None,
+) -> None:
+    """Latest-wins report of any phase — the upgrade-no-flicker path
+    reports ready-with-progress, which the named helpers cannot."""
+    _default.report(name, phase, progress=progress, detail=detail)
+
+
 def ready(name: str) -> None:
     """Report a component as ready."""
     _default.report(name, "ready")
