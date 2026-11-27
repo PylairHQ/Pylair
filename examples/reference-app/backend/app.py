@@ -470,3 +470,26 @@ def selftest_blob_outcome(v: str) -> None:
 @expose
 def selftest_blob_verdict() -> str:
     return _selftest_blob["verdict"]
+
+
+# External-binaries self-test (decision 0014): reports what the host
+# resolved - the PYLAIR_BINARIES map plus per-name existence, so the
+# client check asserts the installed app's staged helper resolves
+# without needing filesystem access of its own. CI injects the same
+# function into scaffolded apps; the declared binary entry itself is
+# build machinery (CI compiles the helper and writes the pyproject
+# table - the hash cannot be checked in).
+@expose
+def binaries_selftest_report() -> dict:
+    import json as _json
+    import os as _os
+
+    raw = _os.environ.get("PYLAIR_BINARIES", "")
+    try:
+        m = _json.loads(raw) if raw else {}
+    except ValueError:
+        m = {"_unparseable": raw[:80]}
+    return {
+        name: {"path": path, "exists": _os.path.isfile(path)}
+        for name, path in m.items()
+    }

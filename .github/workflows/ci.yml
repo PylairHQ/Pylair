@@ -741,6 +741,32 @@ jobs:
           workspaces: ${{ env.APP_DIR }}/src-tauri
       # A native wheel must load inside the packaged app: AppRun's
       # LD_LIBRARY_PATH used to leak AppDir libstdc++/libssl into Python.
+      - name: Binaries self-test backend fixture (scaffold legs)
+        if: matrix.app == 'scaffold'
+        shell: bash
+        run: |
+          # The reference backend carries this canonically; scaffolded apps
+          # get the same function appended (the pattern every self-test
+          # fixture here follows).
+          cat >> app-under-test/backend/app.py <<'PYEOF'
+
+          import json as _b_json
+          import os as _b_os
+
+
+          @expose
+          def binaries_selftest_report() -> dict:
+              raw = _b_os.environ.get("PYLAIR_BINARIES", "")
+              try:
+                  m = _b_json.loads(raw) if raw else {}
+              except ValueError:
+                  m = {"_unparseable": raw[:80]}
+              return {
+                  name: {"path": path, "exists": _b_os.path.isfile(path)}
+                  for name, path in m.items()
+              }
+          PYEOF
+
       - name: Add a native-wheel dependency (numpy)
         if: matrix.app == 'scaffold'
         working-directory: app-under-test
@@ -756,6 +782,32 @@ jobs:
         run: |
           pnpm install --no-frozen-lockfile
           uv sync
+      - name: External-binaries fixture (decision 0014)
+        shell: bash
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          # The acceptance proof for external binaries: compile the repo's
+          # own test helper, declare it in pyproject with the hash of what
+          # was compiled, and let `pylair build` stage it through
+          # externalBin. The installed app's PYLAIR_BINARIES map must then
+          # resolve it (the selftest's binaries check).
+          mkdir -p vendor licenses
+          EXE=""
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=".exe"; fi
+          rustc -O "$GITHUB_WORKSPACE/fixtures/test-helper/main.rs" -o "vendor/pylair-test-helper$EXE"
+          echo 'MIT license text for the pylair test helper fixture.' > licenses/test-helper.txt
+          SHA=$(node -e 'console.log(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "vendor/pylair-test-helper$EXE")
+          TRIPLE=$(rustc --print host-tuple)
+          {
+            echo ""
+            echo "[tool.pylair.binaries.pylair-test-helper]"
+            echo 'license = "MIT"'
+            echo 'license_file = "licenses/test-helper.txt"'
+            echo ""
+            echo "[tool.pylair.binaries.pylair-test-helper.$TRIPLE]"
+            echo "path = \"vendor/pylair-test-helper$EXE\""
+            echo "sha256 = \"$SHA\""
+          } >> pyproject.toml
       - name: pylair build (stages interpreter, env, prunes, tauri build)
         working-directory: ${{ env.APP_DIR }}
         run: pnpm exec pylair build --bundles ${{ matrix.bundles }}
@@ -856,6 +908,10 @@ jobs:
                 echo "blob skipped on a --local leg — probe must run here" >&2
                 exit 1
               fi
+              if grep -q "\"binaries\":\"skipped" "$f"; then
+                echo "binaries skipped on a --local leg: the helper must resolve here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -898,6 +954,10 @@ jobs:
           fi
           if grep -q '"blob":"skipped' /tmp/wst.log; then
             echo "blob skipped on a --local leg — probe must run here" >&2
+            exit 1
+          fi
+          if grep -q '"binaries":"skipped' /tmp/wst.log; then
+            echo "binaries skipped on a --local leg: the helper must resolve here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -959,6 +1019,10 @@ jobs:
           }
           if (Select-String -Path $out -Pattern '"blob":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error 'blob skipped on a --local leg — probe must run here'
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"binaries":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error "binaries skipped on a --local leg: the helper must resolve here"
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic

@@ -46,8 +46,13 @@ import { emit } from "./codegen.js";
 import { DEFAULT_PRUNE, prune } from "./prune.js";
 import { findArtifacts } from "./build/artifacts.js";
 import { compileBytecode } from "./build/bytecode.js";
-import { stageNotices } from "./build/notices.js";
+import { stageBinaryNotices, stageNotices } from "./build/notices.js";
 import { hostTriple } from "./build/pbs.js";
+import {
+  mergeExternalBin,
+  stageBuildBinaries,
+  writeBinariesManifest,
+} from "./build/binaries.js";
 import { fetchPython, stageEnv } from "./build/python.js";
 import { adHocSign } from "./build/sign.js";
 import { stageSource } from "./build/source.js";
@@ -73,7 +78,19 @@ export {
   downloadWithRetry,
   ensureTarball,
 } from "./build/download.js";
-export { stageNotices } from "./build/notices.js";
+export { stageBinaryNotices, stageNotices } from "./build/notices.js";
+export {
+  extractMember,
+  extractZipMember,
+  installedBinaryName,
+  memberPathRejection,
+  mergeExternalBin,
+  missingTargetError,
+  prepareDevBinaries,
+  resolveBinaryBytes,
+  stageBuildBinaries,
+  writeBinariesManifest,
+} from "./build/binaries.js";
 export { hostTriple } from "./build/pbs.js";
 export { stageSource } from "./build/source.js";
 export { requirementsHaveHashes, uvExportArgs, uvPipInstallArgs } from "./build/python.js";
@@ -97,6 +114,8 @@ export interface BuildOptions {
    * the live progress line (`pylair build --verbose`). */
   verbose?: boolean;
 }
+
+const tripleIsWindowsFor = (triple: string): boolean => triple.includes("windows");
 
 const UNSIGNED_WARNING =
   "UNSIGNED BUILD: Gatekeeper and SmartScreen will warn users (see docs/build.md#signing)";
@@ -201,6 +220,7 @@ export async function build(opts: BuildOptions): Promise<void> {
     "install deps",
     ...(wrap ? [] : ["codegen"]),
     "stage app",
+    ...(Object.keys(cfg.binaries).length ? ["stage binaries"] : []),
     "prune",
     "compile bytecode",
     "smoke test",
@@ -250,6 +270,19 @@ export async function build(opts: BuildOptions): Promise<void> {
     // What the plugin reads at startup: the launcher command and the window options.
     if (wrap) writeRuntimeFile(join(resources, "pylair-wrap.json"), cfg, STAGED_APP);
   });
+
+  // External binaries (0014 sec. 1): stage single-file sidecars as
+  // externalBin expects, merge the conf idempotently and write the
+  // resolution manifest into the payload - one mechanism in both modes.
+  if (Object.keys(cfg.binaries).length)
+    await ui.step("stage binaries", async (s) => {
+      const staged = await stageBuildBinaries(appDir, tauriDir, cfg.binaries, targetTriple, cacheDir);
+      const changes = mergeExternalBin(tauriDir, staged);
+      writeBinariesManifest(join(resources, "binaries"), staged, tripleIsWindowsFor(targetTriple));
+      await stageBinaryNotices(resources, appDir, cfg.binaries, targetTriple, cacheDir);
+      s.detail(`${staged.length} binar${staged.length === 1 ? "y" : "ies"} staged`);
+      for (const c of changes) s.detail(c);
+    });
 
   await ui.step("prune", (s) => {
     const res = prune(resources, [...DEFAULT_PRUNE, ...cfg.prune]);

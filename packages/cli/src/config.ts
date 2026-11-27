@@ -35,6 +35,137 @@ export interface PylairConfig {
   bundles?: string;
   /** `[tool.pylair.watch]` - dev reload globs, relative to `source`. */
   watch: { include: string[]; ignore: string[] };
+  /** `[tool.pylair.binaries]` - declared external binaries (decision 0014). */
+  binaries: Record<string, BinaryDecl>;
+}
+
+/** One per-target source of a declared binary. Exactly one of `path`/`url`;
+ * `sha256` is mandatory either way (the reviewable record of what ships).
+ * `member` marks an archive source: extract exactly that one file. */
+export interface BinaryTarget {
+  path?: string;
+  url?: string;
+  sha256: string;
+  member?: string;
+}
+
+/** A `[tool.pylair.binaries.<name>]` entry. Directory units (the
+ * `executable` key, archives staged as trees) land in a later release -
+ * declaring one is a hard error naming the entry, not a silent misbuild. */
+export interface BinaryDecl {
+  license: string;
+  licenseFile?: string;
+  licenseUrl?: string;
+  version?: string;
+  targets: Record<string, BinaryTarget>;
+}
+
+/** The desktop triples pylair builds for; cross-compilation is out of
+ * scope (0014 sec. 9) but every target triple must still parse. */
+export const KNOWN_TRIPLES = [
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+] as const;
+
+const BINARY_KEYS = ["license", "license_file", "license_url", "version"] as const;
+const TARGET_KEYS = ["path", "url", "sha256", "member", "executable"] as const;
+
+/** Parse `[tool.pylair.binaries]`: strict keys, a mandatory license per
+ * entry, per-target exactly-one-of path/url plus a hex sha256. Strictness
+ * is the point - a typo'd key must fail loudly, never silently never ship. */
+export function parseBinariesConfig(
+  raw: unknown,
+  pyproject: string,
+): Record<string, BinaryDecl> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw))
+    throw new Error(`[tool.pylair.binaries] must be a table, got ${JSON.stringify(raw)} (${pyproject})`);
+  const out: Record<string, BinaryDecl> = {};
+  for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+    const where = `[tool.pylair.binaries.${name}]`;
+    if (typeof v !== "object" || v === null || Array.isArray(v))
+      throw new Error(`${where} must be a table (${pyproject})`);
+    const entry = v as Record<string, unknown>;
+    for (const key of Object.keys(entry)) {
+      if ((BINARY_KEYS as readonly string[]).includes(key)) continue;
+      if ((KNOWN_TRIPLES as readonly string[]).includes(key)) continue;
+      if (key.includes("-"))
+        throw new Error(
+          `${where} unknown target triple ${JSON.stringify(key)} - known triples: ${KNOWN_TRIPLES.join(", ")} (${pyproject})`,
+        );
+      throw new Error(
+        `${where} unknown key ${JSON.stringify(key)} - valid keys: ${BINARY_KEYS.join(", ")} plus one table per target triple (${pyproject})`,
+      );
+    }
+    const license = entry.license;
+    if (typeof license !== "string" || license.trim() === "")
+      throw new Error(
+        `${where} license is required (an SPDX identifier) - shipping a binary without ` +
+          `recording its license is never right (decision 0014 sec. 7) (${pyproject})`,
+      );
+    for (const key of ["license_file", "license_url", "version"] as const) {
+      if (entry[key] !== undefined && typeof entry[key] !== "string")
+        throw new Error(`${where} ${key} must be a string (${pyproject})`);
+    }
+    const targets: Record<string, BinaryTarget> = {};
+    for (const triple of KNOWN_TRIPLES) {
+      const t = entry[triple];
+      if (t === undefined) continue;
+      const tw = `${where}.${triple}`;
+      if (typeof t !== "object" || t === null || Array.isArray(t))
+        throw new Error(`${tw} must be a table (${pyproject})`);
+      const tt = t as Record<string, unknown>;
+      for (const key of Object.keys(tt))
+        if (!(TARGET_KEYS as readonly string[]).includes(key))
+          throw new Error(
+            `${tw} unknown key ${JSON.stringify(key)} - valid keys: ${TARGET_KEYS.filter((k) => k !== "executable").join(", ")} (${pyproject})`,
+          );
+      if (tt.executable !== undefined)
+        throw new Error(
+          `${tw}: directory units land in a later release - the "executable" key declares a ` +
+            `unit tree (companion shared libraries), which this version of pylair cannot stage yet ` +
+            `(binaries.${name}) (${pyproject})`,
+        );
+      if (tt.member !== undefined && typeof tt.member !== "string")
+        throw new Error(`${tw} member must be a string (${pyproject})`);
+      const hasPath = typeof tt.path === "string";
+      const hasUrl = typeof tt.url === "string";
+      if (tt.path !== undefined && !hasPath) throw new Error(`${tw} path must be a string (${pyproject})`);
+      if (tt.url !== undefined && !hasUrl) throw new Error(`${tw} url must be a string (${pyproject})`);
+      if (hasPath && hasUrl)
+        throw new Error(`${tw} has both path and url - exactly one source per target (${pyproject})`);
+      if (!hasPath && !hasUrl)
+        throw new Error(
+          `${tw} has neither path nor url - exactly one source per target (${pyproject})`,
+        );
+      if (typeof tt.sha256 !== "string")
+        throw new Error(
+          `${tw} sha256 is required - the hash is the reviewable record of what ships, even for path sources (${pyproject})`,
+        );
+      if (!/^[0-9a-f]{64}$/.test(tt.sha256))
+        throw new Error(
+          `${tw} sha256 must be 64 lowercase hex characters, got ${JSON.stringify(tt.sha256)} (${pyproject})`,
+        );
+      targets[triple] = {
+        path: hasPath ? (tt.path as string) : undefined,
+        url: hasUrl ? (tt.url as string) : undefined,
+        sha256: tt.sha256,
+        member: tt.member as string | undefined,
+      };
+    }
+    out[name] = {
+      license: license.trim(),
+      licenseFile: entry.license_file as string | undefined,
+      licenseUrl: entry.license_url as string | undefined,
+      version: entry.version as string | undefined,
+      targets,
+    };
+  }
+  return out;
 }
 
 export interface TauriConfig {
@@ -85,6 +216,7 @@ export function loadConfig(appDir: string): PylairConfig {
     include: Array.isArray(raw.include) ? raw.include.map(String) : [],
     bundles: raw.bundles ? String(raw.bundles) : undefined,
     watch: parseWatchConfig(raw.watch, pyproject),
+    binaries: parseBinariesConfig(raw.binaries, pyproject),
   };
   if (mode === "bridge" && !cfg.appModule)
     throw new Error(
