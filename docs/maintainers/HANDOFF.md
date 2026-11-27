@@ -507,14 +507,27 @@ below was skipped for rc.20 only.
   three package.json versions, the compat.ts pairing comment, both
   template `Cargo.lock` files against the published crate checksum,
   the regenerated golden, the README install lines and the
-  upgrading.md pairing); the rc.33 split does not repeat. Remaining
-  order:
+  upgrading.md pairing); the rc.33 split does not repeat. The rc.35
+  train: the bump commit (PR 213) took the crate to `0.1.0-rc.28`
+  and `pylair` to `0.1.0rc21` for external binaries (decision 0014:
+  the crate's `PYLAIR_BINARIES` resolution and release env stripping
+  in PR 210, the CLI's declaration, hash-verified staging,
+  `binaries.json` manifest, licence notices and doctor report in PR
+  211, and `pylair.binary()` / `pylair.proc` with tree-kill on cancel
+  plus the unread-`PIPE` warning in PR 212 - single-file binaries
+  only, directory units land in a later release); crate `0.1.0-rc.28`
+  is on crates.io (checksum `752d6079…a5f7`) and `pylair 0.1.0rc21`
+  on PyPI. This pins commit moves the npm trio to `0.1.0-rc.35` in
+  one pass (compat.json, all three package.json versions, the
+  compat.ts pairing comment, both template `Cargo.lock` files against
+  the published crate checksum, the regenerated golden, the README
+  install lines and the upgrading.md pairing). Remaining order:
 
   1. pack-mode acceptance green on this commit (scaffolded pins
-     resolve crate rc.27 + pylair rc20, both live);
+     resolve crate rc.28 + pylair rc21, both live);
   2. the npm trio under `--tag next`;
   3. registry acceptance with `source=registry` and
-     `expect_version 0.1.0-rc.34`; `PYLAIR_BLOB_EXPECTED` keeps
+     `expect_version 0.1.0-rc.35`; `PYLAIR_BLOB_EXPECTED` keeps
      arming (all three resolved versions are already past their
      floors), so a `blob` skip still fails the leg on every OS.
 
