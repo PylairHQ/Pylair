@@ -3795,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.27"
+version = "0.1.0-rc.28"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
