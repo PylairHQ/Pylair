@@ -8,6 +8,8 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.35 (unreleased)
+
 ### External binaries: `pylair.binary()` and `pylair.proc` (decision 0014)
 
 - **`pylair.binary(name) -> Path`** resolves a declared binary through
@@ -23,6 +25,11 @@ what the GitHub releases page publishes.
   `TASK_CANCELLED` is reported (process-group SIGTERM/SIGKILL on POSIX,
   taskkill /T on Windows); a normally-completing task never kills its
   children, so servers outlive the call that starts them.
+- **The unread-`PIPE` warning**: a sidecar outliving its task with
+  `stdout=PIPE` and nothing draining it blocks on write once the OS
+  pipe buffer fills and hangs silently, so the runtime logs one warning
+  per offending child when its task finishes - the server pattern is
+  `stdout=DEVNULL` or a reader task draining the iterator.
 - `docs/binaries.md` covers declaring, resolving, running, the two
   ownership rules and the long-running-server readiness pattern.
 
