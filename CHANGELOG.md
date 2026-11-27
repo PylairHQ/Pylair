@@ -8,7 +8,7 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-## npm-v0.1.0-rc.34 (unreleased)
+## npm-v0.1.0-rc.34 (2026-11-27)
 
 ### `pylair models resolve` — snapshot pin authoring helper
 
