@@ -8,7 +8,7 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-## npm-v0.1.0-rc.35 (unreleased)
+## npm-v0.1.0-rc.35 (2026-11-27)
 
 ### External binaries: `pylair.binary()` and `pylair.proc` (decision 0014)
 
