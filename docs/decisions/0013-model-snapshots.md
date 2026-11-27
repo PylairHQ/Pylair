@@ -227,9 +227,12 @@ The rules:
   file is in place and verified; then `<revision>.partial/` is renamed
   to `<revision>/` in one step. A crash at any earlier moment leaves
   only a `.partial` dir, which `path()` never looks at.
-- **`path()` cheap-check**: resolve `current`, then in the revision
-  dir: `.ready` present, `.manifest.json` present, every manifest
-  entry exists with the recorded size, and no recorded mtime changed.
+- **`path()` cheap-check**: resolve `current`, shared-lock `.use`,
+  recheck `.ready` under the held lock (the full protocol is §7 -
+  the recheck is what keeps a reader out of a directory GC has
+  started deleting), then in the revision dir: `.manifest.json`
+  present, every manifest entry exists with the recorded size, and no
+  recorded mtime changed.
   One stat per file (typically tens of files, tens of microseconds
   each) with zero hashing; any mtime mismatch re-hashes just that file
   before deciding, mirroring 0009 §1. A failed check raises
@@ -385,23 +388,60 @@ The revision-addressed layout of §3 avoids both by construction:
   revision; **a `Path` an app already holds keeps pointing at the old
   immutable revision for the life of the process** - no mixed loads,
   ever, because revision directories never change content.
-- **Reader locks**: `path()` takes a shared byte-range lock on a
-  `.use` file inside the revision dir and holds it for the life of
-  the process (shared, not exclusive - any number of readers;
-  kernel-released on death exactly like the 0009 fetch lock). This is
-  what lets GC distinguish "deletable" from "in use" on every OS, not
-  just Windows.
+- **Reader locks, and the lock-then-recheck protocol**: `path()`
+  takes a shared byte-range lock on the revision's `.use` file and
+  holds it for the life of the process (shared, not exclusive - any
+  number of readers; kernel-released on death exactly like the 0009
+  fetch lock). The ordering is load-bearing, because the sequence
+  read-`current`-then-lock races with a switching upgrade plus a GC
+  from another process: the reader reads A, the switch moves to B, GC
+  wins A's lock before the reader takes it, and the reader would lock
+  a revision already being deleted. So `path()` is a bounded retry
+  loop:
+
+  1. read `current` (or take the explicit `revision=` argument);
+  2. open and shared-lock `<revision>/.use` - a failed open is a
+     retry, not an error;
+  3. **recheck**: `<revision>/.ready` must still exist, now that the
+     lock is held. GC deletes `.ready` first (below), so a present
+     `.ready` under a held shared lock proves the directory is not
+     being deleted;
+  4. `.ready` missing: release, re-read `current`, retry - bounded at
+     3 attempts, then `ModelNotReady` with a detail naming the race
+     (`revision switched during lookup; current is <sha>`).
+
+  A reader that wins the shared lock with `.ready` present cannot end
+  up in a half-deleted directory: the deletion either has not started
+  (GC could not win the exclusive lock while any shared lock is held)
+  or was never going to touch this revision. This is what lets GC
+  distinguish "deletable" from "in use" on every OS, not just
+  Windows.
 - **GC**: at the end of a successful fetch, and again at each fetch
   start and runtime startup, the runtime scans `<name>/` for
   non-current revisions and tries to delete each one whose `.use`
   lock can be taken exclusively without blocking. A lock that cannot
-  be taken means a live reader - skip silently. On Windows a delete
-  can also fail outright with a sharing violation even when the lock
-  was won (a reader that mmap'd but never locked, or a race with a
-  dying process): that failure is **"still in use", never an error** -
-  the revision is retried at the next opportunity. `.partial` residue
+  be taken means a live reader - skip silently. When the exclusive
+  lock is won, deletion is ordered and the lock is held throughout:
+  **`.ready` first, then the rest of the directory**. The `.ready`-
+  first order is the other half of the reader protocol above: a
+  reader that shared-locks `.use` after `.ready` is gone fails the
+  recheck and retries onto `current`, and a revision with no `.ready`
+  is never handed out - so even a reader that slips between the
+  exclusive lock's release-to-scan windows lands on the new revision,
+  never in a partial directory. On Windows a delete can also fail
+  outright with a sharing violation even when the lock was won (a
+  reader that mmap'd but never locked, or a race with a dying
+  process): that failure is **"still in use", never an error** - the
+  revision is retried at the next opportunity. `.partial` residue
   from crashed fetches is collected the same way (no reader can hold
   it, and `.lock` proves no live writer).
+- **Disk usage honesty**: readers hold `.use` for the process
+  lifetime, so a long-running app that has moved on to the new
+  revision still pins the old one on disk until restart. Peak usage
+  during an upgrade is therefore old + new (§6), and the old revision
+  only leaves once every process holding it exits. That is the price
+  of never corrupting a live load, and it is documented in
+  `docs/models.md` so users can read their disk usage correctly.
 - A repeated fetch of the revision `current` already names costs one
   stat pass and returns immediately, as in 0009.
 
@@ -446,7 +486,18 @@ Explicitly not in v1, each a plausible `docs/ideas.md` entry:
 - **GC**: after the switch, A is deleted once no reader holds it;
   while a reader holds A's `.use` lock, GC skips it on every OS;
   a simulated Windows sharing-violation delete failure is treated as
-  "still in use" and retried, never raised.
+  "still in use" and retried, never raised. A revision whose `.ready`
+  GC deleted first is never handed out even if the rest of the
+  directory still exists.
+- **The path()/GC race**: interleave a reader between reading
+  `current` and taking the shared lock with a switch plus an
+  aggressive GC (another process). Across repeated interleavings the
+  reader either lands on the old revision with `.ready` verified
+  under its held lock - and the directory is then provably not being
+  deleted - or fails the recheck, retries, and lands on the new
+  revision. It never returns a `Path` into a partial directory, and
+  the bounded retry surfaces `ModelNotReady` with the switch detail
+  rather than hanging.
 - **Resume**: kill mid-shard, restart, assert only missing bytes are
   re-fetched (server logs Range offsets); mtime-tamper a verified file
   and assert the single-file re-hash catches it.
