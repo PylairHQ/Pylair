@@ -8,6 +8,34 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### Multi-file model snapshots: lifecycle and public API (decision 0013)
+
+- **`models.fetch_snapshot()` / `models.model_snapshot()` / snapshot-aware
+  `models.path()`** — directory-shaped models are now a public,
+  supported feature. Pin a full Hugging Face commit sha (or an explicit
+  `{path, sha256, size}` manifest for any other host) and get back an
+  immutable, fully verified revision directory. The declarative
+  `model_snapshot()` mirrors `model()`: import-time registration,
+  managed readiness, auto-start after hello, `requires=(name,)` gating
+  unchanged. Workers resolve with `path()` and never fetch.
+- **Upgrades never flicker.** Each revision is immutable under
+  `<data>/models/<name>/<revision>/`; `current` is a small file
+  switched atomically. A `Path` your app already holds keeps reading
+  the same revision for the life of the process — no mixed-revision
+  loads — while new `path()` calls land on the new revision the instant
+  the pointer moves. During an upgrade the readiness component stays
+  `ready` with progress in its detail; a failed upgrade leaves the old
+  revision serving and reports the failure in place.
+- **Reader locks and GC.** `path()` holds a shared byte-range lock per
+  revision for the process lifetime, rechecking `.ready` under the
+  lock; GC (at fetch boundaries and once at startup, never blocking)
+  exclusively probes that lock, deletes `.ready` first and skips
+  anything in use — including revisions mmap'd or held by other live
+  processes, which are collected once the holder exits. `HF_TOKEN` is
+  adopted when no explicit Authorization header is given (never logged,
+  still stripped on cross-origin redirects) and `HF_ENDPOINT` selects a
+  mirror.
+
 ### Multi-file model snapshots: fetch core (decision 0013, internal groundwork)
 
 - **`pylair._snapshots` — internal, no public API yet.** The fetch core
