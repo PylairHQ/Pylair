@@ -320,9 +320,13 @@ export function mergeExternalBin(tauriDir: string, names: string[]): string[] {
       ? [conf.bundle.externalBin]
       : [];
   const wanted = names.map((n) => `binaries/${n}`);
-  const merged: string[] = [];
+  // Dedup within the user's own entries only: an already-merged pylair
+  // entry overlaps with `wanted` by design and must not count as a
+  // duplicate, or every rebuild would rewrite the file and lie in the
+  // diff. A true no-op leaves the file byte-identical.
   const seen = new Set<string>();
-  for (const entry of [...current, ...wanted]) {
+  const merged: string[] = [];
+  for (const entry of current) {
     if (seen.has(entry)) {
       changes.push(`removed duplicate externalBin entry ${entry}`);
       continue;
@@ -330,16 +334,30 @@ export function mergeExternalBin(tauriDir: string, names: string[]): string[] {
     seen.add(entry);
     merged.push(entry);
   }
-  for (const w of wanted) if (!current.includes(w)) changes.push(`added externalBin entry ${w}`);
+  for (const w of wanted) {
+    if (seen.has(w)) continue;
+    seen.add(w);
+    merged.push(w);
+    changes.push(`added externalBin entry ${w}`);
+  }
   if (merged.length) conf.bundle.externalBin = merged;
   // The manifest rides the resources payload at binaries/binaries.json -
   // without the mapping tauri drops it on the floor at bundle time.
-  if (!Array.isArray(conf.bundle.resources)) {
-    conf.bundle.resources ??= {};
-    if (!conf.bundle.resources["resources/binaries"]) {
-      conf.bundle.resources["resources/binaries"] = "binaries/";
-      changes.push('added resources mapping "resources/binaries" -> "binaries/"');
-    }
+  if (Array.isArray(conf.bundle.resources)) {
+    // Array entries keep their source-relative path, so the file would
+    // land at the wrong resource path - appending is not an option, and
+    // skipping silently would ship an app whose PYLAIR_BINARIES never
+    // exists (pylair.binary() fails at runtime with no hint why).
+    throw new Error(
+      "bundle.resources in src-tauri/tauri.conf.json is an array; " +
+        'convert it to the object form { "<src>": "<dest>" } so pylair can map ' +
+        "binaries/binaries.json, or remove the binaries table",
+    );
+  }
+  conf.bundle.resources ??= {};
+  if (!conf.bundle.resources["resources/binaries"]) {
+    conf.bundle.resources["resources/binaries"] = "binaries/";
+    changes.push('added resources mapping "resources/binaries" -> "binaries/"');
   }
   if (changes.length) writeFileSync(confPath, JSON.stringify(conf, null, 2) + "\n");
   return changes;

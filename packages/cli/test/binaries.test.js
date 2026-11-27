@@ -420,6 +420,41 @@ describe("externalBin merge", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("array-form bundle.resources is a build error naming the fix", () => {
+    const dir = tmp("merge");
+    conf(dir, { bundle: { resources: ["assets/logo.png", "binaries/"] } });
+    assert.throws(
+      () => mergeExternalBin(dir, ["ffmpeg"]),
+      /bundle\.resources in src-tauri\/tauri\.conf\.json is an array; convert it to the object form \{ "<src>": "<dest>" \} so pylair can map binaries\/binaries\.json, or remove the binaries table/,
+    );
+    // The config file is untouched - a failed build never half-edits it.
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "tauri.conf.json"), "utf-8")), {
+      bundle: { resources: ["assets/logo.png", "binaries/"] },
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("object form with the mapping already present is left alone", () => {
+    const dir = tmp("merge");
+    conf(dir, {
+      bundle: {
+        externalBin: ["binaries/ffmpeg"],
+        resources: { "assets/": "assets/", "resources/binaries": "binaries/" },
+      },
+    });
+    const before = readFileSync(join(dir, "tauri.conf.json"), "utf-8");
+    const changes = mergeExternalBin(dir, ["ffmpeg"]);
+    const confAfter = JSON.parse(readFileSync(join(dir, "tauri.conf.json"), "utf-8"));
+    assert.deepEqual(confAfter.bundle.resources, {
+      "assets/": "assets/",
+      "resources/binaries": "binaries/",
+    });
+    assert.deepEqual(confAfter.bundle.externalBin, ["binaries/ffmpeg"]);
+    assert.ok(!changes.some((c) => c.includes("resources")), "no resources churn");
+    assert.equal(readFileSync(join(dir, "tauri.conf.json"), "utf-8"), before, "byte-identical");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("no names means no edit", () => {
     const dir = tmp("merge");
     conf(dir, { bundle: {} });
