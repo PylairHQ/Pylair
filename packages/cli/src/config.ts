@@ -1,6 +1,6 @@
-/** App config for `pylair build` — one file, [tool.pylair] in pyproject.toml.
+/** App config for `pylair build` - one file, [tool.pylair] in pyproject.toml.
  * App identity (productName/identifier/version) is derived from
- * src-tauri/tauri.conf.json — Tauri owns it; we don't duplicate it.
+ * src-tauri/tauri.conf.json - Tauri owns it; we don't duplicate it.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -29,25 +29,27 @@ export interface PylairConfig {
   /** Extra prune globs on top of the defaults. */
   prune: string[];
   /** Source paths to stage even though they match the secret-looking
-   * exclusions — globs relative to `source`, same shape as `prune`. */
+   * exclusions - globs relative to `source`, same shape as `prune`. */
   include: string[];
   /** Bundle target override (default: per-OS sensible set). */
   bundles?: string;
+  /** `[tool.pylair.watch]` - dev reload globs, relative to `source`. */
+  watch: { include: string[]; ignore: string[] };
 }
 
 export interface TauriConfig {
   productName: string;
   identifier: string;
   version: string;
-  /** bundle.macOS.signingIdentity — a configured identity means Tauri
+  /** bundle.macOS.signingIdentity - a configured identity means Tauri
    * signs for real during bundling; pylair must not ad-hoc over it. */
   macSigningIdentity?: string;
-  /** plugins.updater — present exactly when the app is updater-enabled
+  /** plugins.updater - present exactly when the app is updater-enabled
    * (decision 0011). Drives the build-time version-sync check. */
   updater?: { pubkey?: string; endpoints?: string[] };
 }
 
-/** Parse [tool.pylair] with smol-toml — no Python interpreter required at
+/** Parse [tool.pylair] with smol-toml - no Python interpreter required at
  * build/dev time (a system python3 may be <3.11 or absent entirely). */
 export function loadConfig(appDir: string): PylairConfig {
   const pyproject = join(appDir, "pyproject.toml");
@@ -82,6 +84,7 @@ export function loadConfig(appDir: string): PylairConfig {
     prune: Array.isArray(raw.prune) ? raw.prune.map(String) : [],
     include: Array.isArray(raw.include) ? raw.include.map(String) : [],
     bundles: raw.bundles ? String(raw.bundles) : undefined,
+    watch: parseWatchConfig(raw.watch, pyproject),
   };
   if (mode === "bridge" && !cfg.appModule)
     throw new Error(
@@ -89,6 +92,37 @@ export function loadConfig(appDir: string): PylairConfig {
         `(the module holding your @expose functions)`,
     );
   return cfg;
+}
+
+/** Parse `[tool.pylair.watch]`: dev reload include/ignore globs,
+ * relative to `source`. Strict keys and strict string arrays - a typo'd
+ * key or a non-string glob must fail loudly, not silently never fire. */
+function parseWatchConfig(
+  raw: unknown,
+  pyproject: string,
+): { include: string[]; ignore: string[] } {
+  const out = { include: ["**/*.py"], ignore: [] as string[] };
+  if (raw === undefined || raw === null) return out;
+  if (typeof raw !== "object" || Array.isArray(raw))
+    throw new Error(`[tool.pylair.watch] must be a table, got ${JSON.stringify(raw)} (${pyproject})`);
+  for (const key of Object.keys(raw as Record<string, unknown>))
+    if (key !== "include" && key !== "ignore")
+      throw new Error(
+        `[tool.pylair.watch] unknown key ${JSON.stringify(key)} - only "include" and "ignore" are valid (${pyproject})`,
+      );
+  const r = raw as Record<string, unknown>;
+  for (const key of ["include", "ignore"] as const) {
+    const v = r[key];
+    if (v === undefined) continue;
+    if (!Array.isArray(v) || v.some((g) => typeof g !== "string"))
+      throw new Error(
+        `[tool.pylair.watch] ${key} must be an array of glob strings (${pyproject})`,
+      );
+    if (v.some((g) => (g as string).trim() === ""))
+      throw new Error(`[tool.pylair.watch] ${key} must not contain empty globs (${pyproject})`);
+    (out[key] as string[]) = v as string[];
+  }
+  return out;
 }
 
 export function loadTauriConfig(appDir: string): TauriConfig {
@@ -137,7 +171,7 @@ export function importRoot(base: string, source: string): string {
 }
 
 /** Absolute path of the app's installed Tauri CLI entry (JS), so it can be run
- * with `node` directly — no `npx`/`npx.cmd` shell shim, same on every OS. */
+ * with `node` directly - no `npx`/`npx.cmd` shell shim, same on every OS. */
 export function tauriCliEntry(appDir: string): string {
   try {
     return createRequire(join(appDir, "package.json")).resolve("@tauri-apps/cli/tauri.js");

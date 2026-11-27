@@ -492,7 +492,7 @@ impl Session<'_> {
             // the inspector names the file when the content carries one
             // (docs/inspector.md). A read race with the next write loses
             // the name at worst; the reload itself is already certain.
-            let file = restart_trigger
+            let token = restart_trigger
                 .as_deref()
                 .and_then(|t| std::fs::read_to_string(t).ok())
                 .and_then(|c| {
@@ -502,6 +502,15 @@ impl Session<'_> {
                         .filter(|f| !f.is_empty())
                         .map(str::to_string)
                 });
+            // `pylair restart` / the `r` key write "manual" in place of the
+            // file name — the operator asked for this one, so the breaker
+            // resets, and the inspector entry says so.
+            let manual = token.as_deref() == Some("manual");
+            let file = if manual {
+                Some("manual restart".to_string())
+            } else {
+                token
+            };
             self.sup
                 .inspect
                 .note_event(crate::inspect::TimelineEvent::DevReload {
@@ -515,7 +524,7 @@ impl Session<'_> {
             )
             .await;
             kill_and_reap(&mut self.io).await;
-            return ControlFlow::Break(ExitCause::DevRestart);
+            return ControlFlow::Break(ExitCause::DevRestart(manual));
         }
         ControlFlow::Continue(())
     }
@@ -524,6 +533,9 @@ impl Session<'_> {
         &mut self,
         status: Result<io::Result<ExitStatus>, RecvError>,
     ) -> ExitCause {
+        if let Ok(Ok(s)) = &status {
+            self.sup.note_runtime_status("exited", s.code(), None);
+        }
         let detail = match status {
             Ok(Ok(s)) => format!("exited {s}"),
             Ok(Err(e)) => format!("wait error: {e}"),

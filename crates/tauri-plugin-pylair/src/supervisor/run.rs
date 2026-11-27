@@ -64,6 +64,62 @@ pub fn strip_dev_tracebacks(spec: &mut crate::supervisor::config::SpawnSpec) {
     }
 }
 
+/// Same release-channel defense for `PYLAIR_RUNTIME_STATUS` (dev reload
+/// visibility): the status file is dev machinery, a release build must
+/// neither write it nor pass the variable down to the runtime child.
+pub fn strip_dev_runtime_status(spec: &mut crate::supervisor::config::SpawnSpec) {
+    spec.env.retain(|(k, _)| k != RUNTIME_STATUS_ENV);
+    if !spec.env_remove.iter().any(|k| k == RUNTIME_STATUS_ENV) {
+        spec.env_remove.push(RUNTIME_STATUS_ENV.into());
+    }
+}
+
+/// The dev-only env var naming the runtime-status file the CLI reads for
+/// reload visibility. Never honoured in release builds.
+pub const RUNTIME_STATUS_ENV: &str = "PYLAIR_RUNTIME_STATUS";
+
+/// Write one runtime-status JSON object to `path` — the pure writer the
+/// dev CLI's reload lines consume. Kept pure (explicit path, no env) so
+/// tests exercise it without touching process state.
+pub(crate) fn write_runtime_status(
+    path: &std::path::Path,
+    generation: u64,
+    state: &str,
+    exit_code: Option<i32>,
+    detail: Option<&str>,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let code = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "null".into());
+    let detail = detail
+        .map(|d| format!("{:?}", d)) // debug-format quotes+escapes as JSON string
+        .unwrap_or_else(|| "null".into());
+    let body = format!(
+        "{{\"generation\":{generation},\"state\":\"{state}\",\"exit_code\":{code},\"detail\":{detail},\"ts\":{ts}}}"
+    );
+    // A nicety like the codegen status file: never a reason to break the loop.
+    let _ = std::fs::write(path, body);
+}
+
+impl Supervisor {
+    /// The reload-visibility write, when this dev session carries the
+    /// status file at all (debug builds, `PYLAIR_RUNTIME_STATUS` set).
+    pub(crate) fn note_runtime_status(
+        &self,
+        state: &str,
+        exit_code: Option<i32>,
+        detail: Option<&str>,
+    ) {
+        if let Some(path) = &self.config.runtime_status_path {
+            write_runtime_status(path, self.generation, state, exit_code, detail);
+        }
+    }
+}
+
 pub(super) fn classify_pong(stale: Duration, kill: Option<Duration>) -> PongVerdict {
     if kill.is_some_and(|l| stale >= l) {
         PongVerdict::StallKill
@@ -358,14 +414,21 @@ enum ExitCause {
     /// — straight to Failed, no restart loop.
     Fatal(String),
     /// Dev-mode hot reload: PYLAIR_RESTART_TRIGGER file changed — respawn
-    /// immediately, no crash accounting.
-    DevRestart,
+    /// immediately, no crash accounting. `true` when the trigger carries
+    /// the `manual` marker: the operator asked for the restart, so the
+    /// crash-loop breaker resets (they just fixed the bug).
+    DevRestart(bool),
 }
 
 impl Supervisor {
     fn set_state(&self, to: State, detail: impl Into<String>) {
         let from = *self.state_tx.borrow();
         if from != to {
+            match to {
+                State::Starting => self.note_runtime_status("starting", None, None),
+                State::Ready => self.note_runtime_status("ready", None, None),
+                _ => {}
+            }
             self.health.lock().unwrap().note_transition();
             let _ = self.state_tx.send(to);
             self.events.emit(RuntimeEvent::StateChanged {
@@ -423,6 +486,12 @@ impl Supervisor {
     async fn run_loop(&mut self) {
         let mut crashes: VecDeque<Instant> = VecDeque::new();
         let mut backoff = self.config.backoff_base;
+        // Generation-independent: the parked-breaker watch needs it too.
+        let restart_trigger = self
+            .config
+            .restart_trigger
+            .clone()
+            .or_else(|| std::env::var_os("PYLAIR_RESTART_TRIGGER").map(PathBuf::from));
         loop {
             self.ready_since = None;
             self.health.lock().unwrap().note_ready(None);
@@ -445,6 +514,7 @@ impl Supervisor {
             // runtime env is the whole defense in depth.
             if !cfg!(debug_assertions) {
                 strip_dev_tracebacks(&mut spec);
+                strip_dev_runtime_status(&mut spec);
             }
             let blob_dir =
                 BlobRegistry::generation_dir(self.config.blob_root.as_deref(), self.generation);
@@ -516,16 +586,28 @@ impl Supervisor {
                     self.set_state(State::Stopped, "shutdown");
                     return;
                 }
-                ExitCause::DevRestart => {
+                ExitCause::DevRestart(manual) => {
                     self.health
                         .lock()
                         .unwrap()
                         .note_exit(ExitKind::DevRestart, "source changed".into());
                     self.set_state(State::Restarting, "source changed");
+                    if manual {
+                        // The operator asked for this one: they fixed the
+                        // bug, so the crash loop that motivated the restart
+                        // is a fresh incident, not evidence of a boot loop.
+                        crashes.clear();
+                        backoff = self.config.backoff_base;
+                        self.health
+                            .lock()
+                            .unwrap()
+                            .note_restart_accounting(0, backoff);
+                    }
                     self.generation += 1;
                     self.health.lock().unwrap().note_generation(self.generation);
                 }
                 ExitCause::Fatal(reason) => {
+                    self.note_runtime_status("failed", None, Some(&reason));
                     self.health
                         .lock()
                         .unwrap()
@@ -536,7 +618,7 @@ impl Supervisor {
                             detail: reason.clone(),
                         });
                     self.set_state(State::Failed, reason);
-                    if !self.park_failed().await {
+                    if !self.park_failed(&restart_trigger).await {
                         return;
                     }
                     // operator retried: fresh counters, spawn again
@@ -595,6 +677,7 @@ impl Supervisor {
                                     self.config.breaker_window
                                 ),
                             });
+                        self.note_runtime_status("breaker_open", None, None);
                         self.set_state(
                             State::Failed,
                             format!(
@@ -603,7 +686,7 @@ impl Supervisor {
                                 self.config.breaker_window
                             ),
                         );
-                        if !self.park_failed().await {
+                        if !self.park_failed(&restart_trigger).await {
                             return;
                         }
                         crashes.clear();
@@ -640,23 +723,41 @@ impl Supervisor {
 
     /// Failed is a parked state, not an exit — wait for Retry or Shutdown.
     /// Incoming calls are failed fast so callers never hang.
-    async fn park_failed(&mut self) -> bool {
+    async fn park_failed(&mut self, restart_trigger: &Option<PathBuf>) -> bool {
+        // While parked the runtime is dead, but a manual `pylair restart`
+        // (or `r` key) is exactly how the operator says "I fixed it" —
+        // watch the trigger for the manual marker and treat it as Retry.
+        // File-change saves stay ignored here: the reset is manual-only.
+        let trigger_mtime = restart_trigger.as_deref().and_then(mtime);
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
         loop {
-            match self.cmd_rx.recv().await {
-                None => {
-                    self.set_state(State::Stopped, "shutdown");
-                    return false;
-                }
-                Some(cmd) => {
-                    release_queued(&self.fair, &cmd);
-                    match cmd {
-                        Command::Shutdown { ack } => {
-                            self.shutdown_acks.push(ack);
-                            self.set_state(State::Stopped, "shutdown");
-                            return false;
+            tokio::select! {
+                cmd = self.cmd_rx.recv() => match cmd {
+                    None => {
+                        self.set_state(State::Stopped, "shutdown");
+                        return false;
+                    }
+                    Some(cmd) => {
+                        release_queued(&self.fair, &cmd);
+                        match cmd {
+                            Command::Shutdown { ack } => {
+                                self.shutdown_acks.push(ack);
+                                self.set_state(State::Stopped, "shutdown");
+                                return false;
+                            }
+                            Command::Retry => return true,
+                            c => fail_command_fast(c, "runtime is stopped"),
                         }
-                        Command::Retry => return true,
-                        c => fail_command_fast(c, "runtime is stopped"),
+                    }
+                },
+                _ = poll.tick(), if restart_trigger.is_some() => {
+                    let m = restart_trigger.as_deref().and_then(mtime);
+                    if m != trigger_mtime {
+                        // Any trigger while parked is one human attempt,
+                        // not a loop: the trigger only exists in dev, and
+                        // a save while parked means "I fixed it" exactly
+                        // like the manual marker does.
+                        return true;
                     }
                 }
             }
@@ -862,4 +963,37 @@ async fn kill_and_reap(io: &mut ChildIo) -> bool {
     timeout(Duration::from_secs(5), &mut io.exited)
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+mod runtime_status_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_status_writer_emits_the_dev_cli_shape() {
+        // The pure writer with an explicit temp path — no process-env
+        // mutation, so no parallel supervisor test can interfere. The
+        // env-resolution half is compile-time gated in SupervisorConfig:
+        // debug builds read PYLAIR_RUNTIME_STATUS once, release never does.
+        let dir = std::env::temp_dir().join(format!("pylair-rtstat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime-status.json");
+        write_runtime_status(&path, 4, "ready", None, None);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["generation"], 4);
+        assert_eq!(v["state"], "ready");
+        assert!(v["exit_code"].is_null());
+        assert!(v["ts"].as_u64().unwrap() > 0);
+        write_runtime_status(&path, 4, "exited", Some(1), None);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["exit_code"], 1);
+        write_runtime_status(&path, 5, "failed", None, Some("protocol version mismatch"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["detail"], "protocol version mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -5,10 +5,16 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { join } from "node:path";
 import { runTool } from "./build/util.js";
+import {
+  BUILTIN_IGNORES,
+  pollStatusFile,
+  startDevWatch,
+  writeManualTrigger,
+} from "./devwatch.js";
 import { importRoot, loadConfig, tauriCliEntry, type PylairConfig } from "./config.js";
 import { emit } from "./codegen.js";
 import { loadManifest } from "./manifest.js";
@@ -41,7 +47,7 @@ export function codegenEnv(appDir: string, source: string): Record<string, strin
 /** The dev-only codegen status file the inspector reads (docs/inspector.md):
  * written after every codegen attempt, so a broken stub regeneration is a
  * banner and a timeline entry instead of scrollback. The app finds it
- * through PYLAIR_CODEGEN_STATUS — dev-only by construction: the variable
+ * through PYLAIR_CODEGEN_STATUS - dev-only by construction: the variable
  * only ever reaches the dev child. */
 export function codegenStatusPath(appDir: string): string {
   return join(appDir, ".pylair", "codegen-status.json");
@@ -105,6 +111,116 @@ function devUrl(appDir: string): string | undefined {
   }
 }
 
+/** Reload visibility (DX item 10): one line per event, never spam during
+ * a debounce burst. The CLI writes the trigger; the supervisor (debug
+ * builds only, PYLAIR_RUNTIME_STATUS) writes runtime-status.json at every
+ * state transition; this bridge prints the pair. */
+export function runtimeStatusPath(appDir: string): string {
+  return join(appDir, ".pylair", "runtime-status.json");
+}
+
+interface ReloadTracker {
+  since: number | null;
+  seenReadyFor: number;
+}
+
+/** Wire the trigger callback and the status-file poll into the terminal
+ * lines. Shared by bridge and wrap - wrap's "ready" is the port answering,
+ * which is the same supervisor state. */
+export function reloadVisibility(appDir: string): {
+  onTrigger: (label: string) => void;
+  close: () => void;
+} {
+  const tracker: ReloadTracker = { since: null, seenReadyFor: -1 };
+  const poller = pollStatusFile(runtimeStatusPath(appDir), (st) => {
+    if (tracker.since === null) return; // initial startup is not a reload
+    const gen = st.generation ?? -1;
+    const ts = st.ts ?? 0;
+    if (st.state === "ready" && ts >= tracker.since && gen !== tracker.seenReadyFor) {
+      tracker.seenReadyFor = gen;
+      const ms = ts - tracker.since;
+      tracker.since = null;
+      ui.info(`reload: ready in ${ms}ms (generation ${gen})`);
+    } else if (st.state === "exited" && ts >= tracker.since) {
+      ui.warn(
+        `reload: Python exited during startup (code ${st.exit_code ?? "?"}), see the error above; fix and save to retry`,
+        { bare: true },
+      );
+    } else if (st.state === "failed" && ts >= tracker.since) {
+      ui.warn(`reload: Python failed: ${st.detail ?? "see the error above"}`, { bare: true });
+    } else if (st.state === "breaker_open" && ts >= tracker.since) {
+      ui.warn(
+        "reload: crash-loop breaker is open - fix and save, or press r / run `pylair restart`",
+        { bare: true },
+      );
+    }
+  });
+  return {
+    onTrigger: (label) => {
+      tracker.since = Date.now();
+      ui.info(`reload: ${label}, restarting Python`);
+    },
+    close: () => poller.close(),
+  };
+}
+
+/** External restart visibility: the supervisor restarts on ANY trigger
+ * content, whoever wrote it - `pylair restart` from a second terminal
+ * must narrate in this one. Poll the trigger file; content the dev
+ * process did not write itself is an external trigger. */
+export function watchExternalTriggers(
+  trigger: string,
+  ownWrites: Set<string>,
+  onExternal: (label: string) => void,
+): { close: () => void } {
+  let last = "";
+  try {
+    last = readFileSync(trigger, "utf-8");
+  } catch {
+    // created momentarily
+  }
+  const timer = setInterval(() => {
+    let content: string;
+    try {
+      content = readFileSync(trigger, "utf-8");
+    } catch {
+      return;
+    }
+    if (content === last) return;
+    last = content;
+    if (ownWrites.has(content)) return; // we narrated this one already
+    const token = content.trim().split(/\s+/)[1];
+    if (!token) return;
+    onExternal(token === "manual" ? "manual restart requested" : `${token} changed`);
+  }, 200);
+  return { close: () => clearInterval(timer) };
+}
+
+/** Line-buffered stdin listener for the `r` key: manual restart without
+ * editing a file (the main use: the breaker is open and the bug is fixed).
+ * Never raw mode - tauri dev inherits stdin. Skipped entirely when stdin
+ * is not a TTY (CI, pipes). */
+function armRestartKey(trigger: string, ownWrites: Set<string>, onManual: () => void): void {
+  if (!process.stdin.isTTY) return;
+  import("node:readline").then((rl) => {
+    const iface = rl.createInterface({ input: process.stdin, terminal: false });
+    iface.on("line", (line) => {
+      if (line.trim() !== "r") return; // line-buffered: every other key is ignored
+      ownWrites.add(writeManualTrigger(trigger));
+      onManual();
+    });
+  });
+}
+
+/** The pid file `pylair restart` uses to prove a dev session is live. */
+function writeDevPidFile(appDir: string): void {
+  try {
+    writeFileSync(join(appDir, ".pylair", "dev.pid"), String(process.pid));
+  } catch {
+    // a nicety, like the status files
+  }
+}
+
 /** The short header printed as `tauri dev` is started: what is running and
  * how to stop it. (Printed at launch, not when the window appears: tauri dev
  * owns the terminal from here and does not tell us.) */
@@ -117,7 +233,12 @@ function devHeader(appDir: string, cfg: PylairConfig): void {
     [
       ["mode", wrap ? `wrap (${cfg.wrap!.framework}), the server restarts when a .py file changes` : "bridge, Python restarts when a .py file changes"],
       [wrap ? "server" : "app", wrap ? "started by the app on a free local port" : (url ?? "the window loads the app bundled by tauri dev")],
-      ["watching", cfg.source],
+      [
+        "watching",
+        `${cfg.source} (${cfg.watch.include.join(", ")}); ignoring ${BUILTIN_IGNORES.length} built-in patterns` +
+          (cfg.watch.ignore.length ? ` + ${cfg.watch.ignore.length} custom` : ""),
+      ],
+      ["restart", process.stdin.isTTY ? "press r + Enter, or `pylair restart` from another terminal" : "`pylair restart` from another terminal"],
       ["stop", stop],
     ],
     [
@@ -128,7 +249,7 @@ function devHeader(appDir: string, cfg: PylairConfig): void {
     ],
   );
   // A missing src-tauri/target means this is the first `tauri dev` on
-  // the machine: it compiles the whole Rust/Tauri tree, so say so now —
+  // the machine: it compiles the whole Rust/Tauri tree, so say so now -
   // a silent multi-minute build reads as a hang.
   if (!existsSync(join(appDir, "src-tauri", "target")))
     ui.info(
@@ -157,14 +278,18 @@ async function devWrap(
   // Absolute source: the plugin runs the server in it, not in a staged copy.
   writeRuntimeFile(runtime, cfg, srcDir);
 
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let changedFile: string | null = null;
-  watch(srcDir, { recursive: true }, (_ev, file) => {
-    if (!file?.endsWith(".py")) return;
-    changedFile = file;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => writeFileSync(trigger, `${Date.now()} ${changedFile}`), 150);
+  const vis = reloadVisibility(appDir);
+  const ownWrites = new Set<string>();
+  startDevWatch({
+    srcDir,
+    trigger,
+    set: cfg.watch,
+    onWrite: (c) => ownWrites.add(c),
+    onTrigger: (file) => vis.onTrigger(`${file} changed`),
   });
+  watchExternalTriggers(trigger, ownWrites, vis.onTrigger);
+  armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
+  writeDevPidFile(appDir);
 
   ensureDevResources(appDir, resourceKeys(appDir));
   devHeader(appDir, cfg);
@@ -176,6 +301,7 @@ async function devWrap(
       PYLAIR_WRAP_CONFIG: runtime,
       PYLAIR_PYTHON: venvPython(appDir),
       PYLAIR_RESTART_TRIGGER: trigger,
+      PYLAIR_RUNTIME_STATUS: runtimeStatusPath(appDir),
       PYLAIR_DEV: "1",
       ...inspectEnv,
     },
@@ -195,7 +321,7 @@ export async function dev(opts: {
 }): Promise<number> {
   const { appDir } = opts;
   // Inspector (docs/inspector.md): dev-only, compiled into debug builds
-  // only — the env flags reach the plugin through the dev child. The
+  // only - the env flags reach the plugin through the dev child. The
   // window opens once the app is up; payloads are a second opt-in.
   const inspectEnv: Record<string, string> = {};
   if (opts.inspect) {
@@ -249,22 +375,24 @@ export async function dev(opts: {
   runCodegen(appDir, cfg.appModule, stubs, cfg.source);
 
   // Watch python source; debounce bursts (saves, formatter runs). The
-  // trigger content carries the changed file after the timestamp — the
+  // trigger content carries the changed file after the timestamp - the
   // inspector's dev-reload timeline entry names it (docs/inspector.md).
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let changed: string | null = null;
-  watch(srcDir, { recursive: true }, (_ev, file) => {
-    if (!file?.endsWith(".py")) return;
-    changed = file;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      if (!changed) return;
-      const file = changed;
-      changed = null;
-      writeFileSync(trigger, `${Date.now()} ${file}`);
-      runCodegen(appDir, cfg.appModule, stubs, cfg.source);
-    }, 150);
+  const vis = reloadVisibility(appDir);
+  const ownWrites = new Set<string>();
+  startDevWatch({
+    srcDir,
+    trigger,
+    set: cfg.watch,
+    onWrite: (c) => ownWrites.add(c),
+    onTrigger: (file) => {
+      vis.onTrigger(`${file} changed`);
+      const ok = runCodegen(appDir, cfg.appModule, stubs, cfg.source);
+      if (!ok) ui.warn("codegen: failed, see inspector", { bare: true });
+    },
   });
+  watchExternalTriggers(trigger, ownWrites, vis.onTrigger);
+  armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
+  writeDevPidFile(appDir);
 
   const env = {
     ...process.env,
@@ -273,12 +401,13 @@ export async function dev(opts: {
     PYLAIR_PYTHONPATH: importRoot(appDir, cfg.source),
     PYLAIR_RESTART_TRIGGER: trigger,
     PYLAIR_CODEGEN_STATUS: codegenStatusPath(appDir),
+    PYLAIR_RUNTIME_STATUS: runtimeStatusPath(appDir),
     PYLAIR_DEV: "1",
     ...inspectEnv,
   };
   // tauri.conf.json maps resources/* paths that only exist after
   // `pylair build` stages them; `tauri dev` validates them eagerly and
-  // fails the build on any missing one. Create empty dirs for dev —
+  // fails the build on any missing one. Create empty dirs for dev -
   // `pylair build` replaces them with real staging anyway.
   try {
     const tconf = JSON.parse(
@@ -291,11 +420,11 @@ export async function dev(opts: {
       if (!existsSync(p)) mkdirSync(p, { recursive: true });
     }
   } catch {
-    // Conf unreadable — `tauri dev` will surface the real error itself.
+    // Conf unreadable - `tauri dev` will surface the real error itself.
   }
 
   devHeader(appDir, cfg);
-  // Run the app's installed tauri CLI via node — no npx/npx.cmd shell
+  // Run the app's installed tauri CLI via node - no npx/npx.cmd shell
   // shim (which also trips Node's DEP0190 shell+args warning on Windows).
   const child = spawn(process.execPath, [tauriCliEntry(appDir), "dev"], {
     cwd: appDir,

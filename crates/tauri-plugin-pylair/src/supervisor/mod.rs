@@ -88,5 +88,5 @@ pub use health::{
 #[cfg(target_os = "linux")]
 pub use platform_unix::pdeath_anchor_threads;
 pub use run::spawn;
-pub use run::strip_dev_tracebacks;
+pub use run::{strip_dev_runtime_status, strip_dev_tracebacks};
 pub use stream::{StreamItem, StreamRx};

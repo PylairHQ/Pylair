@@ -113,3 +113,27 @@ fn release_mode_spawn_drops_inherited_dev_tracebacks() {
         "the child must not inherit PYLAIR_DEV_TRACEBACKS"
     );
 }
+
+#[test]
+fn strip_dev_runtime_status_removes_spec_carried_value_and_inheritance() {
+    use tauri_plugin_pylair::{strip_dev_runtime_status, SpawnSpec};
+    let mut spec = SpawnSpec::pylair(std::path::Path::new("python").into(), "backend.app");
+    spec.env.push(("PYLAIR_RUNTIME_STATUS".into(), "x".into()));
+    strip_dev_runtime_status(&mut spec);
+    assert!(
+        !spec.env.iter().any(|(k, _)| k == "PYLAIR_RUNTIME_STATUS"),
+        "spec-carried value must be stripped"
+    );
+    assert!(
+        spec.env_remove.iter().any(|k| k == "PYLAIR_RUNTIME_STATUS"),
+        "inherited value must be env_remove'd"
+    );
+    strip_dev_runtime_status(&mut spec);
+    assert_eq!(
+        spec.env_remove
+            .iter()
+            .filter(|k| *k == "PYLAIR_RUNTIME_STATUS")
+            .count(),
+        1
+    );
+}

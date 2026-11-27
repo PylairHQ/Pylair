@@ -55,8 +55,8 @@ pub fn update_watchdog_entry<R: tauri::Runtime>(_ctx: &tauri::Context<R>) -> Opt
 }
 pub use spec::{app_spawn_spec, release_spawn_spec, SpawnSpecError};
 pub use supervisor::{
-    spawn as spawn_supervisor, strip_dev_tracebacks, Handle, HealthSnapshot, RuntimeEvent,
-    RuntimeKind, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn as spawn_supervisor, strip_dev_runtime_status, strip_dev_tracebacks, Handle,
+    HealthSnapshot, RuntimeEvent, RuntimeKind, SpawnSpec, State, StreamItem, SupervisorConfig,
 };
 pub use util::same_origin;
 
