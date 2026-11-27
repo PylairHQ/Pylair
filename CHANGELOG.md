@@ -8,6 +8,28 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### Multi-file model snapshots: fetch core (decision 0013, internal groundwork)
+
+- **`pylair._snapshots` — internal, no public API yet.** The fetch core
+  for directory-shaped models lands behind the package wall: tree
+  resolution against the Hugging Face API at a pinned commit sha
+  (Link-header pagination walked), the two-kind verifier (raw sha256
+  for LFS files, git blob sha1 over the framed payload for small
+  files), revision-addressed staging (`.partial/` with per-file
+  `.parts`, `.manifest.json`, `.verify.json`, `.ready` written last,
+  one completion rename), fan-out 4 across files with prompt
+  cancellation, exact-byte progress callbacks, disk preflight and
+  cross-process fetch locking. Explicit `{path, sha256, size}`
+  manifests serve non-HF sources under a synthetic revision key.
+  Per-file transfer reuses the 0009 download machinery, refactored
+  (not forked) so both callers share it. The public
+  `models.fetch_snapshot`/`path()` surface, the `current` pointer,
+  reader locks, GC and readiness wiring are the next PR.
+- **User-visible 0009 fix riding the refactor**: the single-file disk
+  preflight now needs `size` minus the bytes already banked in `.part`,
+  not the whole file again. A resumed download no longer demands room
+  for the full file when most of it is already on disk.
+
 ### `pylair dev` reload visibility, watch config and manual restart (DX item 10)
 
 - **Watch configuration**: `[tool.pylair.watch]` in pyproject.toml —
