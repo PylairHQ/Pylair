@@ -18,6 +18,7 @@ from typing import Any
 
 from pylair import _json, _readiness
 from pylair import _protocol as proto
+from pylair import proc as _proc_impl
 from pylair._devtb import format_dev_traceback as _devtb
 
 ISOLATED_GRACE_S = 3.0
@@ -336,7 +337,11 @@ class TaskRegistry:
             )
         else:
             coro = self._runner(task, kind, fn_name, fn, input, worker)
-        task.asyncio_task = asyncio.create_task(coro)
+        _token = _proc_impl._current_task_id.set(task_id)
+        try:
+            task.asyncio_task = asyncio.create_task(coro)
+        finally:
+            _proc_impl._current_task_id.reset(_token)
 
         # Control frames that beat the call here land now, not never.
         early_credit = self._pending_credit.pop(task_id, 0)
@@ -1613,12 +1618,7 @@ class TaskRegistry:
                     proto.notification("blob.register", {**r, "task_id": task.id})
                 )
 
-    def _finish(self, task: Task, terminal: dict) -> None:
-        if task.done:
-            return  # a cancelled task's late result is discarded
-        task.done = True
-        if task.kind == "isolated" and not task.warm:
-            self._isolated -= 1
+    def _send_terminal(self, task: Task, terminal: dict) -> None:
         try:
             self._send(terminal, task_id=task.id)  # serializes on the event loop
         except (TypeError, ValueError) as e:
@@ -1632,6 +1632,44 @@ class TaskRegistry:
                     {"type": "SerializationError"},
                 )
             )
+
+    async def _kill_children_then(
+        self, children: list, send: Callable[[], None]
+    ) -> None:
+        # return_exceptions: a kill that itself fails (pid reused,
+        # platform weirdness) must never cost the terminal.
+        await asyncio.gather(
+            *(_proc_impl.kill_tree(p.process) for p in children),
+            return_exceptions=True,
+        )
+        send()
+
+    def _finish(self, task: Task, terminal: dict) -> None:
+        if task.done:
+            return  # a cancelled task's late result is discarded
+        task.done = True
+        if task.kind == "isolated" and not task.warm:
+            self._isolated -= 1
+        # Decision 0014 sec. 4: sidecar children registered inside this
+        # task are tree-killed BEFORE TASK_CANCELLED is reported: a
+        # cancelled ffmpeg must not burn CPU for minutes after its caller
+        # is gone. Any other terminal (result or error) leaves them
+        # running: servers outlive the call that starts them, and the
+        # supervisor's containment reaps them on runtime exit either way.
+        children = _proc_impl._pop_children(task.id)
+        cancelled = (
+            isinstance(terminal.get("error"), dict)
+            and terminal["error"].get("code") == proto.TASK_CANCELLED
+        )
+        live = [p for p in children if p.process.returncode is None]
+        if cancelled and live:
+            asyncio.create_task(
+                self._kill_children_then(
+                    live, lambda: self._send_terminal(task, terminal)
+                )
+            )
+        else:
+            self._send_terminal(task, terminal)
         self._tasks.pop(task.id, None)
 
 

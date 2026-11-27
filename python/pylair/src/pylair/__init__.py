@@ -6,22 +6,25 @@ runner, cancellation handling and schema export. See docs/protocol-v1.md.
 
 from importlib.metadata import PackageNotFoundError, version
 
-from pylair import models, update
+from pylair import models, proc, update
 from pylair._bigint import BigInt
 from pylair._blob import Blob
 from pylair._expose import WorkerConfig, expose, isolated, warm
 from pylair._readiness import failed, loading, on_startup, ready
+from pylair.proc import binary
 
 __all__ = [
     "BigInt",
     "Blob",
     "WorkerConfig",
+    "binary",
     "expose",
     "failed",
     "isolated",
     "loading",
     "models",
     "on_startup",
+    "proc",
     "ready",
     "update",
     "warm",

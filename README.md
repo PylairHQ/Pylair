@@ -119,6 +119,11 @@ limitations: [docs/wrap.md](docs/wrap.md).
   URLs — no base64 in the frame, HTTP range streaming on the way out,
   per-window ownership enforced by the host
   ([docs/blobs.md](docs/blobs.md)).
+- **External binaries.** `pylair.binary`/`pylair.proc` ships declared,
+  hash-verified executables (ffmpeg, llama-server) next to the runtime
+  and runs them under the bridge's ownership rules: a cancelled task's
+  whole sidecar tree dies before the cancel is reported
+  ([docs/binaries.md](docs/binaries.md)).
 - **Bundled CPython, native installers.** End users install nothing
   Python-related; `pylair build` produces Windows, macOS and Linux
   installers on clean machines.
