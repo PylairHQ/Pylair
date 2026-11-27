@@ -82,6 +82,14 @@ code = await proc.wait()          # return code; proc.kill(), proc.pid
   (ffmpeg's progress, say). Both are async line iterators when piped;
   `.reader` on each is the raw stream, and `proc.process` is the asyncio
   `Process` for anything else.
+- A pipe is a finite OS buffer (about 64 KB), not a sink. `stdout=PIPE`
+  is right for batch tools whose output you consume, but if the child
+  outlives the call that started it and nobody keeps reading, the buffer
+  fills, the child blocks on write, and it hangs silently. For a
+  long-running server either pass `stdout=pylair.proc.DEVNULL` or keep a
+  reader task draining the iterator for as long as the server runs. The
+  runtime logs one warning when a task finishes while a child it spawned
+  still runs with a stdout PIPE nothing has ever read.
 - `stdin` defaults to **devnull**, not inherit: the runtime's own stdin
   is the host protocol channel, so an inheriting child would eat frames.
   Pass `pylair.proc.PIPE` to feed input through `proc.process.stdin`.
@@ -94,7 +102,13 @@ code = await proc.wait()          # return code; proc.kill(), proc.pid
    cancelled ffmpeg does not burn CPU for minutes after its caller is
    gone. POSIX uses a process-group SIGTERM, a short grace, then
    SIGKILL; Windows uses `taskkill /T /F` with the same fallback chain
-   as the worker kill path.
+   as the worker kill path. One Windows limit is known: `taskkill /T`
+   walks *live* parent links at the moment it runs, so a grandchild
+   whose own parent already exited is no longer linked into the tree
+   and survives the cancel. POSIX `killpg` does not have the gap - the
+   grandchild stays in the victim's process group however its parent
+   died. Closing the Windows gap needs a Job Object with
+   `KILL_ON_JOB_CLOSE`; it is tracked in [ideas.md](ideas.md).
 2. **Normal completion does not kill.** A child of a task that finishes
    (or even fails) keeps running: servers outlive the call that starts
    them. When the app exits, the supervisor's containment reaps the
@@ -121,8 +135,14 @@ ServerState = {"proc": None, "port": 8741}
 @expose
 async def start_llama() -> str:
     loading("llama-server", 0.1)
+    # stdout=DEVNULL: the server outlives this call, and an unread PIPE
+    # would fill up and block it on write. If you want the logs, keep a
+    # reader task draining proc.stdout for the server's lifetime instead.
     proc = await pylair.proc.spawn(
-        "llama-server", "--port", str(ServerState["port"])
+        "llama-server",
+        "--port",
+        str(ServerState["port"]),
+        stdout=pylair.proc.DEVNULL,
     )
     ServerState["proc"] = proc
     # probe the health endpoint until it answers, then:

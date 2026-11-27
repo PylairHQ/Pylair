@@ -22,3 +22,13 @@ from this file — promote to a milestone or a decision doc first.
   differs; model repos only in v1).
 - Loading snapshots into inference frameworks (torch/transformers/llama.cpp)
   behind a helper API — `pylair.models` ends at a verified directory path.
+- Windows sidecar tree-kill via Job Object: `taskkill /T` walks live parent
+  links only, so a grandchild whose own parent already exited survives a
+  cancel (documented in docs/binaries.md). Assigning sidecar children to a
+  Job Object with KILL_ON_JOB_CLOSE closes the gap; POSIX killpg does not
+  have it (decision 0014 section 4).
+- Harden the NSIS update-acceptance scenario c probe: it still waits on the
+  fixture's lossy boot-line count, the flake class scenario e already fixed
+  by switching to product evidence (boots/*.json / update.state). Scenario c
+  needs the same treatment for the restored-v2 boot (observed as a 300s
+  timeout flake in PR #212's CI).

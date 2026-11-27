@@ -1669,6 +1669,19 @@ class TaskRegistry:
                 )
             )
         else:
+            if not cancelled:
+                # A child outliving its task with a PIPE nothing drains
+                # hangs silently once the OS pipe buffer fills (about
+                # 64 KB). One warning per child, exactly here: children
+                # belong to one task and the registry entry is popped at
+                # finish, so this can never repeat for the same child.
+                for p in live:
+                    if p.stdout is not None and not p.stdout_read:
+                        _log(
+                            f"pylair.proc: {p.exe} (pid {p.pid}) outlives "
+                            "its task with stdout=PIPE and nothing reading "
+                            "it; pass stdout=DEVNULL or drain it"
+                        )
             self._send_terminal(task, terminal)
         self._tasks.pop(task.id, None)
 

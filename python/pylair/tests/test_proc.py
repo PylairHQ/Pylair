@@ -247,6 +247,109 @@ def test_cancel_kills_tree_including_grandchild(runtime, tmp_path):
     _wait_dead(gc_pid)
 
 
+def _cleanup_pid(pid: int) -> None:
+    """Kill a leaked-on-purpose sleeper so a test never leaks it."""
+    if sys.platform == "win32":
+        import subprocess as sp
+
+        sp.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def _wait_stderr(runtime, needle: str, timeout: float = 8.0) -> list[str]:
+    """Poll the runtime's drained stderr lines for a match."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hits = [line for line in runtime.stderr_lines if needle in line]
+        if hits:
+            return hits
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{needle!r} never appeared in runtime stderr: {runtime.stderr_lines!r}"
+    )
+
+
+def test_unread_pipe_warning_fires_once(tmp_path):
+    """A child outliving its task with a stdout PIPE nothing reads hangs
+    silently once the OS pipe buffer fills: the runtime warns exactly once
+    per offending child (0014 review item). Emission is synchronous in
+    _finish before the terminal frame, so receiving the response means
+    the warning was already written."""
+    with Runtime() as runtime:
+        runtime.recv()
+        runtime.send(
+            call(
+                1,
+                "proc_spawn_then_finish",
+                task=1,
+                input={
+                    "pidfile": str(tmp_path / "sleeper.pid"),
+                    "workdir": str(tmp_path),
+                },
+            )
+        )
+        resp = runtime.recv_until(lambda m: m.get("id") == 1)
+        pid = int(resp["result"])
+        try:
+            hits = _wait_stderr(runtime, "outlives its task with stdout=PIPE")
+            # The warning names the child so the user can find the spawn.
+            assert f"pid {pid}" in hits[0]
+            assert "pass stdout=DEVNULL or drain it" in hits[0]
+            # Once-ness: a duplicate, if the emission logic had one, is
+            # written synchronously next to the first line - both sit in
+            # the pipe before the terminal frame we already received.
+            # This short flush lets the drain thread finish the batch;
+            # it is not a synchronization point.
+            time.sleep(0.5)
+            total = sum(
+                1
+                for line in runtime.stderr_lines
+                if "outlives its task with stdout=PIPE" in line
+            )
+            assert total == 1, f"warning fired {total} times, want exactly 1"
+        finally:
+            _cleanup_pid(pid)
+
+
+def test_unread_pipe_warning_not_for_devnull(tmp_path):
+    """stdout=DEVNULL is the documented fix, so it must not warn. Absence
+    can only be bounded: the emission point is synchronous before the
+    terminal frame, and the stderr drain thread's lag is milliseconds on
+    a healthy machine, so a 3s window after the terminal is conclusive."""
+    with Runtime() as runtime:
+        runtime.recv()
+        runtime.send(
+            call(
+                1,
+                "proc_spawn_devnull_then_finish",
+                task=1,
+                input={
+                    "pidfile": str(tmp_path / "sleeper.pid"),
+                    "workdir": str(tmp_path),
+                },
+            )
+        )
+        resp = runtime.recv_until(lambda m: m.get("id") == 1)
+        pid = int(resp["result"])
+        try:
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                assert not any(
+                    "outlives its task" in line for line in runtime.stderr_lines
+                ), "DEVNULL child must not trigger the unread-PIPE warning"
+                time.sleep(0.05)
+        finally:
+            _cleanup_pid(pid)
+
+
 def test_normal_completion_leaves_child_running(tmp_path):
     """Servers outlive the call that starts them: a task that finishes
     normally must not kill its registered child."""

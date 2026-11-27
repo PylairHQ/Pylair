@@ -142,6 +142,13 @@ async def kill_tree(
     walks the parent-child chain - the documented equivalent of a Job
     Object terminate, already proven by the worker kill path - with a
     bounded wait and a proc.kill() fallback.
+
+    Known Windows limit: taskkill /T walks LIVE parent links at the
+    moment it runs, so a grandchild whose own parent already exited is
+    no longer linked into the tree and survives the kill. POSIX killpg
+    does not have the gap: the grandchild stays in the victim's process
+    group regardless of its parent's death. Closing the gap needs a Job
+    Object with KILL_ON_JOB_CLOSE - tracked in docs/ideas.md.
     """
     if proc.returncode is not None:
         return
@@ -208,13 +215,20 @@ class _Lines:
     """Async iterator over a stream's text lines (utf-8, errors=replace).
     `.reader` is the raw StreamReader for byte-level consumers."""
 
-    def __init__(self, reader: asyncio.StreamReader) -> None:
+    def __init__(self, reader: asyncio.StreamReader, on_first_read: Any = None) -> None:
         self.reader = reader
+        # Fires when the first read is INITIATED, not when a line lands:
+        # a drainer blocked on readline inside an otherwise silent server
+        # is draining, and must count as such for the unread-PIPE warning.
+        self._on_first_read = on_first_read
 
     def __aiter__(self) -> _Lines:
         return self
 
     async def __anext__(self) -> str:
+        if self._on_first_read is not None:
+            callback, self._on_first_read = self._on_first_read, None
+            callback()
         line = await self.reader.readline()
         if not line:
             raise StopAsyncIteration
@@ -231,11 +245,19 @@ class Proc:
     pid and the raw asyncio Process are exposed.
     """
 
-    def __init__(self, process: asyncio.subprocess.Process) -> None:
+    def __init__(self, process: asyncio.subprocess.Process, exe: str = "") -> None:
         self.process = process
         self.pid: int = process.pid
+        self.exe = exe
+        # Set when anyone starts reading the stdout pipe through the
+        # iterator. The task-finish path warns about a child outliving
+        # its task with a PIPE nobody drains: once the OS pipe buffer
+        # fills, the child blocks on write and hangs silently.
+        self.stdout_read = False
         self.stdout: _Lines | None = (
-            _Lines(process.stdout) if process.stdout is not None else None
+            _Lines(process.stdout, on_first_read=self._mark_stdout_read)
+            if process.stdout is not None
+            else None
         )
         self.stderr: _Lines | None = (
             _Lines(process.stderr) if process.stderr is not None else None
@@ -247,6 +269,9 @@ class Proc:
             # pointlessly signalled at cancel time. shielded from task
             # cancellation: the watcher must outlive the owning task.
             asyncio.get_running_loop().create_task(self._watch_exit())
+
+    def _mark_stdout_read(self) -> None:
+        self.stdout_read = True
 
     async def _watch_exit(self) -> None:
         try:
@@ -300,6 +325,15 @@ async def spawn(
     explicit path. stderr=None inherits, so sidecar stderr lands in the
     dev inspector timeline; PIPE captures for machine consumption.
 
+    stdout=PIPE is the default because most sidecars are batch jobs whose
+    output the caller consumes - but a pipe is a finite OS buffer (about
+    64 KB), not a sink: once it fills, the child blocks on write and
+    hangs silently. For a long-running server that outlives the call
+    which starts it, either pass stdout=DEVNULL or keep a reader task
+    draining the iterator for as long as the server runs. The runtime
+    logs one warning when a task completes normally while a child it
+    spawned still runs with a stdout PIPE nothing has ever read.
+
     POSIX: the child is a session leader so the cancel path can killpg
     exactly its tree - except inside a worker, where it must stay in the
     worker's own group: the runtime cancels worker tasks by killing the
@@ -323,4 +357,4 @@ async def spawn(
     if sys.platform != "win32" and not os.environ.get(_ENV_WORKER):
         kwargs["start_new_session"] = True
     process = await asyncio.create_subprocess_exec(path, *args, **kwargs)
-    return Proc(process)
+    return Proc(process, exe=path)

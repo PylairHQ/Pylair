@@ -820,6 +820,19 @@ async def proc_spawn_then_finish(pidfile: str, workdir: str) -> str:
 
 
 @expose
+async def proc_spawn_devnull_then_finish(pidfile: str, workdir: str) -> str:
+    # Same shape as proc_spawn_then_finish but with stdout=DEVNULL: the
+    # unread-PIPE warning must not fire for a child with no pipe to drain.
+    proc = await pylair.proc.spawn(
+        sys.executable,
+        _write_sleeper(workdir),
+        pidfile,
+        stdout=pylair.proc.DEVNULL,
+    )
+    return str(proc.pid)
+
+
+@expose
 async def proc_cat_lines() -> list[str]:
     # Line iteration: the child prints three lines; the iterator must
     # yield them as text in order.
