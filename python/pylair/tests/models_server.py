@@ -10,9 +10,13 @@ force restart paths, `status_queue` replays 5xx/429 before serving.
 
 from __future__ import annotations
 
+import hashlib
 import http.server
+import json
 import socket
 import threading
+import time
+import urllib.parse
 from dataclasses import dataclass, field
 
 
@@ -27,7 +31,53 @@ class File:
     if_range_stale: bool = False  # treat any If-Range as stale -> 200
     status_queue: list[int] = field(default_factory=list)  # codes first
     gate: threading.Event | None = None  # hold the response until set
-    throttle: int = 0  # bytes per write burst (slow the stream)
+    throttle: int = 0  # bytes per write burst (fragment the stream)
+    burst_delay: float = 0.0  # seconds between bursts (actually slow)
+
+
+@dataclass
+class Repo:
+    """A Hugging Face repo emulation for snapshot tests: the tree API
+    (optionally paginated through the Link header) plus resolve files.
+    `lfs` names the paths served as LFS kind — everything else is a
+    small git-blob file. `dirs` adds directory entries to the tree,
+    which clients must skip."""
+
+    revision: str
+    files: dict[str, bytes]
+    lfs: set[str] = field(default_factory=set)
+    page_size: int | None = None
+    dirs: bool = True
+
+    def entries(self) -> list[dict]:
+        out = []
+        for path in sorted(self.files):
+            body = self.files[path]
+            ent = {
+                "type": "file",
+                "oid": hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest(),
+                "size": len(body),
+                "path": path,
+            }
+            if path in self.lfs:
+                ent["lfs"] = {
+                    "oid": hashlib.sha256(body).hexdigest(),
+                    "size": len(body),
+                    "pointerSize": 131,
+                }
+            out.append(ent)
+        if self.dirs:
+            seen = set()
+            for path in sorted(self.files):
+                parts = path.split("/")[:-1]
+                for i in range(1, len(parts) + 1):
+                    d = "/".join(parts[:i])
+                    if d not in seen:
+                        seen.add(d)
+                        out.append(
+                            {"type": "directory", "oid": "0" * 40, "size": 0, "path": d}
+                        )
+        return sorted(out, key=lambda e: e["path"])
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -36,9 +86,46 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
+    def _tree(self, srv, split):
+        """Match /api/models/<repo>/tree/<revision> — repo may itself
+        contain a slash (org/model). Returns (entries, page_size,
+        base_qs) or None when the path is not a tree request. Unknown
+        repo/revision pairs answer 404 like the real API."""
+        parts = split.path.split("/")
+        # ['', 'api', 'models', org..., name, 'tree', rev]
+        if len(parts) < 6 or parts[1] != "api" or parts[2] != "models":
+            return None
+        if "tree" not in parts:
+            return None
+        i = parts.index("tree")
+        repo = "/".join(parts[3:i])
+        revision = parts[i + 1] if i + 1 < len(parts) else ""
+        key = (repo, revision)
+        if key not in srv.repos:
+            return None  # falls through to the generic 404
+        r = srv.repos[key]
+        return r.entries(), r.page_size, "recursive=true"
+
     def do_GET(self):
         srv: ModelServer = self.server  # type: ignore[assignment]
         srv.requests.append({"path": self.path, "headers": dict(self.headers)})
+        split = urllib.parse.urlsplit(self.path)
+        tree = self._tree(srv, split)
+        if tree is not None:
+            entries, page_size, base_qs = tree
+            qs = urllib.parse.parse_qs(split.query)
+            cursor = int(qs.get("cursor", ["0"])[0])
+            page = entries[cursor : cursor + page_size] if page_size else entries
+            payload = json.dumps(page).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            if page_size and cursor + page_size < len(entries):
+                nxt = f"{srv.base}{split.path}?{base_qs}&cursor={cursor + page_size}"
+                self.send_header("Link", f'<{nxt}>; rel="next"')
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path in srv.redirects:
             self.send_response(302)
             self.send_header("Location", srv.redirects[self.path])
@@ -111,6 +198,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # wfile is unbuffered (wbufsize=0): one write is one send()
             # which may return short — sendall can't truncate a burst.
             self.connection.sendall(body[i : i + step])
+            if f.burst_delay:
+                time.sleep(f.burst_delay)
 
 
 class ModelServer(http.server.ThreadingHTTPServer):
@@ -120,6 +209,7 @@ class ModelServer(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.files: dict[str, File] = {}
         self.redirects: dict[str, str] = {}
+        self.repos: dict[tuple[str, str], Repo] = {}
         self.requests: list[dict] = []
         self.lock = threading.Lock()
         self._t = threading.Thread(target=self.serve_forever, daemon=True)
@@ -143,6 +233,14 @@ class ModelServer(http.server.ThreadingHTTPServer):
     def add(self, path: str, f: File) -> str:
         self.files[path] = f
         return self.base + path
+
+    def add_repo(self, repo: str, r: Repo) -> None:
+        """Register the tree plus one File per repo path at the resolve
+        URL shape /<repo>/resolve/<revision>/<path>, so the Range /
+        fault machinery applies to snapshot downloads unchanged."""
+        self.repos[(repo, r.revision)] = r
+        for path, body in r.files.items():
+            self.files[f"/{repo}/resolve/{r.revision}/{path}"] = File(body)
 
     def hits(self, path: str) -> int:
         return sum(1 for r in self.requests if r["path"] == path)

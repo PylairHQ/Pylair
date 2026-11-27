@@ -314,9 +314,9 @@ class _SensitiveRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
-def _opener(spec: _Spec) -> urllib.request.OpenerDirector:
+def _opener(sensitive: frozenset) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
-        _SensitiveRedirect(spec.sensitive),
+        _SensitiveRedirect(sensitive),
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     )
 
@@ -411,15 +411,26 @@ def _report_progress(name: str, done: int, total: int | None) -> None:
         _readiness.loading(name, None, f"{_fmt_bytes(done)} downloaded")
 
 
-def _transfer(spec: _Spec, part: Path, meta: Path, abort: threading.Event) -> str:
+def _transfer(
+    spec: _Spec,
+    part: Path,
+    meta: Path,
+    abort: threading.Event,
+    report,
+    new_hasher,
+) -> str:
     """One transfer attempt: resume from .part if present (re-hash the
     prefix into the digest, Range + If-Range), stream 64 KiB chunks to
-    disk hashing as they land, and return the whole-file sha256."""
-    name = spec.name
+    disk hashing as they land, and return the whole-file hex digest.
+
+    ``report(done, total)`` receives byte progress; ``new_hasher()``
+    builds the digest object (sha256 for 0009 files, a pre-framed
+    blob-sha1 for 0013 small files — framing is a constant prefix, so
+    the resume re-hash stays correct either way)."""
     resume_from = 0
     if part.exists() and (sz := part.stat().st_size) > 0:
         resume_from = sz
-    h = hashlib.sha256()
+    h = new_hasher()
     headers = dict(spec.headers or {})
     if resume_from:
         # hashlib state cannot persist — re-hash the existing prefix
@@ -434,7 +445,7 @@ def _transfer(spec: _Spec, part: Path, meta: Path, abort: threading.Event) -> st
             headers["If-Range"] = validator
     req = urllib.request.Request(spec.url, headers=headers)
     try:
-        resp = _opener(spec).open(req, timeout=_IDLE_TIMEOUT_S)
+        resp = _opener(spec.sensitive).open(req, timeout=_IDLE_TIMEOUT_S)
     except urllib.error.HTTPError as e:
         if e.code == 416 and resume_from:
             _wipe(part, meta)
@@ -452,7 +463,7 @@ def _transfer(spec: _Spec, part: Path, meta: Path, abort: threading.Event) -> st
         elif status == 200:
             # Whole body — a fresh download, or the server ignored/
             # rejected Range and restarts us from byte 0.
-            mode, digest, done = "wb", hashlib.sha256(), 0
+            mode, digest, done = "wb", new_hasher(), 0
         else:
             raise ModelError(f"unexpected status {status}")
         _write_meta(meta, resp.headers)
@@ -477,8 +488,8 @@ def _transfer(spec: _Spec, part: Path, meta: Path, abort: threading.Event) -> st
                 now = time.monotonic()
                 if now - last >= _POLL_S:
                     last = now
-                    _report_progress(name, done, total)
-        _report_progress(name, done, total)
+                    report(done, total)
+        report(done, total)
         if cl is not None:
             expected = resume_from + int(cl) if status == 206 else int(cl)
             if done < expected:
@@ -514,33 +525,47 @@ def _err_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _fail(name: str, detail: str) -> ModelError:
-    _readiness.failed(name, detail)
-    return ModelError(detail)
+def _download_verified(
+    spec: _Spec,
+    part: Path,
+    meta: Path,
+    abort: threading.Event,
+    *,
+    report,
+    note=None,
+    new_hasher=hashlib.sha256,
+    algo: str = "sha256",
+) -> str:
+    """The download+verify core shared by single-file models (0009) and
+    snapshot files (0013): disk preflight, resume, retries with
+    backoff, one hash-mismatch restart. Raises ModelError /
+    ModelCancelled with NO readiness side effects — reporting is the
+    caller's, so snapshot files never pollute the readiness surface.
+    On success the verified bytes are in ``part`` (returned digest in
+    hand); atomic placement is the caller's job.
 
-
-def _download_and_verify(spec: _Spec, model_dir: Path, abort: threading.Event) -> Path:
-    name = spec.name
-    part = model_dir / f"{name}.part"
-    meta = model_dir / f"{name}.part.json"
+    ``report(done, total)`` is byte progress, ``note(msg)`` textual
+    states like retry backoff, ``new_hasher()`` the digest factory and
+    ``algo`` its name for the mismatch detail."""
     if spec.size is not None:
+        present = part.stat().st_size if part.exists() else 0
+        need = max(spec.size - present, 0)
         try:
-            free = shutil.disk_usage(model_dir).free
+            free = shutil.disk_usage(part.parent).free
         except OSError as e:
-            raise _fail(name, f"could not check disk space: {e}")
-        if free < spec.size:
-            raise _fail(
-                name,
-                f"not enough disk space: need {_fmt_bytes(spec.size)}, "
-                f"have {_fmt_bytes(free)}",
+            raise ModelError(f"could not check disk space: {e}")
+        if free < need:
+            raise ModelError(
+                f"not enough disk space: need {_fmt_bytes(need)}, "
+                f"have {_fmt_bytes(free)}"
             )
     restarts = 0
     attempt = 0
     while True:
         try:
-            digest = _transfer(spec, part, meta, abort)
+            digest = _transfer(spec, part, meta, abort, report, new_hasher)
         except _Cancelled:
-            raise ModelCancelled(f"download of {name!r} cancelled")
+            raise ModelCancelled(f"download of {spec.name!r} cancelled")
         except _Fresh:
             continue
         except ModelError:
@@ -548,29 +573,50 @@ def _download_and_verify(spec: _Spec, model_dir: Path, abort: threading.Event) -
         except Exception as e:
             if _retryable(e) and attempt < len(_BACKOFF_S):
                 delay = _BACKOFF_S[attempt] * (0.75 + random.random() * 0.5)
-                _readiness.loading(name, None, f"retry {attempt + 1} in {delay:.0f}s")
+                if note is not None:
+                    note(f"retry {attempt + 1} in {delay:.0f}s")
                 attempt += 1
                 if abort.wait(delay) or _abort.wait(0):
-                    raise ModelCancelled(f"download of {name!r} cancelled")
+                    raise ModelCancelled(f"download of {spec.name!r} cancelled")
                 continue
-            raise _fail(
-                name, f"network error after {attempt + 1} attempt(s): {_err_text(e)}"
+            raise ModelError(
+                f"network error after {attempt + 1} attempt(s): {_err_text(e)}"
             ) from e
         if digest == spec.sha256:
-            final = model_dir / name
-            os.replace(part, final)
-            _write_sidecar(model_dir, spec, final, _read_meta(meta))
-            meta.unlink(missing_ok=True)
-            return final
+            return digest
         # Hash mismatch: never trust .part silently — one clean restart,
         # then a precise failure carrying both digests.
         restarts += 1
         _wipe(part, meta)
         if restarts > 1:
-            raise _fail(
-                name,
-                f"sha256 mismatch: expected {spec.sha256}, got {digest}",
+            raise ModelError(
+                f"{algo} mismatch: expected {spec.sha256}, got {digest}",
             )
+
+
+def _download_and_verify(spec: _Spec, model_dir: Path, abort: threading.Event) -> Path:
+    name = spec.name
+    part = model_dir / f"{name}.part"
+    meta = model_dir / f"{name}.part.json"
+    try:
+        _download_verified(
+            spec,
+            part,
+            meta,
+            abort,
+            report=lambda done, total: _report_progress(name, done, total),
+            note=lambda msg: _readiness.loading(name, None, msg),
+        )
+    except ModelCancelled:
+        raise
+    except ModelError as e:
+        _readiness.failed(name, str(e))
+        raise
+    final = model_dir / name
+    os.replace(part, final)
+    _write_sidecar(model_dir, spec, final, _read_meta(meta))
+    meta.unlink(missing_ok=True)
+    return final
 
 
 # ---- fetch / path / dir ----------------------------------------------------
