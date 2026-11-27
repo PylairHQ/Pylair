@@ -73,8 +73,76 @@ pub fn release_spawn_spec(resources: &Path, app_module: &str, source_dir: &str) 
         ]
         .map(String::from),
     );
+    // `PYLAIR_BINARIES` handoff (decision 0014 §2): the build-generated
+    // manifest in the resources payload is the source of truth. Absent
+    // means the app declares no binaries and no variable is set.
+    set_binaries_release_env(&mut spec, resources);
     scrub_appdir(&mut spec, |k| std::env::var(k).ok());
     spec
+}
+
+/// Release-mode `PYLAIR_BINARIES` resolution (decision 0014 §2). Reads
+/// `<resources>/binaries/binaries.json` when present and pushes the
+/// compact-JSON map of the entries whose files exist. Best-effort like
+/// the data-dir handoff: a malformed manifest is a build bug the runtime
+/// cannot repair, so it is logged once and the variable is left unset
+/// rather than resolving a partial truth silently. Tested through the
+/// parameterized pieces in `binaries` (temp resources trees); this wrapper
+/// only supplies `current_exe().parent()` as the exe-rooted base.
+fn set_binaries_release_env(spec: &mut SpawnSpec, resources: &Path) {
+    use crate::binaries as bin;
+    let payload_dir = resources.join("binaries");
+    let entries = match bin::load_manifest(&payload_dir) {
+        Ok(Some(e)) => e,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("pylair: {e}; PYLAIR_BINARIES left unset");
+            return;
+        }
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let map = bin::resolve_release_entries(&entries, exe_dir.as_deref(), &payload_dir, |name| {
+        eprintln!("pylair: binary {name:?} declared in binaries.json but not found; omitted from PYLAIR_BINARIES");
+    });
+    if !map.is_empty() {
+        spec.env
+            .push((bin::BINARIES_ENV.into(), bin::map_to_json(&map)));
+    }
+}
+
+/// Debug-mode `PYLAIR_BINARIES` resolution (decision 0014 §3), env taken
+/// as a closure so tests drive it without touching process state. An
+/// inherited `PYLAIR_BINARIES` wins unchanged (test harnesses inject
+/// fixture binaries); otherwise `PYLAIR_BINARIES_DIR` names a directory
+/// holding `binaries.json`, with both shapes resolved against that dir.
+/// Never fires in release: callers sit under cfg!(debug_assertions) and
+/// the spawn strips both variables there.
+pub fn set_binaries_debug_env(spec: &mut SpawnSpec, env: impl Fn(&str) -> Option<String>) {
+    use crate::binaries as bin;
+    if env(bin::BINARIES_ENV).is_some() {
+        return;
+    }
+    let Some(dir) = env(bin::BINARIES_DIR_ENV) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let entries = match bin::load_manifest(&dir) {
+        Ok(Some(e)) => e,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("pylair: {e}; PYLAIR_BINARIES left unset");
+            return;
+        }
+    };
+    let map = bin::resolve_dev_entries(&entries, &dir, |name| {
+        eprintln!("pylair: binary {name:?} declared in binaries.json but not found; omitted from PYLAIR_BINARIES");
+    });
+    if !map.is_empty() {
+        spec.env
+            .push((bin::BINARIES_ENV.into(), bin::map_to_json(&map)));
+    }
 }
 
 /// An AppImage's AppRun exports `APPDIR` and prepends its own dirs to
@@ -206,6 +274,7 @@ pub fn app_spawn_spec<R: Runtime>(
             set_app_data_dir_env(&mut spec, app.path().app_data_dir(), |k| {
                 std::env::var(k).ok()
             });
+            set_binaries_debug_env(&mut spec, |k| std::env::var(k).ok());
             return Ok(spec);
         }
     }

@@ -11,6 +11,8 @@ pub mod supervisor;
 pub mod transport;
 
 #[doc(hidden)]
+pub mod binaries;
+#[doc(hidden)]
 pub mod blobs;
 mod builder;
 mod commands;
@@ -53,10 +55,13 @@ pub fn update_watchdog_entry<R: tauri::Runtime>(ctx: &tauri::Context<R>) -> Opti
 pub fn update_watchdog_entry<R: tauri::Runtime>(_ctx: &tauri::Context<R>) -> Option<i32> {
     None
 }
+#[doc(hidden)]
+pub use spec::set_binaries_debug_env;
 pub use spec::{app_spawn_spec, release_spawn_spec, SpawnSpecError};
 pub use supervisor::{
-    spawn as spawn_supervisor, strip_dev_runtime_status, strip_dev_tracebacks, Handle,
-    HealthSnapshot, RuntimeEvent, RuntimeKind, SpawnSpec, State, StreamItem, SupervisorConfig,
+    spawn as spawn_supervisor, strip_dev_runtime_status, strip_dev_tracebacks,
+    strip_inherited_binaries, Handle, HealthSnapshot, RuntimeEvent, RuntimeKind, SpawnSpec, State,
+    StreamItem, SupervisorConfig,
 };
 pub use util::same_origin;
 

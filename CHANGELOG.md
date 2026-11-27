@@ -8,6 +8,25 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### External binaries: host-side resolution groundwork (decision 0014, crate only)
+
+- **`PYLAIR_BINARIES` resolution in the spawn spec** - internal
+  groundwork, nothing user-visible until the CLI and pylair PRs land.
+  The crate now reads the pinned `binaries.json` manifest schema
+  (`{"version": 1, "binaries": {"<name>": {"shape", "root", "path"}}}`)
+  and hands the runtime a compact-JSON name-to-absolute-path map: in
+  release from `<resource_dir>/binaries/binaries.json`, resolving
+  exe_dir entries against the main executable's directory and payload
+  entries against the resources tree; in debug builds an inherited
+  `PYLAIR_BINARIES` wins unchanged, then `PYLAIR_BINARIES_DIR` resolves
+  both shapes against that dir. Release builds strip both inherited
+  variables at the same spawn site as the dev-traceback stripping - a
+  packaged app cannot be redirected onto different executables - and an
+  inherited map is logged once, never merged. Missing files are omitted
+  and logged once by name; unknown versions, absolute paths and `..`
+  segments are named errors. Warm and isolated workers inherit the
+  runtime environment unchanged, so no worker-side code was needed.
+
 ## npm-v0.1.0-rc.34 (2026-11-27)
 
 ### `pylair models resolve` — snapshot pin authoring helper
