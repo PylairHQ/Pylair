@@ -10,7 +10,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
+import type { get as httpsGet } from "node:https";
 import { join } from "node:path";
+import type { BinaryDecl } from "../config.js";
+import { downloadWithRetry } from "./download.js";
 import { ui } from "../ui/index.js";
 
 /** Shipped bundles must carry the licenses of what they embed. Collects:
@@ -113,4 +117,100 @@ export function stageNotices(resources: string, pylairDir: string): string {
   writeFileSync(join(out, "INDEX.txt"), index.join("\n") + "\n");
   ui.status(`third-party notices: pylair, python interpreter, ${wheels} wheel(s)`);
   return out;
+}
+
+/** GPL-family identifiers trigger the loud build warning (0014 sec. 7):
+ * the build never blocks, but the obligation class must be impossible to
+ * not think about. */
+export function isGplFamily(spdx: string): boolean {
+  return /^(GPL-2\.0|GPL-3\.0|AGPL-)/i.test(spdx.trim());
+}
+
+export const GPL_WARNING =
+  "distributing a GPL binary imposes source-offer obligations on you; " +
+  "LGPL requires the notice text you are shipping";
+
+/** Binaries are the fourth notices source (0014 sec. 7): every declared
+ * binary carries its license text into THIRD-PARTY-NOTICES/binaries/<name>/
+ * - license_file copied verbatim, or license_url downloaded once into the
+ * cache beside the binary downloads. Runs after stageNotices (which owns
+ * the tree), appends its lines to INDEX.txt, and writes the
+ * machine-readable index.json SBOM seed. */
+export async function stageBinaryNotices(
+  resources: string,
+  appDir: string,
+  binaries: Record<string, BinaryDecl>,
+  triple: string,
+  cacheDir: string,
+  opts?: { get?: typeof httpsGet },
+): Promise<void> {
+  const names = Object.keys(binaries);
+  if (!names.length) return;
+  const out = join(resources, "THIRD-PARTY-NOTICES");
+  const indexLines: string[] = [];
+  const sbom: Record<string, unknown>[] = [];
+  for (const name of names) {
+    const decl = binaries[name]!;
+    const dest = join(out, "binaries", name);
+    mkdirSync(dest, { recursive: true });
+    if (decl.licenseFile) {
+      const src = join(appDir, decl.licenseFile);
+      if (!existsSync(src))
+        throw new Error(
+          `binaries.${name}: license_file ${decl.licenseFile} does not exist (${src}) - ` +
+            `the notice text is required in the bundle (0014 sec. 7)`,
+        );
+      cpSync(src, join(dest, basenameOf(decl.licenseFile)));
+    } else if (decl.licenseUrl) {
+      const cacheKey =
+        "license-" + createHash("sha256").update(decl.licenseUrl).digest("hex").slice(0, 16);
+      const cachePath = join(cacheDir, "binaries", cacheKey);
+      if (!existsSync(cachePath)) {
+        mkdirSync(join(cacheDir, "binaries"), { recursive: true });
+        const tmp = `${cachePath}.download`;
+        await downloadWithRetry(decl.licenseUrl, tmp, { get: opts?.get });
+        writeFileSync(cachePath, readFileSync(tmp));
+        rmSync(tmp, { force: true });
+      }
+      cpSync(cachePath, join(dest, "LICENSE.txt"));
+    } else {
+      throw new Error(
+        `binaries.${name}: license_file or license_url is required - the bundle must carry ` +
+          `the license text, not just the SPDX id (0014 sec. 7)`,
+      );
+    }
+    if (isGplFamily(decl.license))
+      ui.warn(
+        `warning: binaries.${name} is ${decl.license} - ${GPL_WARNING}`,
+        { bare: true },
+      );
+    const target = decl.targets[triple];
+    let host = "";
+    if (target?.url) {
+      try {
+        host = new URL(target.url).host;
+      } catch {
+        host = "";
+      }
+    }
+    indexLines.push(
+      `binaries/${name}/ - ${name}${decl.version ? " " + decl.version : ""} (${decl.license})${host ? ", " + host : ""}`,
+    );
+    sbom.push({
+      name,
+      ...(decl.version ? { version: decl.version } : {}),
+      spdx: decl.license,
+      ...(target?.url ? { source_url: target.url } : {}),
+      ...(target ? { sha256: target.sha256 } : {}),
+    });
+  }
+  const indexPath = join(out, "INDEX.txt");
+  const prior = existsSync(indexPath) ? readFileSync(indexPath, "utf-8") : "";
+  writeFileSync(indexPath, prior + indexLines.join("\n") + "\n");
+  writeFileSync(join(out, "index.json"), JSON.stringify({ binaries: sbom }, null, 2) + "\n");
+  ui.status(`binary notices: ${names.length} binar${names.length === 1 ? "y" : "ies"} recorded`);
+}
+
+function basenameOf(p: string): string {
+  return p.replace(/\\/g, "/").split("/").pop() ?? p;
 }

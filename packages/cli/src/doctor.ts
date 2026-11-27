@@ -1,5 +1,6 @@
 /** `pylair doctor`: diagnose the dev/build environment. */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { platform, arch } from "node:os";
@@ -156,6 +157,66 @@ export function wrapChecks(
   }
 }
 
+/** External-binary checks (0014 sec. 1): validate each declared binary for
+ * the host triple and report where it stands - staged in src-tauri/binaries,
+ * cached in .pylair, or missing. A missing url download is a note, not a
+ * failure (build/dev fetches it); a missing or hash-mismatched path source
+ * is a failure. Plain-http urls warn, never fail. Exported for tests. */
+export function binaryChecks(appDir: string, cfg: PylairConfig, add: AddCheck): void {
+  const names = Object.keys(cfg.binaries);
+  if (!names.length) return;
+  let triple = "";
+  try {
+    triple = hostTriple();
+  } catch {
+    /* the host-triple check already reports unsupported */
+  }
+  const windows = triple.includes("windows");
+  for (const name of names) {
+    const decl = cfg.binaries[name]!;
+    const target = triple ? decl.targets[triple] : undefined;
+    if (!triple || !target) {
+      add(
+        `binary ${name}`,
+        false,
+        `no source for ${triple || "this host"} - add [tool.pylair.binaries.${name}.${triple || "<triple>"}]`,
+        { file: "pyproject.toml", fix: `add the ${triple || "host"} target table, or drop the binary` },
+      );
+      continue;
+    }
+    const suffix = windows ? ".exe" : "";
+    const stagedPath = join(appDir, "src-tauri", "binaries", `${name}-${triple}${suffix}`);
+    const staged = existsSync(stagedPath);
+    const parts: string[] = [];
+    let ok = true;
+    if (target.url && target.url.startsWith("http://")) {
+      parts.push("warning: plain-http url - prefer https");
+    }
+    if (target.path) {
+      const p = join(appDir, target.path);
+      if (!existsSync(p)) {
+        ok = false;
+        parts.push(`path ${target.path} does not exist`);
+      } else {
+        const got = createHash("sha256").update(readFileSync(p)).digest("hex");
+        if (got !== target.sha256) {
+          ok = false;
+          parts.push(`path hash mismatch (declared ${target.sha256.slice(0, 12)}..., got ${got.slice(0, 12)}...)`);
+        } else parts.push("path verified");
+      }
+    } else {
+      const cached = existsSync(join(appDir, ".pylair", "cache", "binaries", target.sha256));
+      parts.push(cached ? "download cached" : "not downloaded yet (build/dev fetches it)");
+    }
+    add(
+      `binary ${name}`,
+      ok,
+      `${staged ? "staged" : "not staged yet"}; ${parts.join("; ")}`,
+      ok ? undefined : { file: "pyproject.toml", fix: `fix the source of [tool.pylair.binaries.${name}.${triple}]` },
+    );
+  }
+}
+
 /** A path as the user would type it: relative to the app when inside it. */
 function shown(appDir: string, p: string): string {
   return p
@@ -270,6 +331,7 @@ export async function doctor(appDir: string): Promise<number> {
           fix: "create the file, or set [tool.pylair] requirements (uv.lock is used when present)",
         });
       }
+      binaryChecks(appDir, cfg, add);
     } catch (e) {
       add("[tool.pylair] config", false, (e as Error).message, {
         file: "pyproject.toml",

@@ -8,6 +8,37 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### External binaries: declaration and single-file staging (decision 0014)
+
+- **`[tool.pylair.binaries]` in pyproject.toml** declares native
+  executables the app ships next to Python - per-target-triple `path`
+  or `url` + mandatory `sha256`, optional `member` for single-file
+  extraction out of zip/tar.gz archives, and a mandatory SPDX `license`
+  with `license_file`/`license_url`. `pylair build` verifies the hash
+  before anything is staged (the hash is the reviewable record of what
+  ships, even for vendored paths), extracts members under the
+  extraction-safety rules (no absolute paths, no `..`, no link members),
+  stages into `src-tauri/binaries/` as externalBin expects, merges
+  `bundle.externalBin` and the resources mapping into tauri.conf.json
+  idempotently, and writes the `binaries/binaries.json` resolution
+  manifest the crate reads (0014 sec. 2). Downloads are cached by
+  sha256, so rebuilds never refetch. A missing target for the built
+  triple fails naming the exact pyproject key to add; declaring a
+  directory unit (the `executable` key) fails with "directory units land
+  in a later release".
+- **`pylair dev`** resolves the same entries into `.pylair/binaries/`
+  (declared path, else the hash-verified cached download), writes the
+  same manifest schema and hands the dir to the plugin as
+  `PYLAIR_BINARIES_DIR` - one resolution mechanism in both modes, no
+  PATH fallback anywhere.
+- **Licensing (0014 sec. 7)**: each binary's license text rides in
+  `THIRD-PARTY-NOTICES/binaries/<name>/`, GPL-family identifiers print a
+  loud build warning naming the obligation class, and
+  `THIRD-PARTY-NOTICES/index.json` is the machine-readable SBOM seed
+  (name, version, SPDX id, source url, sha256).
+- **`pylair doctor`** validates the table and reports each declared
+  binary for the host triple: staged, cached or missing.
+
 ### External binaries: host-side resolution groundwork (decision 0014, crate only)
 
 - **`PYLAIR_BINARIES` resolution in the spawn spec** - internal

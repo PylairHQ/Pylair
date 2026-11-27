@@ -16,6 +16,7 @@ import {
   writeManualTrigger,
 } from "./devwatch.js";
 import { importRoot, loadConfig, tauriCliEntry, type PylairConfig } from "./config.js";
+import { prepareDevBinaries } from "./build/binaries.js";
 import { emit } from "./codegen.js";
 import { loadManifest } from "./manifest.js";
 import { formatMissing, missingTools, preflightChecks } from "./preflight.js";
@@ -291,6 +292,10 @@ async function devWrap(
   armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
   writeDevPidFile(appDir);
 
+  const wrapBinariesDir = await prepareDevBinaries(appDir, cfg.binaries);
+  const wrapBinariesEnv: Record<string, string> = {};
+  if (wrapBinariesDir) wrapBinariesEnv.PYLAIR_BINARIES_DIR = wrapBinariesDir;
+
   ensureDevResources(appDir, resourceKeys(appDir));
   devHeader(appDir, cfg);
   const child = spawn(process.execPath, [tauriCliEntry(appDir), "dev"], {
@@ -303,6 +308,7 @@ async function devWrap(
       PYLAIR_RESTART_TRIGGER: trigger,
       PYLAIR_RUNTIME_STATUS: runtimeStatusPath(appDir),
       PYLAIR_DEV: "1",
+      ...wrapBinariesEnv,
       ...inspectEnv,
     },
   });
@@ -394,6 +400,14 @@ export async function dev(opts: {
   armRestartKey(trigger, ownWrites, () => vis.onTrigger("manual restart requested"));
   writeDevPidFile(appDir);
 
+  // External binaries (0014 sec. 3): dev resolution into .pylair/binaries
+  // (declared path, else a hash-verified cached download), manifest written
+  // in the same schema release reads. The dir reaches the plugin through
+  // the dev child; in debug builds it resolves the map from there.
+  const binariesDir = await prepareDevBinaries(appDir, cfg.binaries);
+  const binariesEnv: Record<string, string> = {};
+  if (binariesDir) binariesEnv.PYLAIR_BINARIES_DIR = binariesDir;
+
   const env = {
     ...process.env,
     PYLAIR_APP_MODULE: cfg.appModule,
@@ -403,6 +417,7 @@ export async function dev(opts: {
     PYLAIR_CODEGEN_STATUS: codegenStatusPath(appDir),
     PYLAIR_RUNTIME_STATUS: runtimeStatusPath(appDir),
     PYLAIR_DEV: "1",
+    ...binariesEnv,
     ...inspectEnv,
   };
   // tauri.conf.json maps resources/* paths that only exist after

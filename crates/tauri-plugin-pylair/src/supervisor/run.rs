@@ -98,7 +98,8 @@ pub fn strip_inherited_binaries(spec: &mut crate::supervisor::config::SpawnSpec)
         && std::env::var_os(crate::binaries::BINARIES_ENV).is_some()
     {
         eprintln!(
-            "pylair: inherited PYLAIR_BINARIES ignored in a release build;              the bundled manifest is authoritative"
+            "pylair: inherited PYLAIR_BINARIES ignored in a release build; \
+             the bundled manifest is authoritative"
         );
     }
 }

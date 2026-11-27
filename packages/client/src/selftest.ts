@@ -858,6 +858,39 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
     if (stderrProbeRan && b.sawStderr !== 0)
       throw new Error(`win-b received ${b.sawStderr} stderr line(s) not addressed to it`);
   });
+  // External binaries (decision 0014): the host resolves PYLAIR_BINARIES
+  // and the backend fixture reports the map with per-name existence. The
+  // acceptance legs declare `pylair-test-helper` (CI compiles the repo's
+  // fixture binary and writes the pyproject table), so a present helper
+  // with exists=false is the failure; absent fixture or an empty report
+  // is the skip (dev runs and older hosts never declare it).
+  {
+    let report: unknown;
+    let fixtureGone = false;
+    try {
+      report = await within(call("binaries_selftest_report", {}), 30_000, "binaries_selftest_report");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) fixtureGone = true;
+      else throw e;
+    }
+    if (fixtureGone) {
+      checks["binaries"] = "skipped: backend has no binaries_selftest_report fixture";
+    } else {
+      const map = (report ?? {}) as Record<string, { path?: string; exists?: boolean }>;
+      const helper = map["pylair-test-helper"];
+      if (!helper) {
+        checks["binaries"] =
+          Object.keys(map).length === 0
+            ? "skipped: PYLAIR_BINARIES empty (no binaries declared in this run)"
+            : `skipped: no pylair-test-helper declared (map has ${Object.keys(map).join(", ")})`;
+      } else if (helper.exists !== true) {
+        checks["binaries"] = `FAIL: pylair-test-helper resolved to ${String(helper.path)} but no file exists there`;
+        ok = false;
+      } else {
+        checks["binaries"] = "ok";
+      }
+    }
+  }
   // Per-function permissions: win-b's capability denies `spec.add`. The
   // owner (main) just called it successfully (the "call" check above), so a
   // pass here means the denial is per window, not global. The fixture exists
