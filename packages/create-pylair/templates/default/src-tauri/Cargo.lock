@@ -3473,9 +3473,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-pylair"
-version = "0.1.0-rc.26"
+version = "0.1.0-rc.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703f22c03af47b3ce287e5d33cefbe318bd931906202a84b8c78fe75a61f4e09"
+checksum = "39e327d5abf67db2e566d4bf5e039c28540b06fe62983f60d2c74d29d31d0ddc"
 dependencies = [
  "async-trait",
  "dunce",
