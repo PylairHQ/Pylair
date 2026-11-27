@@ -635,6 +635,59 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
   if (!modelsArmed && checks["models"] === "ok")
     checks["models"] =
       "skipped: backend has no models fixtures (resolved pylair predates the model manager)";
+  // Snapshot models (docs/decisions/0013): same shape as the single-file
+  // check - two tiny files through the non-HF manifest form, a second
+  // fetch that must be the fast path, path() plus readiness assertions,
+  // and a warm worker resolving read-only.
+  let snapshotArmed = true;
+  await run("snapshot-models", async () => {
+    let info: { path: string; hits: Record<string, number> };
+    try {
+      info = await within(
+        call<{ path: string; hits: Record<string, number> }>("snapshot_selftest_fetch", {}),
+        60_000,
+        "snapshot_selftest_fetch",
+      );
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) {
+        snapshotArmed = false;
+        return;
+      }
+      throw e;
+    }
+    for (const [name, hits] of Object.entries(info.hits))
+      if (hits !== 1)
+        throw new Error(`snapshot file ${name} hit the server ${hits} times - no fast path`);
+    const deadline2 = Date.now() + 15_000;
+    let phase2: string | null = null;
+    do {
+      const snap = await within(health().catch(() => null), 15_000, "health").catch(
+        () => null,
+      );
+      phase2 = snap?.app?.components["selftest-snapshot"]?.phase ?? null;
+      if (phase2 === "ready") break;
+      await sleep(100);
+    } while (Date.now() < deadline2);
+    if (phase2 !== "ready")
+      throw new Error(
+        `health().app selftest-snapshot phase ${JSON.stringify(phase2)}, expected "ready"`,
+      );
+    const warm2 = await within(
+      call<{ path: string; pid: number }>("snapshot_warm_path", {}),
+      30_000,
+      "snapshot_warm_path",
+    );
+    if (warm2.path !== info.path)
+      throw new Error(`warm worker resolved ${warm2.path}, expected ${info.path}`);
+    await within(
+      call("snapshot_selftest_cleanup", {}),
+      30_000,
+      "snapshot_selftest_cleanup",
+    );
+  });
+  if (!snapshotArmed && checks["snapshot-models"] === "ok")
+    checks["snapshot-models"] =
+      "skipped: backend has no snapshot fixtures (resolved pylair predates snapshot models)";
   // Blob URLs (decisions 0010): the fixture returns a small Blob whose
   // $blob tag decodes to a BlobHandle. The whole fetch surface is
   // asserted through the REAL webview — full fetch, a ranged 206,

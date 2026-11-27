@@ -236,7 +236,18 @@ from pathlib import Path as _m_Path
 
 _MODEL_BLOB = _m_hashlib.sha256(b"pylair-selftest-model").digest() * 8192
 _MODEL_SHA = _m_hashlib.sha256(_MODEL_BLOB).hexdigest()
-_model_state: dict = {"server": None, "hits": 0, "url": None}
+_model_state: dict = {"server": None, "hits": 0, "url": None, "snap_hits": {}}
+_SNAP_FILES = {
+    "config.json": b'{"selftest": true}',
+    "weights.bin": _m_hashlib.sha256(b"pylair-selftest-snapshot").digest() * 64,
+}
+
+
+def _snap_manifest() -> list:
+    return [
+        {"path": n, "sha256": _m_hashlib.sha256(b).hexdigest(), "size": len(b)}
+        for n, b in _SNAP_FILES.items()
+    ]
 
 
 class _ModelHandler(_m_BHRH):
@@ -244,6 +255,20 @@ class _ModelHandler(_m_BHRH):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/snap/"):
+            name = self.path[len("/snap/"):]
+            blob = _SNAP_FILES.get(name)
+            if blob is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            _model_state["snap_hits"][name] = _model_state["snap_hits"].get(name, 0) + 1
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.connection.sendall(blob)
+            return
         blob = _MODEL_BLOB
         _model_state["hits"] += 1
         start = 0
@@ -314,6 +339,59 @@ def models_selftest_fetch() -> dict:
         "hits": _model_state["hits"],
         "insecure_after": os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE"),
     }
+
+
+@expose
+def snapshot_selftest_fetch() -> dict:
+    # The non-HF manifest form over the same loopback server: two tiny
+    # files, fetched twice — the second fetch must be the fast path
+    # (zero extra hits per file).
+    prev = os.environ.get("PYLAIR_MODELS_ALLOW_INSECURE")
+    os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = "1"
+    try:
+        from pylair import models
+
+        base = _models_server_url().rsplit("/m", 1)[0] + "/snap/"
+        kw = {"base_url": base, "manifest": _snap_manifest()}
+        models.fetch_snapshot("selftest-snapshot", **kw)
+        models.fetch_snapshot("selftest-snapshot", **kw)
+    finally:
+        if prev is None:
+            os.environ.pop("PYLAIR_MODELS_ALLOW_INSECURE", None)
+        else:
+            os.environ["PYLAIR_MODELS_ALLOW_INSECURE"] = prev
+    hits = dict(_model_state["snap_hits"])
+    if any(h != 1 for h in hits.values()) or len(hits) != len(_SNAP_FILES):
+        raise RuntimeError(f"second snapshot fetch was not the fast path (hits={hits})")
+    p = models.path("selftest-snapshot")
+    if not (p / "config.json").is_file() or not (p / "weights.bin").is_file():
+        raise RuntimeError(f"snapshot at {p} is incomplete")
+    if (p / "weights.bin").read_bytes() != _SNAP_FILES["weights.bin"]:
+        raise RuntimeError("snapshot weights.bin content mismatch")
+    return {"path": str(p), "hits": hits}
+
+
+@expose(worker={"mode": "warm"})
+def snapshot_warm_path() -> dict:
+    from pylair import models
+
+    return {"path": str(models.path("selftest-snapshot")), "pid": os.getpid()}
+
+
+@expose
+def snapshot_selftest_cleanup() -> dict:
+    import shutil as _shutil
+
+    from pylair import models
+
+    root = models.dir("selftest-snapshot") / "selftest-snapshot"
+    if root.is_dir():
+        _shutil.rmtree(root, ignore_errors=True)
+    srv = _model_state.get("server")
+    if srv is not None:
+        srv.shutdown()
+        _model_state["server"] = None
+    return {"removed": True}
 
 
 @expose(worker={"mode": "warm"})

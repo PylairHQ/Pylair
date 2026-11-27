@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { build } from "./build.js";
 import { emit } from "./codegen.js";
 import { dev } from "./dev.js";
+import { resolveModelSpec } from "./models.js";
 import { devSessionAlive, writeManualTrigger } from "./devwatch.js";
 import { doctor } from "./doctor.js";
 import { keysInit } from "./keys.js";
@@ -41,6 +42,7 @@ Commands:
   init      pylair init --mode wrap  (the same as \`pylair wrap\`)
   keys      Update signing keys (pylair keys init)
   update    Auto-update artifacts (pylair update manifest)
+  models    Model authoring helpers (pylair models resolve org/model[@ref])
   upgrade   Version alignment (pylair upgrade --check [--online])
 
 dev options:
@@ -397,6 +399,20 @@ export function main(rawArgv: string[]): number | Promise<number> {
     } catch (e) {
       return failed("update manifest", e);
     }
+  }
+  if (command === "models") {
+    const [sub, spec] = rest;
+    if (sub !== "resolve" || !spec) {
+      ui.error("pylair models: usage is 'pylair models resolve org/model[@ref]'");
+      return 2;
+    }
+    return resolveModelSpec(spec).then(
+      ({ lines }) => {
+        for (const line of lines) console.log(line);
+        return 0;
+      },
+      (e) => failed("models resolve", e),
+    );
   }
   if (command === "dev") {
     const dir = resolveAppDir(argValue(rest, "--dir"));

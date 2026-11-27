@@ -178,6 +178,80 @@ carries the precise reason — expected vs actual digests on a hash
 failure, the failing status/URL on a server error — never headers.
 Readiness failure details are sanitized the same way.
 
+## Snapshots (multi-file models)
+
+Most real models are directories, not files: a config, tokenizer
+files, sharded weights with an index. `models.fetch_snapshot()`
+downloads and verifies a whole pinned snapshot into an immutable
+revision directory:
+
+```python
+from pylair import models
+
+models.model_snapshot(
+    "qwen",
+    repo="Qwen/Qwen3-0.6B",
+    revision="1f2e9c8b7a6d5f4e3c2b1a0987654321fedcba98",
+    allow=["*.json", "*.safetensors", "tokenizer*"],
+)
+```
+
+Hugging Face metadata is the verifier: the tree API at a pinned commit
+carries sha256 for LFS files and git blob sha1 for small ones, so
+every file verifies without the author publishing checksums. The
+`revision` must be a **full 40-hex commit sha** - with a branch the
+tree query and the file downloads would be reads of a moving ref, and
+verification would race the author instead of checking the content.
+Getting the sha is one command, an authoring-time dev helper that
+never ships into the runtime:
+
+```
+$ pylair models resolve Qwen/Qwen3-0.6B@main
+1f2e9c8b7a6d5f4e3c2b1a0987654321fedcba98
+revision="1f2e9c8b7a6d5f4e3c2b1a0987654321fedcba98"  # Qwen/Qwen3-0.6B@main, resolved 2026-11-27
+```
+
+`models.path("qwen")` returns the revision directory, and the returned
+`Path` never changes what it points at: revisions are immutable, so a
+tokenizer read lazily an hour later comes from the same snapshot as
+the weights already in memory. `models.path("qwen", revision=...)`
+pins a specific revision explicitly - the escape hatch for riding out
+an upgrade inside one process.
+
+Upgrades never flicker readiness: fetching a new revision stages
+side-by-side and `current` switches atomically, so `path()` resolves a
+complete snapshot at every instant and the component stays `ready`
+(progress surfaces in its detail). The old revision stays on disk
+until every process using it restarts - reader locks keep it alive -
+so **peak disk usage during an upgrade is old + new**. A long-running
+app that has moved on to the new revision still pins the old one until
+restart; that is the price of never corrupting a live load.
+
+Non-Hugging-Face sources pin an explicit manifest instead:
+
+```python
+models.fetch_snapshot(
+    "m",
+    base_url="https://models.example.com/pack/",
+    manifest=[
+        {"path": "config.json", "sha256": "...", "size": 612},
+        {"path": "model.safetensors", "sha256": "...", "size": 988021102},
+    ],
+)
+```
+
+Auth mirrors the single-file rules: explicit `headers` win,
+`HF_TOKEN` is adopted as a Bearer token when no Authorization header
+is given (never logged, stripped on cross-origin redirects), and
+`HF_ENDPOINT` selects a mirror. Gated or private repos work with a
+token that has access.
+
+Out of scope for snapshots: the Xet storage protocol (dedup/chunked
+transfers), datasets, delta sync, interop with the huggingface_hub
+cache layout, and loading snapshots into inference frameworks - that
+last part is your code. See `docs/decisions/0013-model-snapshots.md`
+for the full design record.
+
 ## Out of scope
 
 - **No bundled inference runtime.** `pylair.models` fetches and
