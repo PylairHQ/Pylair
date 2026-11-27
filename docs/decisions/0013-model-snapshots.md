@@ -33,6 +33,7 @@ models.fetch_snapshot(
     headers=None,                # e.g. {"Authorization": "Bearer hf_…"}
 )
 models.path(name)                # -> Path of the snapshot DIRECTORY
+models.path(name, revision=…)    # -> a specific revision, if present
 ```
 
 Progress reports through app readiness (decision 0007) exactly as the
@@ -63,9 +64,20 @@ The argument:
   pinned hashes or the fetch fails.
 - **HF commit shas are immutable and content-addressed by git itself.**
   A branch can be force-pushed; a sha cannot point anywhere else.
-- The cost is one lookup at authoring time (`GET /api/models/<repo>`
-  returns `sha`, the current default-branch commit). Release tooling
-  can automate it; the docs will show the one-liner.
+
+**Getting a sha must be easy, or the rule loses.** Authoring time
+resolution is one lookup: `GET /api/models/<repo>` returns `sha`, the
+current default-branch commit. The implementation ships a CLI helper
+so the lookup is one command, not a curl incantation:
+
+```
+$ pylair models resolve org/model@main
+71034c5d8bde858ff824298bdedc65515b97d2b9
+```
+
+(`@main` optional; any branch or tag resolves. The helper is an
+authoring tool in the dev CLI - it never ships into the runtime, and
+the resolved sha is what the app pins in code.)
 
 Rejected alternatives:
 
@@ -73,16 +85,23 @@ Rejected alternatives:
   ignore it, and the race above remains. Rejected.
 - **Branch resolved to a sha at fetch time, then pinned**: this is
   strictly the race above with extra steps. The resolution read is
-  still a moving-target read. Rejected.
+  still a moving-target read. Rejected. (Resolving at *authoring* time
+  and pinning the result in code is the supported flow - the resolve
+  helper above.)
 - **Tags**: mutable on Hugging Face (they are git refs, not immutable
-  release objects). Same problem, rejected.
+  release objects). Same problem, rejected as fetch input; fine as
+  resolve-helper input.
 - **Optional revision defaulting to the default branch**: the worst
   option, since it makes the easy path the unreproducible one.
   Rejected; `revision` is required, not defaulted.
 
-`models.path(name)` returns the snapshot **directory** `Path` when the
-snapshot verifies ready (§3), else `ModelNotReady` exactly as in 0009.
-In a worker process it is resolve-and-check only, same rule.
+`models.path(name)` resolves the `current` pointer and returns that
+revision's snapshot **directory** when it verifies ready (§3), else
+`ModelNotReady` exactly as in 0009. `models.path(name, revision=…)`
+returns a specific revision directory when present and verified,
+independent of the pointer - the escape hatch for pinning a process to
+one revision across an upgrade. In a worker process both forms are
+resolve-and-check only, same rule as 0009.
 
 ## 2. Integrity without per-file sha256 from the author
 
@@ -158,47 +177,67 @@ models.fetch_snapshot(
 ```
 
 Every entry uses raw sha256 (the strong hash; there is no git framing
-to mirror), and every file is required to appear in the manifest  - 
+to mirror), and every file is required to appear in the manifest -
 a file present in `allow` but missing from the manifest is a loud
 error at argument-check time, since unverifiable bytes must never
 enter the snapshot. `base_url` and `manifest` are mutually exclusive
-with `repo`/`revision`.
+with `repo`/`revision`. Manifest-sourced snapshots use a synthetic
+revision key (sha256 of the canonical manifest JSON, truncated to 40
+hex) so the revision-addressed storage of §3 works uniformly - a
+changed manifest is a changed snapshot, which is exactly the upgrade
+semantic of §7.
 
 ## 3. Storage layout, atomic readiness, locking
 
 ```
 <app data dir>/models/<name>/
-    <repo files at their repo-relative paths>   # the snapshot itself
-    .parts/                 # in-flight: .parts/<path>.part per file
-    .manifest.json          # the pinned tree, written before downloads start
-    .verify.json            # per-file verification record (size, mtime_ns)
-    .lock                   # cross-process lock, byte-range locked as in 0009
-    .ready                  # ready marker: {revision, file_count, total_bytes}
+    current                          # small file: the active revision sha
+    <revision>/                      # one verified, immutable snapshot
+        <repo files at their repo-relative paths>
+        .manifest.json               # the pinned tree for this revision
+        .verify.json                 # per-file verification record
+        .ready                       # ready marker: {revision, file_count, total_bytes}
+        .use                         # reader lock file: shared-locked by every
+                                     # process holding path() here (§7)
+    <revision>.partial/              # staging: same layout, renamed when complete
+        .parts/                      # in-flight: .parts/<path>.part per file
+    .lock                            # cross-process fetch lock, as in 0009
 ```
+
+**Revisions are immutable and content-addressed by their sha.** A
+snapshot lives at `<name>/<revision>/` for its entire life; nothing
+inside it ever changes once `.ready` lands. Staging happens in the
+sibling `<name>/<revision>.partial/` and the completion step is one
+rename of a directory **nobody has open yet** - safe on Windows, where
+renaming or deleting files a process holds open fails with a sharing
+violation (safetensors mmaps weights, so an in-use revision is
+immovable). The `current` file is the only mutable thing in the
+layout, switched with `os.replace` on a small file - atomic on every
+OS including Windows. No directory rename ever touches a revision a
+reader might hold.
 
 The rules:
 
-- **A file only enters the snapshot verified.** Downloads write to
-  `.parts/<path>.part`; on completion the file's hash is checked
-  against the manifest, and only then is it moved into place with
-  `os.replace` (same filesystem, since `.parts/` sits inside the
-  snapshot dir). A half-downloaded or unverified file never exists at
-  its final path.
-- **`.ready` is written last**, after every manifest file is in place
-  and verified, and records the revision, file count and total bytes.
-  It is the atomic commit point of the whole snapshot: a crash at any
-  earlier moment leaves no `.ready`, so `path()` never returns a
-  half-finished snapshot.
-- **`path()` cheap-check**: `.ready` present, `.manifest.json` present,
-  every manifest entry exists with the recorded size, and no recorded
-  mtime changed. One stat per file (typically tens of files, tens of
-  microseconds each) with zero hashing; any mtime mismatch re-hashes
-  just that file before deciding, mirroring 0009 §1. A failed check
-  falls through to resume, never to a wrong `Path`.
-- **Lock**: `.lock` byte-range locked exactly as in 0009 §5 (kernel
-  lock, released on holder death, no stale cleanup). A second caller
-  or process spins, reads progress from `.parts` sizes plus verified
-  file sizes against the manifest totals, and reports
+- **A file only enters the staging snapshot verified.** Downloads
+  write to `.partial/.parts/<path>.part`; on completion the file's
+  hash is checked against the manifest, and only then is it moved into
+  the staging tree with `os.replace` (same filesystem). A
+  half-downloaded or unverified file never exists at its final path.
+- **`.ready` is written last** inside staging, after every manifest
+  file is in place and verified; then `<revision>.partial/` is renamed
+  to `<revision>/` in one step. A crash at any earlier moment leaves
+  only a `.partial` dir, which `path()` never looks at.
+- **`path()` cheap-check**: resolve `current`, then in the revision
+  dir: `.ready` present, `.manifest.json` present, every manifest
+  entry exists with the recorded size, and no recorded mtime changed.
+  One stat per file (typically tens of files, tens of microseconds
+  each) with zero hashing; any mtime mismatch re-hashes just that file
+  before deciding, mirroring 0009 §1. A failed check raises
+  `ModelNotReady`, never a wrong `Path`.
+- **Fetch lock**: `.lock` byte-range locked exactly as in 0009 §5
+  (kernel lock, released on holder death, no stale cleanup). A second
+  caller or process spins, reads progress from `.partial` sizes plus
+  verified file sizes against the manifest totals, and reports
   `downloading (shared)`.
 - **`.verify.json`** records size + mtime_ns per verified file at the
   moment it lands, so the cheap check above has a trustworthy baseline
@@ -231,7 +270,7 @@ One component per snapshot, the name as passed:
   re-hash cost, now trivially small relative to a shard), and resumes
   only what is missing. Dev restart mid-snapshot loses nothing but the
   in-flight chunks.
-- **Precise failure**: `failed(name, "<path>: <reason>")`  - 
+- **Precise failure**: `failed(name, "<path>: <reason>")` -
   `model-00002-of-00004.safetensors: sha256 mismatch: expected … got
   …` or `tokenizer.json: connection reset after 3 retries`. The file
   is always named; a snapshot-level reason (disk space, tree fetch
@@ -240,6 +279,11 @@ One component per snapshot, the name as passed:
   `models.model_snapshot(name, ...)` module-level form mirror 0009 §5
   exactly, including the auto-start-after-hello rule and the sweep
   hint. Workers stay leaf executors: `path()` resolves, never fetches.
+- **Upgrades never flicker**: because revisions are immutable and the
+  `current` switch is a file `os.replace` (§7), `path()` always
+  resolves to a complete revision - the old one until the instant the
+  pointer moves, the new one after. There is no not-ready window
+  during an upgrade, so a `requires=(name,)`-gated app never flickers.
 
 ## 5. huggingface_hub: neither depend nor interoperate
 
@@ -272,9 +316,10 @@ Evaluated three options against the exact artifact we ship:
 **Offline behaviour**: identical to 0009. A verified snapshot resolves
 in milliseconds with zero network. A missing or partial snapshot fails
 with a precise `failed` detail naming the stage (`tree: …` versus the
-file). Air-gapped deployment remains possible by copying the snapshot
-directory plus `.manifest.json`/`.verify.json` into place out of band;
-`path()` accepts it because verification is local.
+file). Air-gapped deployment remains possible by copying the revision
+directory plus its `.manifest.json`/`.verify.json` into place out of
+band and writing `current`; `path()` accepts it because verification
+is local.
 
 **HF_TOKEN**: when the caller passes no `headers` and `HF_TOKEN` is
 set in the runtime environment, the fetcher sends `Authorization:
@@ -290,7 +335,7 @@ rules apply unchanged).
   redirect chain of a gated file (`huggingface.co` 302 to a CDN host)
   is the leak case 0009 §3 already defends: sensitive headers survive
   same-origin hops only. A 401/403 on the tree or a file is
-  non-retryable and reports `failed(name, "tree: 401 unauthorized  - 
+  non-retryable and reports `failed(name, "tree: 401 unauthorized -
   check authorization for org/model")` (status and host, never the
   header).
 - **Mirrors**: `HF_ENDPOINT` is honored when set (the hf-mirror.com
@@ -302,39 +347,63 @@ rules apply unchanged).
 - **Disk preflight**: total bytes are the sum of manifest sizes,
   known exactly before anything downloads. `shutil.disk_usage` on the
   models dir, minus what is already verified or partial for this
-  snapshot (resume must not double-count), then
+  revision (resume must not double-count), then
   `failed(name, "not enough disk space: need X, have Y")` without
-  touching the network, as in 0009 §3.
+  touching the network, as in 0009 §3. Note the upgrade case: during
+  a revision switch the disk holds the old revision plus the staging
+  tree at once, so the preflight for an upgrade must account for the
+  full new revision on top of the existing one - peak usage is
+  old + new until the GC of §7 completes.
 
 ## 7. Updates and garbage collection
 
-A new `revision` for the same `name` is an upgrade, and upgrades are
-atomic per snapshot:
+A new `revision` for the same `name` is an upgrade, and the design
+answers two failure modes of the naive approach:
 
-- `<data>/models/<name>/` always holds **the current revision only**,
-  keyed inside `.ready`. A fetch for a different revision downloads
-  into a sibling staging dir `<name>.next-<revision>/` with the same
-  internal layout. The current snapshot keeps serving `path()` the
-  whole time; nothing about the in-progress upgrade is visible to app
-  code.
-- When every staged file verifies, `.ready` is written in staging and
-  the switch is two renames: current aside to `<name>.old-<revision>`,
-  staging into `<name>`. Both renames are same-directory and atomic;
-  the only inconsistent instant is between them, and `path()` treats a
-  missing `.ready` as not-ready, so the worst case is a transient
-  `ModelNotReady`, never corrupt bytes. (A single `os.replace` cannot
-  swap a non-empty dir atomically on Windows; the two-rename dance is
-  the honest approximation and its failure mode is safe.)
-- **GC**: after a successful switch the old revision directory is
-  deleted on the spot. Rollback-by-revision is not retained locally:
-  revisions are immutable upstream, so a rollback is a re-fetch of a
-  pinned sha, and holding multi-GB copies of every previous revision
-  is the worst trade on a user machine. `.part` residue and staging
-  dirs from crashed upgrades are collected at the start of the next
-  fetch for that name (they are detectable by naming, and `.lock`
-  proves no live writer).
-- A repeated fetch of the same revision the snapshot already verifies
-  costs one stat pass and returns immediately, as in 0009.
+1. **Windows sharing violations**: safetensors mmaps weights, so a
+   warm worker holding revision A open makes every rename or delete
+   inside A fail. Any scheme that renames or deletes an in-use
+   revision is broken on Windows by construction.
+2. **Mixed-revision loads**: if `path()` returned a stable `<name>/`
+   whose contents were swapped underneath, an app holding that `Path`
+   would lazily read some files (tokenizer, a later shard, config)
+   from the new revision while its in-memory weights came from the
+   old one - a mixed-revision load inside one process, the same
+   incoherence the full-sha rule of §1 exists to prevent.
+
+The revision-addressed layout of §3 avoids both by construction:
+
+- **Fetch**: the new revision downloads into
+  `<name>/<revision>.partial/` while `<name>/current` still points at
+  the old revision. Readers are undisturbed; the old revision keeps
+  serving `path()` for the entire upgrade.
+- **Complete**: `.ready` lands in staging, `.partial` is renamed to
+  `<name>/<revision>/` - a directory nobody has open yet, so the
+  rename cannot hit a sharing violation. Only then is `current`
+  rewritten to the new sha with `os.replace` (small file, atomic on
+  every OS). After the switch, new `path()` calls resolve the new
+  revision; **a `Path` an app already holds keeps pointing at the old
+  immutable revision for the life of the process** - no mixed loads,
+  ever, because revision directories never change content.
+- **Reader locks**: `path()` takes a shared byte-range lock on a
+  `.use` file inside the revision dir and holds it for the life of
+  the process (shared, not exclusive - any number of readers;
+  kernel-released on death exactly like the 0009 fetch lock). This is
+  what lets GC distinguish "deletable" from "in use" on every OS, not
+  just Windows.
+- **GC**: at the end of a successful fetch, and again at each fetch
+  start and runtime startup, the runtime scans `<name>/` for
+  non-current revisions and tries to delete each one whose `.use`
+  lock can be taken exclusively without blocking. A lock that cannot
+  be taken means a live reader - skip silently. On Windows a delete
+  can also fail outright with a sharing violation even when the lock
+  was won (a reader that mmap'd but never locked, or a race with a
+  dying process): that failure is **"still in use", never an error** -
+  the revision is retried at the next opportunity. `.partial` residue
+  from crashed fetches is collected the same way (no reader can hold
+  it, and `.lock` proves no live writer).
+- A repeated fetch of the revision `current` already names costs one
+  stat pass and returns immediately, as in 0009.
 
 ## 8. Out of scope for v1
 
@@ -344,15 +413,17 @@ Explicitly not in v1, each a plausible `docs/ideas.md` entry:
   regardless of backend; the xet chunk API is a bandwidth optimization,
   not an integrity requirement)
 - **any `huggingface_hub` dependency or cache interop** (§5)
-- **branch or tag revisions** (§1)
+- **branch or tag revisions as fetch input** (§1; the resolve helper
+  covers the authoring flow)
 - **dataset repos** (`datasets/` API shape differs; model repos only)
-- **delta sync between revisions** (unchanged files are not re-used
-  across revisions in v1; the GC story deliberately keeps one revision)
+- **cross-revision file reuse** (unchanged shards are re-downloaded in
+  v1; correctness first, bandwidth optimization later - the
+  content-addressed file layout makes this a safe later addition)
 - **per-file parallel range download** (parallelism is across files,
   not within one file)
 - **shared-machine caches** (per-app data dir only, as in 0009)
 - **bandwidth caps, mirror fallback lists, auto-update-on-new-commit**
-- **loading the snapshot** into torch/transformers/llama.cpp  - 
+- **loading the snapshot** into torch/transformers/llama.cpp -
   `models` ends at a verified directory path
 
 ## 9. Test plan
@@ -363,63 +434,93 @@ Explicitly not in v1, each a plausible `docs/ideas.md` entry:
   several small files, nested paths); allow/ignore filtering; manifest
   mode for `base_url` sources including the unverifiable-file error.
 - **Atomicity**: crash injection between file moves proves no final
-  path ever holds unverified bytes; missing `.ready` means `path()`
-  raises; the two-rename switch never serves half of either revision.
+  path ever holds unverified bytes; `path()` never resolves a
+  `.partial` dir; `.ready`-last ordering proven by deleting it and
+  asserting `ModelNotReady`.
+- **Revision immutability**: fetch revision A, hold the `Path` from
+  `path()`, upgrade to revision B, assert the held `Path` still reads
+  revision A's bytes for every file (tokenizer and config included)
+  and only fresh `path()` calls see B. On Windows: same test with a
+  memory-mapped shard held open across the switch - the switch must
+  succeed because nothing renames A.
+- **GC**: after the switch, A is deleted once no reader holds it;
+  while a reader holds A's `.use` lock, GC skips it on every OS;
+  a simulated Windows sharing-violation delete failure is treated as
+  "still in use" and retried, never raised.
 - **Resume**: kill mid-shard, restart, assert only missing bytes are
   re-fetched (server logs Range offsets); mtime-tamper a verified file
   and assert the single-file re-hash catches it.
 - **Auth**: gated-fixture 302 to a second loopback origin asserts
   `Authorization` never crosses; `HF_TOKEN` adoption and explicit
   `headers` precedence; token absent from every error string.
-- **GC**: staged upgrade switch, old revision gone, crash mid-switch
-  recovered at next fetch.
+- **Resolve helper**: `pylair models resolve org/model@main` against
+  the loopback fixture prints the sha and rejects non-hex input to
+  fetch with the exact argument error.
 - **e2e**: `python -m pylair` plus fixture server, `requires` gating
   on the snapshot component, `path()` inside a worker raising
-  `ModelNotReady` before readiness with zero network hits.
+  `ModelNotReady` before readiness with zero network hits; an upgrade
+  mid-run never flickers the gated component.
 
 ## 10. Implementation plan
 
 1. **pylair PR 1 - fetch core**: tree/manifest resolution, the
    two-kind verifier, per-file download through the existing 0009
-   machinery with fan-out 4, `.parts` layout, locking, disk preflight,
-   the storage layout of §3. Unit suite of §9.
-2. **pylair PR 2 - snapshot lifecycle**: `path()` cheap-check,
-   `.ready` atomicity, revision switch + GC, readiness wiring
-   (component lifecycle, exact-byte progress, precise `failed`),
+   machinery with fan-out 4, the revision-addressed layout
+   (`.partial` staging, `.parts`, `.manifest.json`, `.verify.json`,
+   `.ready`-last, completion rename), fetch locking, disk preflight
+   including the old+new peak rule. Unit suite of §9.
+2. **pylair PR 2 - lifecycle**: `path()` with `current` resolution
+   and the `revision=` form, the `.use` reader locks, the atomic
+   pointer switch, GC with in-use skipping, revision immutability
+   guarantees, readiness wiring (component lifecycle, exact-byte
+   progress, precise `failed`, no-flicker upgrades),
    `models.model_snapshot` declarative form, `HF_TOKEN`/`HF_ENDPOINT`.
-   e2e and worker tests.
-3. **Docs/selftest PR**: `docs/models.md` snapshot section, README
+   e2e and worker tests, including the Windows mmap-during-switch
+   test.
+3. **CLI/docs/selftest PR**: the `pylair models resolve` authoring
+   helper in the dev CLI, `docs/models.md` snapshot section, README
    bullet, client selftest check mirroring the 0009 one, ideas.md
    entries for the §8 deferrals.
 
 No wire change, no crate change, no client runtime change: the API
-lives in `pylair` and reports through the existing readiness channel,
-so only the PyPI package moves, plus the npm trio for the selftest
-check as in 0009 §9.
+lives in `pylair` and reports through the existing readiness channel.
+The npm trio moves only for the resolve helper and the selftest check;
+the PyPI package carries the fetch itself.
 
 ## Alternatives considered
 
+- **Stable `<name>/` path with a two-rename switch** (the original
+  §7): renaming the current revision aside and the staged one into
+  its place. Broken twice on Windows - safetensors mmaps make an
+  in-use revision unrenamable and undeletable - and broken everywhere
+  semantically: a held `Path` would straddle the swap, mixing
+  old-revision weights in memory with new-revision lazy file reads in
+  one process. Rejected in favor of revision-addressed storage where
+  no rename ever touches an openable revision and a held `Path` is
+  immutable by construction (§7).
 - **Require authors to pin per-file hashes in app code**: exactly the
   burden §2 removes, and it cannot work for sharded repos whose file
   set changes across revisions. Rejected.
-- **Branch revisions with resolve-then-pin**: a moving-target read
-  followed by a pin is still a moving target; the race is described in
-  §1. Rejected.
+- **Branch revisions with resolve-then-pin at fetch time**: a
+  moving-target read followed by a pin is still a moving target; the
+  race is described in §1. Rejected. (Resolve at authoring time, pin
+  in code - the supported flow.)
 - **`huggingface_hub` as a dependency**: 15 to 25 MB of transitive
   dependencies including a compiled extension, duplicating machinery
   0009 already owns, with a cache layout that bypasses the readiness
   model. Rejected (§5).
 - **Hub-cache interoperability**: private, version-unstable layout and
   cross-app trust. Rejected for v1 (§5).
-- **Keep-one-old-revision rollback retention**: multi-GB duplication
-  on user machines for a rollback that is a pinned re-fetch anyway.
-  Rejected; GC deletes at switch (§7).
+- **Keep-one-old-revision for fast rollback**: the reader-lock GC
+  already keeps an old revision alive exactly as long as it is in use;
+  retaining it beyond that costs multi-GB duplication for a rollback
+  that is a pinned re-fetch anyway. Rejected (§7).
 - **Per-file range parallelism**: added complexity in resume and
   verification ordering for bandwidth already saturated by cross-file
   fan-out. Rejected for v1 (§8).
-- **Directory `os.replace` atomic switch**: not atomic for non-empty
-  directories on Windows; the two-rename dance with the safe failure
-  mode is the approximation chosen instead (§7).
+- **Symlink for `current`**: symlink creation needs elevated
+  privileges on Windows; a small file plus `os.replace` is atomic
+  everywhere with no privilege requirement. Rejected.
 
 ## Evidence index
 
@@ -431,12 +532,18 @@ check as in 0009 §9.
   entries `oid` at 40, both with exact `size`).
 - Repo metadata endpoint:
   `GET https://huggingface.co/api/models/hf-internal-testing/tiny-random-gpt2`
-  returns `sha` - the current default-branch commit, the authoring-time
-  lookup for a pinnable revision.
+  returns `sha` - the current default-branch commit, the lookup the
+  resolve helper automates.
 - git blob sha1 framing construction
   (`sha1("blob " + len + NUL + content)`) verified locally in the
   spike; the 40-char output matches the plain-file `oid` shape.
 - 0009 §2: TLS from the bundled runtime proven on all three OSes, the
   reason no TLS or CA discussion is repeated here.
-- 0009 §3/§5: download semantics, resume mechanics, kernel lock proof  - 
-  inherited unchanged per file.
+- 0009 §3/§5: download semantics, resume mechanics, kernel lock proof -
+  inherited unchanged per file, and the same lock mechanism reused
+  for the `.use` reader locks of §7.
+- Windows file locking semantics: `MoveFile`/`DeleteFile` fail with
+  `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` on files open
+  without delete sharing, and memory-mapped files (how safetensors
+  readers load weights) are the canonical case - the motivation for
+  revision-addressed storage in §7.
