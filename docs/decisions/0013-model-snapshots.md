@@ -435,6 +435,21 @@ The revision-addressed layout of §3 avoids both by construction:
   revision is retried at the next opportunity. `.partial` residue
   from crashed fetches is collected the same way (no reader can hold
   it, and `.lock` proves no live writer).
+- **The newborn-revision window (implementation note, added with PR
+  2)**: between the staging rename and the `current` write, a brand
+  new revision is momentarily neither current nor reader-locked, and
+  a concurrent GC could probe and delete it. The obvious fix -
+  shared-locking `.use` inside staging before the rename so the lock
+  travels with the directory - is impossible on Windows, where a
+  directory cannot be renamed while any file inside it is open at any
+  share mode. The implementation therefore closes the window from
+  the other side: the fetch writes `current` through a completion
+  hook while still holding `<name>/.lock` (the same lock the whole
+  fetch is under), and GC skips a name entirely when `<name>/.lock`
+  is contended - a strictly stronger form of the `.partial` rule
+  above, since a live fetch always re-runs GC at its own start and
+  end. This also means a fast-path repeat carries its `current`
+  write into the locked flow instead of writing unlocked.
 - **Disk usage honesty**: readers hold `.use` for the process
   lifetime, so a long-running app that has moved on to the new
   revision still pins the old one on disk until restart. Peak usage

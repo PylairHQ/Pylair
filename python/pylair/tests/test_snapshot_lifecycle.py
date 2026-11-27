@@ -241,6 +241,71 @@ def test_ready_deleted_first_blocks_handout(server, tmp_path):
         models.path("m1", revision=REV)
 
 
+_LOCK_HOLDER = """
+import sys, time
+from pathlib import Path
+from pylair import models
+fd = models._try_file_lock(Path(sys.argv[1]) / ".lock")
+assert fd is not None
+print("holding", flush=True)
+while not Path(sys.argv[2]).exists():
+    time.sleep(0.05)
+"""
+
+
+def test_fastpath_write_waits_for_lock(server, tmp_path):
+    """A fast-path repeat carries the current write into the locked
+    flow: while another process holds <name>/.lock, the write does not
+    happen — and lands as soon as the holder releases."""
+    server.add_repo("org/model", _repo(REV, b"one"))
+    _fetch_public("m1", server)
+    (tmp_path / "models" / "m1" / "current").unlink()
+    release = tmp_path / "release"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _LOCK_HOLDER,
+            str(tmp_path / "models" / "m1"),
+            str(release),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYLAIR_APP_DATA_DIR": str(tmp_path)},
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "holding"
+        result = {}
+
+        def fetch():
+            result["out"] = _fetch_public("m1", server)
+
+        t = threading.Thread(target=fetch, daemon=True)
+        t.start()
+        # While the child holds .lock, the write must not land. The
+        # negative window is bounded but the contention itself is
+        # deterministic — a broken implementation writes within ms.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            assert not (tmp_path / "models" / "m1" / "current").exists()
+            time.sleep(0.02)
+        assert t.is_alive(), "fast-path fetch did not wait for the lock"
+        release.write_text("go")
+        t.join(timeout=15)
+        assert not t.is_alive()
+        _wait(
+            lambda: (tmp_path / "models" / "m1" / "current").exists(),
+            what="current written after release",
+        )
+        assert (tmp_path / "models" / "m1" / "current").read_text() == REV
+    finally:
+        release.write_text("go")
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+
 # ---- the path()/GC race ------------------------------------------------------
 
 

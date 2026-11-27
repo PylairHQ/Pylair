@@ -754,7 +754,12 @@ def fetch_snapshot(
     # impossible (the rename carries .ready with it) — it means
     # tampering, and _fast_path is loud about it rather than guessing.
     if rev_dir.is_dir():
-        return _fast_path(rev_dir)
+        out = _fast_path(rev_dir)
+        if on_verified is None:
+            return out
+        # The lifecycle layer writes current through on_verified, and
+        # that write must happen inside the cross-process lock — fall
+        # through to the locked flow even on a fast path.
 
     name_lock = _name_lock(name)
     while True:
@@ -762,13 +767,13 @@ def fetch_snapshot(
             break
         if abort.is_set():
             raise ModelCancelled(f"download of {name!r} cancelled")
-        if rev_dir.is_dir():
+        if rev_dir.is_dir() and on_verified is None:
             # A sibling in this process finished it while we spun.
             return _fast_path(rev_dir)
     try:
         fd = None
         while fd is None:
-            if rev_dir.is_dir():
+            if rev_dir.is_dir() and on_verified is None:
                 return _fast_path(rev_dir)  # outer finally releases name_lock
             if abort.is_set():
                 raise ModelCancelled(f"download of {name!r} cancelled")
@@ -777,8 +782,14 @@ def fetch_snapshot(
                 time.sleep(0.2)
         try:
             if rev_dir.is_dir():
-                # A fetcher in another process finished while we spun.
-                return _fast_path(rev_dir)
+                # A fetcher in another process finished while we spun —
+                # or this was a fast-path repeat carrying a pending
+                # current write. Either way the write happens here,
+                # inside the cross-process lock.
+                out = _fast_path(rev_dir)
+                if on_verified is not None:
+                    on_verified(out)
+                return out
 
             # The plan resolves under the lock: tree queries are cheap
             # metadata, and resolving inside keeps a second fetcher
@@ -1123,8 +1134,18 @@ def gc_all(model_root: Path) -> None:
 
 
 def _reset() -> None:
-    """Test isolation: clear in-process lock state. Reader fds stay
-    registered — they model process-lifetime holds, and tests use fresh
-    tmp dirs so stale keys never collide."""
+    """Test isolation: clear in-process lock state AND release every
+    registered reader fd (unlock, close, clear). Production never calls
+    this — the holds are process-lifetime by design — but a shared
+    pytest process accumulates fds on tmp dirs otherwise, and on
+    Windows those open handles block tmp cleanup for every later test."""
+    with _readers_lock:
+        for fd in _readers.values():
+            try:
+                _unlock_use(fd)
+            except OSError:
+                pass
+            os.close(fd)
+        _readers.clear()
     with _registry_lock:
         _name_locks.clear()

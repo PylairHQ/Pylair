@@ -908,6 +908,10 @@ def fetch_snapshot(
         else:
             _readiness.loading(name, fraction, detail)
 
+    def _write_current_once(rd: Path) -> None:
+        if snap.read_current(name_dir) != rd.name:
+            snap.write_current(name_dir, rd.name)
+
     try:
         snap.gc_name(name_dir)
     except Exception as e:  # noqa: BLE001 - GC is bookkeeping, never fatal
@@ -929,11 +933,10 @@ def fetch_snapshot(
             # current is written inside the cross-process fetch lock
             # hold: GC skips this name entirely while that lock is
             # contended, so the newborn revision is never deletable.
-            on_verified=lambda rd: snap.write_current(name_dir, rd.name),
+            # Fast-path repeats fire it too — the write is skipped when
+            # the pointer already names the revision.
+            on_verified=_write_current_once,
         )
-        # Fast-path repeats never fire on_verified — the write is
-        # idempotent, so covering them here costs nothing.
-        snap.write_current(name_dir, rev_dir.name)
         _readiness.ready(name)
         try:
             snap.gc_name(name_dir)
