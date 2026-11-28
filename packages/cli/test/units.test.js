@@ -285,13 +285,34 @@ describe("loader rewriting", () => {
     const dir = tmp("machrewrite");
     mkdirSync(join(dir, "bin"), { recursive: true });
     mkdirSync(join(dir, "lib"), { recursive: true });
-    cpSync("/bin/echo", join(dir, "bin", "tool"));
-    cpSync("/bin/echo", join(dir, "lib", "libx.dylib"));
+    const libC = join(dir, "libx.c");
+    const exeC = join(dir, "tool.c");
+    writeFileSync(libC, "int unit_answer(void) { return 42; }\n");
+    writeFileSync(exeC, "#include <stdio.h>\nextern int unit_answer(void);\nint main(void) { printf(\"%d\\n\", unit_answer()); return 0; }\n");
+    execFileSync("cc", [
+      "-dynamiclib",
+      "-install_name",
+      "/opt/vendor/libx.dylib",
+      "-Wl,-headerpad_max_install_names",
+      libC,
+      "-o",
+      join(dir, "lib", "libx.dylib"),
+    ]);
+    execFileSync("cc", [
+      "-Wl,-headerpad_max_install_names",
+      exeC,
+      "-L",
+      join(dir, "lib"),
+      "-lx",
+      "-o",
+      join(dir, "bin", "tool"),
+    ]);
     const out = rewriteUnitLoaders(dir);
     assert.equal(out.kind, "mach-o");
     assert.equal(out.rewritten, 2);
     const rpaths = execFileSync("otool", ["-l", join(dir, "bin", "tool")], { encoding: "utf-8" });
     assert.ok(rpaths.includes("@loader_path/../lib"), rpaths);
+    assert.equal(execFileSync(join(dir, "bin", "tool"), { encoding: "utf-8" }), "42\n");
     rmSync(dir, { recursive: true, force: true });
   });
 });
