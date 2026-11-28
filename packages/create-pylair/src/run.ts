@@ -240,6 +240,9 @@ function scaffold(
         ? `  ${paint(caps, "accent", cmd.padEnd(Math.max(20, cmd.length + 1)))}${paint(caps, "muted", note)}`
         : `  ${paint(caps, "accent", cmd)}`,
     );
+  u.line(
+    `  ${paint(caps, "muted", "Start here: https://github.com/PylairHQ/Pylair/blob/main/docs/learn/01-first-app.md")}`,
+  );
 
   // Preflight, reusing `pylair doctor`'s checks (the same subset `pylair
   // dev` gates the Rust build on - vendored from packages/cli): a missing

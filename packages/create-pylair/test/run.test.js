@@ -70,7 +70,8 @@ const EXPECTED_BRIDGE =
   "  npx pylair dev      # supervised dev: python hot reload + vite\n" +
   "                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n" +
   "  npx pylair build    # native installer with bundled python\n" +
-  "  npx pylair doctor   # diagnose environment any time\n\n";
+  "  npx pylair doctor   # diagnose environment any time\n" +
+  "  Start here: https://github.com/PylairHQ/Pylair/blob/main/docs/learn/01-first-app.md\n\n";
 
 describe("non-interactive behaviour is unchanged", () => {
   test("a piped run never prompts and finishes with the exact block", async () => {
@@ -320,7 +321,8 @@ describe("the finished output matches the console", () => {
       "  npx pylair dev      # supervised dev: python hot reload + vite\n" +
       "                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n" +
       "  npx pylair build    # native installer with bundled python\n" +
-      "  npx pylair doctor   # diagnose environment any time\n\n";
+      "  npx pylair doctor   # diagnose environment any time\n" +
+  "  Start here: https://github.com/PylairHQ/Pylair/blob/main/docs/learn/01-first-app.md\n\n";
     assert.ok(p.text().endsWith(tail), "plain mode keeps the block byte for byte");
   });
 });
