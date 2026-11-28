@@ -566,10 +566,15 @@ below was skipped for rc.20 only.
   npm rc.37 and pylair rc.22, their package-locks regenerate against the
   packed rc.37 tarballs, their uv.lock files move only pylair, and their
   Cargo.toml/Cargo.lock crate pins stay at rc.28. Both template
-  `Cargo.lock` files are untouched for the same reason. Because npm
-  rc.37 is not published when this pins PR runs, `check-learn-ts` now
-  packs the checkout's client and cli tarballs and seeds the npm cache
-  before reproducing the examples' registry install. Remaining order:
+  `Cargo.lock` files are untouched for the same reason. The scaffold and
+  learning examples also constrain `@tauri-apps/api` and
+  `@tauri-apps/cli` to the 2.12 minor line because Tauri's installer
+  build rejects an npm API a minor ahead of the locked crate. Because npm
+  rc.37 is not published when this pins PR runs, `check-learn-ts` packs
+  the checkout's client and cli tarballs and serves them through a
+  loopback npm-registry shim while reproducing the examples' registry
+  install; the committed package-lock integrities are therefore the exact
+  bytes npm publish must preserve. Remaining order:
 
   1. pack-mode acceptance green on this commit (the scaffolded crate
      rc.28 + pylair rc.22 pins are already live);
