@@ -441,6 +441,8 @@ function runtimeBridge(denyProbe = { viaCall: DENIED, viaRaw: DENIED }, fixture 
             done: true,
             result: { "pylair-test-helper": { path: "/x/pylair-test-helper", exists: true } },
           });
+        } else if (fnName === "binaries_selftest_unit") {
+          onEvent({ task, done: true, result: { rc: 0, stdout: "unit-library-answer" } });
         } else if (fnName === "add") {
           onEvent({ task, done: true, result: input.a + input.b });
         } else if (fnName === "count" && input.n === 25) {
@@ -509,6 +511,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
     "blob",
     "event-scoping",
     "binaries",
+    "binary-unit",
     "fn-permission",
   ]);
   assert.equal(ok, true, JSON.stringify(checks));
@@ -520,6 +523,7 @@ test("flag set, real dist: dispatches to the owner role and reports its verdict"
   assert.equal(checks["models"], "ok");
   assert.equal(checks["blob"], "ok");
   assert.equal(checks["binaries"], "ok");
+  assert.equal(checks["binary-unit"], "ok");
   assert.ok(b.listens.includes("pylair://health"), "onHealth subscribed on the health event");
   assert.ok(b.listens.includes("pylair://app"), "onApp subscribed on the app event");
   assert.equal(checks["fn-permission"], "ok");

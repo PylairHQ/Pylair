@@ -493,3 +493,25 @@ def binaries_selftest_report() -> dict:
         name: {"path": path, "exists": _os.path.isfile(path)}
         for name, path in m.items()
     }
+
+
+@expose
+async def binaries_selftest_unit() -> dict:
+    """Run the directory-unit fixture through pylair.proc.
+
+    The executable is dynamically linked against its sibling library; the
+    marker in stdout is returned by that library, so this proves the loader
+    resolution in the installed app rather than mere file existence.
+    """
+    import pylair
+
+    try:
+        proc = await pylair.proc.spawn("pylair-unit-helper")
+    except (KeyError, RuntimeError) as e:
+        return {"rc": -1, "stdout": "", "skipped": str(e)}
+    lines: list[str] = []
+    if proc.stdout is not None:
+        async for line in proc.stdout:
+            lines.append(line)
+    rc = await proc.wait()
+    return {"rc": rc, "stdout": "".join(lines)}

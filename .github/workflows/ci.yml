@@ -118,6 +118,11 @@ jobs:
       # sitting on a "Terminate batch job (Y/N)?" prompt that no CI stdin
       # ever answers (run 45750280136 stalled 72 minutes that way). The
       # shell-script shim has no batch layer - a kill fails fast instead.
+      - name: patchelf for directory-unit tests
+        if: needs.changes.outputs.code == 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.code == 'true'
         shell: bash
@@ -765,6 +770,22 @@ jobs:
                   name: {"path": path, "exists": _b_os.path.isfile(path)}
                   for name, path in m.items()
               }
+
+
+          @expose
+          async def binaries_selftest_unit() -> dict:
+              import pylair
+
+              try:
+                  proc = await pylair.proc.spawn("pylair-unit-helper")
+              except (KeyError, RuntimeError) as e:
+                  return {"rc": -1, "stdout": "", "skipped": str(e)}
+              lines = []
+              if proc.stdout is not None:
+                  async for line in proc.stdout:
+                      lines.append(line)
+              rc = await proc.wait()
+              return {"rc": rc, "stdout": "".join(lines)}
           PYEOF
 
       - name: Add a native-wheel dependency (numpy)
@@ -807,6 +828,53 @@ jobs:
             echo "[tool.pylair.binaries.pylair-test-helper.$TRIPLE]"
             echo "path = \"vendor/pylair-test-helper$EXE\""
             echo "sha256 = \"$SHA\""
+          } >> pyproject.toml
+
+          # Directory-unit acceptance fixture (decision 0014 sec. 2): a
+          # Rust cdylib plus an executable dynamically linked to it. The
+          # library is a sibling, not on any system search path, so the
+          # installed executable runs only when the build-time loader
+          # rewrite is correct for this OS. Windows needs no rewrite: its
+          # loader searches the executable's directory first.
+          UNIT_DIR="vendor/pylair-unit-helper"
+          mkdir -p "$UNIT_DIR"
+          UNIT_EXE="unit-helper"
+          if [ "$RUNNER_OS" = "Windows" ]; then UNIT_EXE="unit-helper.exe"; fi
+          (
+            cd "$UNIT_DIR"
+            rustc --crate-type cdylib --crate-name unitanswer \
+              "$GITHUB_WORKSPACE/fixtures/unit-helper/lib.rs"
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              cp unitanswer.dll.lib unitanswer.lib
+            fi
+            rustc -O "$GITHUB_WORKSPACE/fixtures/unit-helper/main.rs" \
+              -L . -l dylib=unitanswer -o "$UNIT_EXE"
+            rm -f unitanswer.lib unitanswer.dll.lib unitanswer.dll.exp unitanswer.pdb unit-helper.pdb
+          )
+          echo 'MIT license text for the pylair unit helper fixture.' > licenses/unit-helper.txt
+          node - "$UNIT_DIR" "vendor/pylair-unit-helper.manifest.json" <<'NODEEOF'
+          const fs = require("fs");
+          const path = require("path");
+          const crypto = require("crypto");
+          const [dir, out] = process.argv.slice(2);
+          const entries = {};
+          for (const name of fs.readdirSync(dir).sort()) {
+            const p = path.join(dir, name);
+            if (!fs.statSync(p).isFile()) throw new Error(`unexpected non-file in fixture unit: ${name}`);
+            entries[name] = crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+          }
+          fs.writeFileSync(out, JSON.stringify(entries, null, 2) + "\n");
+          NODEEOF
+          {
+            echo ""
+            echo "[tool.pylair.binaries.pylair-unit-helper]"
+            echo 'license = "MIT"'
+            echo 'license_file = "licenses/unit-helper.txt"'
+            echo ""
+            echo "[tool.pylair.binaries.pylair-unit-helper.$TRIPLE]"
+            echo "path = \"vendor/pylair-unit-helper\""
+            echo "manifest = \"vendor/pylair-unit-helper.manifest.json\""
+            echo "executable = \"$UNIT_EXE\""
           } >> pyproject.toml
       - name: pylair build (stages interpreter, env, prunes, tauri build)
         working-directory: ${{ env.APP_DIR }}
@@ -912,6 +980,10 @@ jobs:
                 echo "binaries skipped on a --local leg: the helper must resolve here" >&2
                 exit 1
               fi
+              if grep -q "\"binary-unit\":\"skipped" "$f"; then
+                echo "binary-unit skipped on a --local leg: the dynamically linked fixture must run here" >&2
+                exit 1
+              fi
             done
             # WindowDestroyed runs on the main thread — the rc.3 window-close
             # crash lived there; open+close under xvfb keeps it covered.
@@ -958,6 +1030,10 @@ jobs:
           fi
           if grep -q '"binaries":"skipped' /tmp/wst.log; then
             echo "binaries skipped on a --local leg: the helper must resolve here" >&2
+            exit 1
+          fi
+          if grep -q '"binary-unit":"skipped' /tmp/wst.log; then
+            echo "binary-unit skipped on a --local leg: the dynamically linked fixture must run here" >&2
             exit 1
           fi
           # WindowDestroyed on the main thread — the rc.3 window-close panic.
@@ -1023,6 +1099,10 @@ jobs:
           }
           if (Select-String -Path $out -Pattern '"binaries":"skipped' -Quiet -ErrorAction SilentlyContinue) {
             Write-Error "binaries skipped on a --local leg: the helper must resolve here"
+            exit 1
+          }
+          if (Select-String -Path $out -Pattern '"binary-unit":"skipped' -Quiet -ErrorAction SilentlyContinue) {
+            Write-Error "binary-unit skipped on a --local leg: the dynamically linked fixture must run here"
             exit 1
           }
           # WindowDestroyed on the main thread — the rc.3 window-close panic

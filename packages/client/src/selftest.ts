@@ -891,6 +891,37 @@ async function selfTestOwner(spec: SelfTestSpec): Promise<void> {
       }
     }
   }
+  // Directory units (decision 0014 sec. 2): the fixture executable is
+  // dynamically linked against its sibling library. Only a successful
+  // pylair.proc run whose stdout is the library function's marker proves
+  // the installed loader resolved that sibling. The fixture exists only
+  // on legs that declare the unit; when it exists there is no skip path.
+  {
+    let unit: unknown;
+    let fixtureGone = false;
+    try {
+      unit = await within(call("binaries_selftest_unit", {}), 30_000, "binaries_selftest_unit");
+    } catch (e) {
+      if (e instanceof PythonError && e.code === -32601) fixtureGone = true;
+      else {
+        checks["binary-unit"] = `FAIL: ${e instanceof Error ? e.message : String(e)}`;
+        ok = false;
+        fixtureGone = true;
+      }
+    }
+    if (fixtureGone && checks["binary-unit"] === undefined) {
+      checks["binary-unit"] = "skipped: backend has no binaries_selftest_unit fixture";
+    } else if (!fixtureGone) {
+      const r = (unit ?? {}) as { rc?: number; stdout?: string; skipped?: string };
+      if (r.skipped) checks["binary-unit"] = `skipped: unit helper not resolved in this run (${r.skipped.split("\n")[0]})`;
+      else if (r.rc === 0 && r.stdout?.includes("unit-library-answer")) checks["binary-unit"] = "ok";
+      else {
+        checks["binary-unit"] =
+          `FAIL: unit helper rc=${String(r.rc)} stdout=${JSON.stringify(r.stdout ?? "")}`;
+        ok = false;
+      }
+    }
+  }
   // Per-function permissions: win-b's capability denies `spec.add`. The
   // owner (main) just called it successfully (the "call" check above), so a
   // pass here means the denial is per window, not global. The fixture exists

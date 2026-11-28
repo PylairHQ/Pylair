@@ -8,6 +8,37 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### External binaries: directory units (decision 0014)
+
+- **`executable` now declares a directory unit**: an executable plus its
+  companion shared libraries, staged as a tree instead of one
+  externalBin file. Units can come from a hash-verified zip or tar.gz
+  url, or from a vendored directory plus a checked-in manifest mapping
+  every relative file to its sha256. Archive extraction validates every
+  path before writing, preserves in-unit symlinks and executable bits,
+  and rejects absolute paths, `..` components and escaping links with
+  the sec. 2 error format.
+- **Units install through the resources payload** at
+  `binaries/<name>/`, with `binaries.json` entries shaped
+  `{"shape": "unit", "root": "payload", "path": "<name>/<executable>"}`;
+  `pylair dev` stages the same layout under `.pylair/binaries/<name>/`.
+  Single-file declarations are unchanged.
+- **Per-OS loader rewriting and signing**: macOS rewrites non-system
+  Mach-O install names to `@rpath` and adds `@loader_path` rpaths, then
+  re-signs nested code innermost-first (real identity and hardened
+  runtime when configured, ad-hoc otherwise); Linux rewrites ELF rpaths
+  to `$ORIGIN` entries with patchelf and fails actionably when patchelf
+  is absent; Windows needs no loader rewriting and Authenticode-signs
+  unit executables and DLLs when signing is configured. Single-file
+  sidecars receive the same signing treatment.
+- **`pylair doctor` reports units** for the host triple with file count
+  and total size, warning above 200 MB in line with the bundle-versus-
+  lazy trade-off. `docs/binaries.md` now documents directory units,
+  including a llama-server example, GPU variants and the CUDA EULA
+  redistribution note. Acceptance CI builds a dynamically linked fixture
+  unit and proves the installed app can run it through `pylair.proc` on
+  all three operating systems.
+
 ## npm-v0.1.0-rc.35 (2026-11-27)
 
 ### External binaries: `pylair.binary()` and `pylair.proc` (decision 0014)

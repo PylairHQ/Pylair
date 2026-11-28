@@ -1,11 +1,10 @@
-/** External-binary staging (decision 0014 sec. 1-3), single-file shape:
- * resolve each declared binary for the target triple from its `path` or a
- * hash-verified cached download, extract `member` out of archives under
- * the sec. 2 extraction-safety rules, stage as
- * `src-tauri/binaries/<name>-<triple>[.exe]` for externalBin, merge the
- * conf, and write the binaries.json manifest both resolution modes read.
- * Directory units are a later release; declaring one already failed in
- * config.ts. */
+/** External-binary staging (decision 0014 sec. 1-3): resolve each declared
+ * binary for the target triple from its `path` or a hash-verified cached
+ * download. Single files extract `member` out of archives and stage as
+ * `src-tauri/binaries/<name>-<triple>[.exe]` for externalBin. Units extract
+ * or copy the whole tree under the sec. 2 safety rules into the resources
+ * payload as `binaries/<name>/`, rewrite loader paths for the host OS, and
+ * both shapes are recorded in the binaries.json manifest. */
 
 import { createHash } from "node:crypto";
 import {
@@ -26,6 +25,12 @@ import { x as untar, t as listTar } from "tar";
 import type { BinaryDecl, BinaryTarget } from "../config.js";
 import { hostTriple } from "./pbs.js";
 import { downloadWithRetry } from "./download.js";
+import {
+  copyDirectoryUnit,
+  extractUnitArchive,
+  markExecutable,
+  rewriteUnitLoaders,
+} from "./units.js";
 
 const isWin = platform() === "win32";
 
@@ -234,12 +239,12 @@ export async function resolveBinaryBytes(
     const stat = statSync(p);
     if (stat.isDirectory())
       throw new BinaryStageError(
-        `binaries.${name}: directory units land in a later release - path ${target.path} is a directory; ` +
-          `single-file binaries need a file path, unit trees are not staged yet`,
+        `binaries.${name}: path ${target.path} is a directory but no executable key declares it as a unit; ` +
+          `single-file binaries need a file path`,
       );
     source = readFileSync(p);
   } else {
-    const cache = await fetchBinaryToCache(target.url!, target.sha256, opts.cacheDir, {
+    const cache = await fetchBinaryToCache(target.url!, target.sha256!, opts.cacheDir, {
       get: opts.get,
     });
     source = readFileSync(cache);
@@ -269,9 +274,50 @@ export function missingTargetError(name: string, triple: string): BinaryStageErr
   );
 }
 
-/** Stage every declared binary for `triple` into `src-tauri/binaries/` as
- * externalBin expects (`<name>-<triple>[.exe]`), executable bit set on
- * POSIX. Returns the staged names. */
+export interface StagedBinary {
+  name: string;
+  shape: "file" | "unit";
+  /** Executable path inside the unit, units only. */
+  executable?: string;
+}
+
+/** Stage one unit into `destUnitDir` and rewrite its load commands for
+ * the host OS. `destUnitDir` is the exact tree that ships or is used in
+ * dev, so rewriting once here covers both modes. */
+async function stageUnitTree(
+  name: string,
+  target: BinaryTarget,
+  destUnitDir: string,
+  opts: { cacheDir: string; appDir: string; targetTriple: string; get?: typeof httpsGet },
+): Promise<void> {
+  try {
+    if (target.path) {
+      const source = join(opts.appDir, target.path);
+      const manifest = join(opts.appDir, target.manifest!);
+      copyDirectoryUnit(source, destUnitDir, manifest, name);
+    } else {
+      const cache = await fetchBinaryToCache(target.url!, target.sha256!, opts.cacheDir, {
+        get: opts.get,
+      });
+      extractUnitArchive(readFileSync(cache), destUnitDir, name);
+    }
+    markExecutable(destUnitDir, target.executable!);
+    rewriteUnitLoaders(destUnitDir, opts.targetTriple, name);
+  } catch (e) {
+    if ((e as Error).message.startsWith("error: archive for binaries.")) throw e;
+    throw new BinaryStageError(
+      (e as Error).message.startsWith(`binaries.${name}`)
+        ? (e as Error).message
+        : `binaries.${name}: ${(e as Error).message}`,
+    );
+  }
+}
+
+/** Stage every declared binary for `triple`. Single files land in
+ * `src-tauri/binaries/` as externalBin expects (`<name>-<triple>[.exe]`);
+ * units land as resources payload trees in
+ * `src-tauri/resources/binaries/<name>/`. Returns one record per staged
+ * binary in declaration order. */
 export async function stageBuildBinaries(
   appDir: string,
   tauriDir: string,
@@ -279,24 +325,35 @@ export async function stageBuildBinaries(
   triple: string,
   cacheDir: string,
   opts?: { get?: typeof httpsGet },
-): Promise<string[]> {
+): Promise<StagedBinary[]> {
   const names = Object.keys(binaries);
   if (!names.length) return [];
   const outDir = join(tauriDir, "binaries");
+  const resourcesDir = join(tauriDir, "resources", "binaries");
   mkdirSync(outDir, { recursive: true });
   const windows = tripleIsWindows(triple);
-  const staged: string[] = [];
+  const staged: StagedBinary[] = [];
   for (const name of names) {
     const decl = binaries[name]!;
     const target = decl.targets[triple];
     if (!target) throw missingTargetError(name, triple);
+    if (target.executable) {
+      await stageUnitTree(name, target, join(resourcesDir, name), {
+        cacheDir,
+        appDir,
+        targetTriple: triple,
+        get: opts?.get,
+      });
+      staged.push({ name, shape: "unit", executable: target.executable });
+      continue;
+    }
     const bytes = await resolveBinaryBytes(name, target, { cacheDir, appDir, get: opts?.get });
     const suffix = windows ? ".exe" : "";
     const dest = join(outDir, `${name}-${triple}${suffix}`);
     writeFileSync(join(outDir, `.${name}.part`), bytes);
     renameSync(join(outDir, `.${name}.part`), dest);
     if (!isWin) chmodSync(dest, 0o755);
-    staged.push(name);
+    staged.push({ name, shape: "file" });
   }
   return staged;
 }
@@ -308,8 +365,12 @@ export async function stageBuildBinaries(
  * colliding with a declared name) are left exactly as they are. The conf
  * is build-tree state - the diff is reviewable in git, same precedent as
  * the updater version sync. Returns the list of changes made. */
-export function mergeExternalBin(tauriDir: string, names: string[]): string[] {
-  if (!names.length) return [];
+export function mergeExternalBin(
+  tauriDir: string,
+  names: string[],
+  includeResources = names.length > 0,
+): string[] {
+  if (!names.length && !includeResources) return [];
   const confPath = join(tauriDir, "tauri.conf.json");
   const conf = JSON.parse(readFileSync(confPath, "utf-8"));
   conf.bundle ??= {};
@@ -364,22 +425,20 @@ export function mergeExternalBin(tauriDir: string, names: string[]): string[] {
 }
 
 /** Write the binaries.json manifest exactly per the 0014 sec. 2 schema
- * the crate parses: shape "file", root "exe_dir", path the installed
- * sidecar name (triple suffix stripped by the bundler). Returns the
- * manifest path. */
+ * the crate parses: files root at `exe_dir`; units root at `payload` and
+ * point at `<name>/<executable>`. Returns the manifest path. */
 export function writeBinariesManifest(
   binariesDir: string,
-  names: string[],
+  staged: StagedBinary[],
   windows: boolean,
 ): string {
   mkdirSync(binariesDir, { recursive: true });
   const entries: Record<string, unknown> = {};
-  for (const name of [...names].sort()) {
-    entries[name] = {
-      shape: "file",
-      root: "exe_dir",
-      path: installedBinaryName(name, windows),
-    };
+  for (const bin of [...staged].sort((a, b) => a.name.localeCompare(b.name))) {
+    entries[bin.name] =
+      bin.shape === "unit"
+        ? { shape: "unit", root: "payload", path: `${bin.name}/${bin.executable}` }
+        : { shape: "file", root: "exe_dir", path: installedBinaryName(bin.name, windows) };
   }
   const doc = JSON.stringify({ version: 1, binaries: entries });
   const out = join(binariesDir, "binaries.json");
@@ -389,9 +448,10 @@ export function writeBinariesManifest(
 
 /** `pylair dev` binary resolution (0014 sec. 3): the declared `path` for
  * the host triple wins; otherwise the hash-verified download lands in the
- * cache once and is reused afterwards. Staged flat into
- * `.pylair/binaries/<name>[.exe]` next to the manifest. Returns the
- * binaries dir when anything was staged, undefined otherwise. */
+ * cache once and is reused afterwards. Files stage flat into
+ * `.pylair/binaries/`; units stage into `.pylair/binaries/<name>/` with the
+ * same layout they install with. Returns the binaries dir when anything
+ * was staged, undefined otherwise. */
 export async function prepareDevBinaries(
   appDir: string,
   binaries: Record<string, BinaryDecl>,
@@ -404,17 +464,22 @@ export async function prepareDevBinaries(
   const cacheDir = join(appDir, ".pylair", "cache");
   mkdirSync(dir, { recursive: true });
   const windows = tripleIsWindows(triple);
-  const staged: string[] = [];
+  const staged: StagedBinary[] = [];
   for (const name of names) {
     const decl = binaries[name]!;
     const target = decl.targets[triple];
     if (!target) throw missingTargetError(name, triple);
+    if (target.executable) {
+      await stageUnitTree(name, target, join(dir, name), { cacheDir, appDir, targetTriple: triple, get: opts?.get });
+      staged.push({ name, shape: "unit", executable: target.executable });
+      continue;
+    }
     const bytes = await resolveBinaryBytes(name, target, { cacheDir, appDir, get: opts?.get });
     const dest = join(dir, installedBinaryName(name, windows));
     writeFileSync(`${dest}.part`, bytes);
     renameSync(`${dest}.part`, dest);
     if (!isWin) chmodSync(dest, 0o755);
-    staged.push(name);
+    staged.push({ name, shape: "file" });
   }
   writeBinariesManifest(dir, staged, windows);
   return dir;
