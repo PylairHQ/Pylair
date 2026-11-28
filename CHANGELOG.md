@@ -8,6 +8,8 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.37 (unreleased)
+
 ### Learning path
 
 - `docs/learn/` is a hands-on newcomer path built around Inkwell, a small
@@ -19,8 +21,9 @@ what the GitHub releases page publishes.
   the complete app state after each guide, and CI typechecks every step,
   validates shipping and binary declarations without building installers,
   drives its exposed Python functions through the runtime harness, tests the
-  binary export and Blob path with the repo's helper fixture, and checks
-  marked guide snippets verbatim against the example files.
+  binary export and Blob path with the repo's helper fixture, smoke-tests the
+  sparse-checkout path, guards all five steps against registry-pin drift,
+  and checks marked guide snippets verbatim against the example files.
 - The `create-pylair` finish block now points newcomers at the first
   learning-path guide.
 - `pylair dev` no longer prints a spurious "codegen failed" warning when

@@ -1,6 +1,6 @@
 [project]
 name = "pylair"
-version = "0.1.0-rc.21"
+version = "0.1.0-rc.22"
 description = "Pylair Python runtime: @expose decorator, protocol server, task runner, cancellation, schema export"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
