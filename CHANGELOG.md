@@ -8,6 +8,8 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+## npm-v0.1.0-rc.36 (2026-11-28)
+
 ### External binaries: directory units (decision 0014)
 
 - **`executable` now declares a directory unit**: an executable plus its
@@ -18,19 +20,33 @@ what the GitHub releases page publishes.
   path before writing, preserves in-unit symlinks and executable bits,
   and rejects absolute paths, `..` components and escaping links with
   the sec. 2 error format.
+- **Directory sources are manifest-verified**: the vendored tree is
+  copied without modification, then the staged copy must match the
+  checked-in path-to-sha256 manifest exactly. Missing, extra and
+  mismatched files are all build errors naming the offenders, and
+  re-staging removes stale files idempotently.
 - **Units install through the resources payload** at
   `binaries/<name>/`, with `binaries.json` entries shaped
   `{"shape": "unit", "root": "payload", "path": "<name>/<executable>"}`;
   `pylair dev` stages the same layout under `.pylair/binaries/<name>/`.
   Single-file declarations are unchanged.
-- **Per-OS loader rewriting and signing**: macOS rewrites non-system
-  Mach-O install names to `@rpath` and adds `@loader_path` rpaths, then
-  re-signs nested code innermost-first (real identity and hardened
-  runtime when configured, ad-hoc otherwise); Linux rewrites ELF rpaths
-  to `$ORIGIN` entries with patchelf and fails actionably when patchelf
-  is absent; Windows needs no loader rewriting and Authenticode-signs
-  unit executables and DLLs when signing is configured. Single-file
-  sidecars receive the same signing treatment.
+- **Per-OS loader rewriting and dependency validation**: macOS detects
+  Mach-O files by magic bytes, validates before rewriting that every
+  non-system dependency resolves to a real file or valid in-unit symlink
+  with that basename, rewrites non-system install names to `@rpath`,
+  removes absolute and unwanted loader-relative rpaths, and adds the
+  computed `@loader_path` set. Linux skips fully static ELF files,
+  rewrites dynamic ELF rpaths to `$ORIGIN` entries with patchelf, warns
+  for `NEEDED` libraries legitimately supplied by the system, and fails
+  actionably when patchelf is absent. Windows needs no loader rewriting
+  because its loader searches the executable's own directory first.
+- **Unit signing**: rewriting invalidates upstream signatures, so macOS
+  unit members are re-signed innermost-first with the app identity,
+  hardened runtime and secure timestamp when signing is configured, or
+  ad-hoc otherwise; an unsigned nested dylib can fail to load even in an
+  unsigned development build. Windows unit executables and DLLs are
+  Authenticode-signed when signing is configured. Single-file sidecars
+  receive the same signing treatment.
 - **`pylair doctor` reports units** for the host triple with file count
   and total size, warning above 200 MB in line with the bundle-versus-
   lazy trade-off. `docs/binaries.md` now documents directory units,

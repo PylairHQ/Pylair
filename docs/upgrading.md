@@ -14,7 +14,7 @@ Pylair ships as three independent packages across three registries:
 | `pylair` | PyPI | `pyproject.toml` (+ `uv.lock`) |
 
 **The numbers move independently and are not expected to match.** npm
-`0.1.0-rc.35` pairs with crate `0.1.0-rc.28` and `pylair 0.1.0rc21` —
+`0.1.0-rc.36` pairs with crate `0.1.0-rc.28` and `pylair 0.1.0rc21` —
 that is a compatible set, not skew. Each npm release tag names the crate
 and PyPI versions that pair with it, and the CLI carries that mapping in
 its bundled compatibility manifest (`packages/cli/src/compat.json` — the

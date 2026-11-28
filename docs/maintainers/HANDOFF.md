@@ -531,6 +531,29 @@ below was skipped for rc.20 only.
      arming (all three resolved versions are already past their
      floors), so a `blob` skip still fails the leg on every OS.
 
+  The rc.36 train is npm-only. PR 215 shipped directory binary units
+  (decision 0014 PR B): declaration, safe archive extraction,
+  manifest-verified directory sources, per-OS loader rewriting and
+  dependency validation, unit signing, doctor size reporting and the
+  installed-app acceptance fixture. All of that landed in the npm-owned
+  CLI/scaffold/test surface; the crate's `shape: "unit"` manifest
+  resolution and the Python `pylair.binary`/`pylair.proc` API already
+  shipped in rc.35, and neither `crates/` nor `python/` changed since
+  then. Crate `tauri-plugin-pylair` therefore stays `0.1.0-rc.28` and
+  `pylair` stays `0.1.0rc21`: there is no crates.io or PyPI publish in
+  this train. This pins commit moves only the npm trio to
+  `0.1.0-rc.36` (compat.json, all three package.json versions, the
+  compat.ts pairing comment, the regenerated golden, the package README
+  install lines and the upgrading.md pairing); both template
+  `Cargo.lock` files stay untouched because the crate pin and checksum
+  do not move. Remaining order:
+
+  1. pack-mode acceptance green on this commit (the scaffolded crate
+     rc.28 + pylair rc21 pins are already live);
+  2. the npm trio under `--tag next`;
+  3. registry acceptance with `source=registry` and
+     `expect_version 0.1.0-rc.36`.
+
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 
 W3 adds the framework adapters on top of the W1 launcher. Still no
