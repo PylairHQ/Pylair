@@ -1,2 +1,2 @@
 # Locked dependencies bundled into the installer by `pylair build`.
-pylair==0.1.0rc21
+pylair==0.1.0rc22

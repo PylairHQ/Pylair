@@ -8,7 +8,7 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-## npm-v0.1.0-rc.37 (unreleased)
+## npm-v0.1.0-rc.37 (2026-11-28)
 
 ### Learning path
 
@@ -32,6 +32,10 @@ what the GitHub releases page publishes.
 - Snapshot bookkeeping writes now use the same bounded Windows atomic-replace
   retry as the `current` pointer, so transient scanner or indexer denials do
   not fail a model download.
+- Fresh scaffolds and the learning examples constrain `@tauri-apps/api` and
+  `@tauri-apps/cli` to the 2.12 minor line matching the shipped Cargo.lock, so
+  npm cannot resolve a newer minor that Tauri's build-time version check
+  rejects.
 
 ## npm-v0.1.0-rc.36 (2026-11-28)
 

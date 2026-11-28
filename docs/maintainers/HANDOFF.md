@@ -554,6 +554,34 @@ below was skipped for rc.20 only.
   3. registry acceptance with `source=registry` and
      `expect_version 0.1.0-rc.36`.
 
+  The rc.37 train is PyPI-plus-npm, with the crate unchanged. PR 219
+  bumped only `python/pylair` to `0.1.0rc22` and moved the learning-path
+  changelog entries under the rc.37 tag; the PyPI publish was therefore
+  pylair-only, and `tauri-plugin-pylair` stays `0.1.0-rc.28` with no
+  crates.io republish. This pins commit moves the npm trio to
+  `0.1.0-rc.37` in one pass (compat.json, all three package.json
+  versions, the compat.ts pairing comment, the regenerated golden, the
+  package README install lines and the upgrading.md pairing). It is the
+  first pins train that also moves `examples/learn`: all five steps pin
+  npm rc.37 and pylair rc.22, their package-locks regenerate against the
+  packed rc.37 tarballs, their uv.lock files move only pylair, and their
+  Cargo.toml/Cargo.lock crate pins stay at rc.28. Both template
+  `Cargo.lock` files are untouched for the same reason. The scaffold and
+  learning examples also constrain `@tauri-apps/api` and
+  `@tauri-apps/cli` to the 2.12 minor line because Tauri's installer
+  build rejects an npm API a minor ahead of the locked crate. Because npm
+  rc.37 is not published when this pins PR runs, `check-learn-ts` packs
+  the checkout's client and cli tarballs and serves them through a
+  loopback npm-registry shim while reproducing the examples' registry
+  install; the committed package-lock integrities are therefore the exact
+  bytes npm publish must preserve. Remaining order:
+
+  1. pack-mode acceptance green on this commit (the scaffolded crate
+     rc.28 + pylair rc.22 pins are already live);
+  2. the npm trio under `--tag next`;
+  3. registry acceptance with `source=registry` and
+     `expect_version 0.1.0-rc.37`.
+
 ## Wrap mode W3 (Gradio and Streamlit adapters), on branch `wrap-w3`
 
 W3 adds the framework adapters on top of the W1 launcher. Still no

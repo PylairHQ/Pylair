@@ -11,13 +11,13 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pylair", specifier = "==0.1.0rc21" }]
+requires-dist = [{ name = "pylair", specifier = "==0.1.0rc22" }]
 
 [[package]]
 name = "pylair"
-version = "0.1.0rc21"
+version = "0.1.0rc22"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8f/a1/70de3b0630ee066a5052955ea450afd526be4182953b33165af95c931745/pylair-0.1.0rc21.tar.gz", hash = "sha256:508a50e0e46b1e4991aca5bbc0c51856ca7c049d4d9456737a13a4e547f71b7f", size = 329534, upload-time = "2026-11-27T22:31:25.892Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/66/df34b7aafadbd5f6c587dd7905ab0965569b87e1e0d089f42ad20526cb20/pylair-0.1.0rc22.tar.gz", hash = "sha256:13ba222ab836637f17cd19b6fec1eacc3cb83efd292bf4e1077ca2923f24164f", size = 333247, upload-time = "2026-11-28T12:13:15.113Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/b4/c908abf2773a557bd10ad2ad6e77b6486475445a41f20de892f1a4f32cfe/pylair-0.1.0rc21-py3-none-any.whl", hash = "sha256:2a4da0f40332fdff7cf8d20a471355abe635ffb4782b343255e946070c08ffea", size = 130678, upload-time = "2026-11-27T22:31:24.559Z" },
+    { url = "https://files.pythonhosted.org/packages/be/c5/c94abf34121212a02cf54b2a018f41c6f522deee667169ebf2234fd01280/pylair-0.1.0rc22-py3-none-any.whl", hash = "sha256:34632f6aedaf5e116d7c71dfc5eee39e4c9401753262a69bc32333c875ea8ff0", size = 130733, upload-time = "2026-11-28T12:13:13.788Z" },
 ]
