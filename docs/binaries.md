@@ -88,15 +88,23 @@ building for the OS on that OS (there is no cross-OS staging):
 - **macOS:** every Mach-O file, detected by magic bytes rather than
   extension, has non-system install names rewritten to
   `@rpath/<basename>` and rpaths added relative to `@loader_path` for
-  each unit directory containing Mach-O files. Rewriting invalidates
-  upstream signatures, so Pylair signs the staged code again: with the
-  app identity and hardened runtime when signing is configured, ad-hoc
-  otherwise. An unsigned nested dylib can fail to load even in an
-  unsigned development build.
-- **Linux:** every ELF file gets `$ORIGIN`-relative rpaths with
-  `patchelf`. `patchelf` is a required Linux prerequisite; if it is
-  missing the build fails with an actionable error. `LD_LIBRARY_PATH`
-  launcher wrappers are deliberately not used.
+  each unit directory containing Mach-O files. Before rewriting, every
+  non-system dependency must resolve to a file or valid in-unit symlink
+  with that basename; a missing one fails the build and names both files.
+  Existing absolute rpaths, and loader-relative rpaths outside the
+  computed set, are removed rather than leaked into users' loader
+  searches. Rewriting invalidates upstream signatures, so Pylair signs
+  the staged code again: with the app identity, hardened runtime and a
+  secure timestamp when signing is configured, ad-hoc otherwise. An
+  unsigned nested dylib can fail to load even in an unsigned development
+  build.
+- **Linux:** every dynamic ELF file gets `$ORIGIN`-relative rpaths with
+  `patchelf`. Fully static ELF files have no dynamic section and are
+  skipped. `patchelf` is a required Linux prerequisite; if it is missing
+  the build fails with an actionable error. A `NEEDED` library absent
+  from the unit produces a warning rather than a failure because libc,
+  libstdc++ and similar libraries are legitimately system-provided.
+  `LD_LIBRARY_PATH` launcher wrappers are deliberately not used.
 - **Windows:** nothing is rewritten. The Windows loader searches the
   executable's own directory first, which is exactly the unit layout.
   When Windows signing is configured, every `.exe` and `.dll` in the

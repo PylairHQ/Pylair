@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ui } from "../ui/index.js";
 import { run } from "./util.js";
+import { isMachOBytes } from "./units.js";
 
 // ── hdiutil with retries ──────────────────────────────────────────────
 // hdiutil intermittently fails when a system process holds the image
@@ -86,18 +87,12 @@ export function runHdiutil(o: HdiutilOps, args: string[]): void {
 }
 
 // ── macOS ad-hoc signing ──────────────────────────────────────────────
-// Mach-O magic numbers, read as the first BE u32 — includes the
-// byte-swapped forms and both fat headers.
-const MACHO_MAGIC = new Set([
-  0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
-  0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca,
-]);
-
 function isMachO(p: string): boolean {
   const fd = openSync(p, "r");
   try {
-    const b = Buffer.alloc(4);
-    return readSync(fd, b, 0, 4, 0) === 4 && MACHO_MAGIC.has(b.readUInt32BE(0));
+    const b = Buffer.alloc(8);
+    const n = readSync(fd, b, 0, 8, 0);
+    return isMachOBytes(n === 8 ? b : b.subarray(0, n));
   } finally {
     closeSync(fd);
   }
@@ -222,6 +217,13 @@ function machOSharedObject(p: string): boolean {
   return r.stdout.split(/\r?\n/).slice(1).some((line) => line.trim().length > 0);
 }
 
+export function macCodesignArgs(file: string, identity?: string): string[] {
+  const args = ["--force", "--sign", identity ?? "-"];
+  if (identity) args.push("--options", "runtime", "--timestamp");
+  args.push(file);
+  return args;
+}
+
 /** Sign every Mach-O external binary and unit member. Shared objects are
  * signed innermost-first before executables, matching the bundle's signing
  * order. Real identities get the hardened runtime; unsigned builds still
@@ -233,12 +235,7 @@ export function signStagedMacBinaries(tauriDir: string, identity?: string): numb
   const libs = machos.filter(machOSharedObject).sort((a, b) => depth(b) - depth(a));
   const exes = machos.filter((p) => !libs.includes(p)).sort((a, b) => depth(b) - depth(a));
   const signed = [...libs, ...exes];
-  for (const p of signed) {
-    const args = ["--force", "--sign", identity ?? "-"];
-    if (identity) args.push("--options", "runtime");
-    args.push(p);
-    run("codesign", args, tauriDir);
-  }
+  for (const p of signed) run("codesign", macCodesignArgs(p, identity), tauriDir);
   return signed.length;
 }
 

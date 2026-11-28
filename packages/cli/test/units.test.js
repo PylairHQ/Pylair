@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 
 import {
   computeLoaderRpaths,
+  elfHasDynamicSection,
   copyDirectoryUnit,
   extractUnitArchive,
   inventoryArchive,
@@ -232,13 +233,74 @@ describe("manifest-verified directory units", () => {
   });
 });
 
+function elf64WithProgramTypes(types, littleEndian = true) {
+  const b = Buffer.alloc(64 + types.length * 56);
+  b.set([0x7f, 0x45, 0x4c, 0x46], 0);
+  b[4] = 2; // ELFCLASS64
+  b[5] = littleEndian ? 1 : 2;
+  b[6] = 1;
+  const u16 = (v, off) => (littleEndian ? b.writeUInt16LE(v, off) : b.writeUInt16BE(v, off));
+  const u32 = (v, off) => (littleEndian ? b.writeUInt32LE(v, off) : b.writeUInt32BE(v, off));
+  const u64 = (v, off) => (littleEndian ? b.writeBigUInt64LE(BigInt(v), off) : b.writeBigUInt64BE(BigInt(v), off));
+  u16(2, 16);
+  u32(1, 20);
+  u64(types.length ? 64 : 0, 32);
+  u16(64, 52);
+  u16(56, 54);
+  u16(types.length, 56);
+  types.forEach((type, i) => u32(type, 64 + i * 56));
+  return b;
+}
+
 describe("loader rewriting", () => {
+  function compileMachOFixture(dir) {
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    mkdirSync(join(dir, "lib"), { recursive: true });
+    const libC = join(dir, "libx.c");
+    const exeC = join(dir, "tool.c");
+    writeFileSync(libC, "int unit_answer(void) { return 42; }\n");
+    writeFileSync(exeC, "#include <stdio.h>\nextern int unit_answer(void);\nint main(void) { printf(\"%d\n\", unit_answer()); return 0; }\n");
+    execFileSync("cc", [
+      "-dynamiclib",
+      "-install_name",
+      "/opt/vendor/libx.dylib",
+      "-Wl,-headerpad_max_install_names",
+      libC,
+      "-o",
+      join(dir, "lib", "libx.dylib"),
+    ]);
+    execFileSync("cc", [
+      "-Wl,-headerpad_max_install_names",
+      exeC,
+      "-L",
+      join(dir, "lib"),
+      "-lx",
+      "-o",
+      join(dir, "bin", "tool"),
+    ]);
+  }
   test("Mach-O and ELF detection is by magic bytes", () => {
     assert.equal(isMachOBytes(Buffer.from([0xfe, 0xed, 0xfa, 0xcf])), true);
-    assert.equal(isMachOBytes(Buffer.from([0xca, 0xfe, 0xba, 0xbe])), true);
+    const fat = Buffer.alloc(8);
+    fat.writeUInt32BE(0xcafebabe, 0);
+    fat.writeUInt32BE(2, 4);
+    assert.equal(isMachOBytes(fat), true);
+    const javaClass = Buffer.alloc(8);
+    javaClass.writeUInt32BE(0xcafebabe, 0);
+    javaClass.writeUInt16BE(0, 4);
+    javaClass.writeUInt16BE(45, 6);
+    assert.equal(isMachOBytes(javaClass), false, "Java class magic is not a fat Mach-O");
+    assert.equal(isMachOBytes(Buffer.from([0xca, 0xfe, 0xba, 0xbe])), false, "fat magic requires nfat_arch");
     assert.equal(isElfBytes(Buffer.from([0x7f, 0x45, 0x4c, 0x46])), true);
     assert.equal(isElfBytes(Buffer.from("MZ90")), false);
     assert.equal(isMachOBytes(Buffer.from("libx.so")), false);
+  });
+
+  test("ELF dynamic-section detection identifies static files", () => {
+    assert.equal(elfHasDynamicSection(elf64WithProgramTypes([1])), false, "PT_LOAD only means no dynamic section");
+    assert.equal(elfHasDynamicSection(elf64WithProgramTypes([1, 2])), true, "PT_DYNAMIC present");
+    assert.equal(elfHasDynamicSection(elf64WithProgramTypes([1], false)), false, "big-endian static header");
+    assert.equal(elfHasDynamicSection(Buffer.from([0x7f, 0x45, 0x4c, 0x46])), null, "truncated header is not silently skipped");
   });
 
   test("computed rpaths: flat and nested trees", () => {
@@ -265,6 +327,16 @@ describe("loader rewriting", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("Linux static ELF files are skipped", () => {
+    if (platform() !== "linux") return;
+    const dir = tmp("elfstatic");
+    const source = join(dir, "static.c");
+    writeFileSync(source, "int main(void) { return 0; }\n");
+    execFileSync("cc", ["-static", source, "-o", join(dir, "tool")]);
+    assert.deepEqual(rewriteUnitLoaders(dir, undefined, "unit"), { kind: "elf", rewritten: 0 });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("Linux patchelf rewrites a real ELF tree", () => {
     if (platform() !== "linux") return;
     const dir = tmp("elfrewrite");
@@ -272,9 +344,21 @@ describe("loader rewriting", () => {
     mkdirSync(join(dir, "lib"), { recursive: true });
     cpSync("/bin/true", join(dir, "bin", "tool"));
     cpSync("/bin/true", join(dir, "lib", "libx.so"));
-    const out = rewriteUnitLoaders(dir);
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (message) => warnings.push(String(message));
+    let out;
+    try {
+      out = rewriteUnitLoaders(dir, undefined, "unit");
+    } finally {
+      console.warn = originalWarn;
+    }
     assert.equal(out.kind, "elf");
     assert.equal(out.rewritten, 2);
+    assert.ok(
+      warnings.some((line) => line.includes("warning: binaries.unit: bin/tool depends on libc.so.6, which is not in the unit")),
+      `missing system-library warning, got: ${warnings.join("\n")}`,
+    );
     assert.equal(execFileSync("patchelf", ["--print-rpath", join(dir, "bin", "tool")], { encoding: "utf-8" }).trim(), "$ORIGIN:$ORIGIN/../lib");
     assert.equal(execFileSync("patchelf", ["--print-rpath", join(dir, "lib", "libx.so")], { encoding: "utf-8" }).trim(), "$ORIGIN/../bin:$ORIGIN");
     rmSync(dir, { recursive: true, force: true });
@@ -283,36 +367,43 @@ describe("loader rewriting", () => {
   test("macOS install_name_tool rewrites a real Mach-O tree", () => {
     if (platform() !== "darwin") return;
     const dir = tmp("machrewrite");
-    mkdirSync(join(dir, "bin"), { recursive: true });
-    mkdirSync(join(dir, "lib"), { recursive: true });
-    const libC = join(dir, "libx.c");
-    const exeC = join(dir, "tool.c");
-    writeFileSync(libC, "int unit_answer(void) { return 42; }\n");
-    writeFileSync(exeC, "#include <stdio.h>\nextern int unit_answer(void);\nint main(void) { printf(\"%d\\n\", unit_answer()); return 0; }\n");
-    execFileSync("cc", [
-      "-dynamiclib",
-      "-install_name",
-      "/opt/vendor/libx.dylib",
-      "-Wl,-headerpad_max_install_names",
-      libC,
-      "-o",
-      join(dir, "lib", "libx.dylib"),
-    ]);
-    execFileSync("cc", [
-      "-Wl,-headerpad_max_install_names",
-      exeC,
-      "-L",
-      join(dir, "lib"),
-      "-lx",
-      "-o",
-      join(dir, "bin", "tool"),
-    ]);
-    const out = rewriteUnitLoaders(dir);
+    compileMachOFixture(dir);
+    const tool = join(dir, "bin", "tool");
+    execFileSync("install_name_tool", ["-add_rpath", "/tmp/build/bin", tool]);
+    execFileSync("install_name_tool", ["-add_rpath", "@loader_path/elsewhere", tool]);
+    const out = rewriteUnitLoaders(dir, undefined, "unit");
     assert.equal(out.kind, "mach-o");
     assert.equal(out.rewritten, 2);
-    const rpaths = execFileSync("otool", ["-l", join(dir, "bin", "tool")], { encoding: "utf-8" });
-    assert.ok(rpaths.includes("@loader_path/../lib"), rpaths);
-    assert.equal(execFileSync(join(dir, "bin", "tool"), { encoding: "utf-8" }), "42\n");
+    const rpathsOut = execFileSync("otool", ["-l", tool], { encoding: "utf-8" });
+    const rpaths = rpathsOut
+      .split(/\r?\n/)
+      .map((line) => /^\s*path\s+(\S+)/.exec(line)?.[1])
+      .filter(Boolean);
+    assert.ok(rpaths.includes("@loader_path/../lib"), rpaths.join(","));
+    assert.equal(rpaths.includes("/tmp/build/bin"), false, "absolute build-machine rpath removed");
+    assert.equal(rpaths.includes("@loader_path/elsewhere"), false, "unwanted loader-relative rpath removed");
+    assert.equal(execFileSync(tool, { encoding: "utf-8" }), "42\n");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("macOS rewriting fails when a non-system dependency is missing", () => {
+    if (platform() !== "darwin") return;
+    const dir = tmp("machmissing");
+    compileMachOFixture(dir);
+    const tool = join(dir, "bin", "tool");
+    execFileSync("install_name_tool", [
+      "-change",
+      "/opt/vendor/libx.dylib",
+      "/opt/homebrew/opt/libomp/lib/libomp.dylib",
+      tool,
+    ]);
+    assert.throws(
+      () => rewriteUnitLoaders(dir, undefined, "llama-server"),
+      (e) =>
+        e.message ===
+        "binaries.llama-server: bin/tool depends on /opt/homebrew/opt/libomp/lib/libomp.dylib, which is not in the unit; " +
+          "add it to the unit or use a build that doesn't link it",
+    );
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -404,5 +495,21 @@ describe("staged binary signing helpers", () => {
     const { windowsSignCommandLine } = await import("../dist/build/sign.js");
     assert.equal(windowsSignCommandLine("signer /x %1 /y", "C:\a b\tool.dll"), 'signer /x "C:\a b\tool.dll" /y');
     assert.equal(windowsSignCommandLine("signer", "tool.exe"), 'signer "tool.exe"');
+  });
+
+  test("real macOS identities use a secure timestamp, ad-hoc signing does not", async () => {
+    const { macCodesignArgs } = await import("../dist/build/sign.js");
+    assert.deepEqual(macCodesignArgs("bin/tool", "Developer ID Application: Example"), [
+      "--force",
+      "--sign",
+      "Developer ID Application: Example",
+      "--options",
+      "runtime",
+      "--timestamp",
+      "bin/tool",
+    ]);
+    const adHoc = macCodesignArgs("bin/tool");
+    assert.deepEqual(adHoc, ["--force", "--sign", "-", "bin/tool"]);
+    assert.equal(adHoc.includes("--timestamp"), false);
   });
 });

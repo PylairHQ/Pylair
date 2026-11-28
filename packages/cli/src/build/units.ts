@@ -519,27 +519,41 @@ export function copyDirectoryUnit(
 
 // ---- executable format detection -------------------------------------------
 
-const MACHO_MAGIC = new Set([
-  0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
-  0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca,
-]);
+const MACHO_THIN_MAGIC = new Set([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe]);
+const MACHO_FAT_MAGIC = new Set([0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca]);
 
 export function isMachOBytes(bytes: Buffer): boolean {
-  return bytes.length >= 4 && MACHO_MAGIC.has(bytes.readUInt32BE(0));
+  if (bytes.length < 4) return false;
+  const magic = bytes.readUInt32BE(0);
+  if (MACHO_THIN_MAGIC.has(magic)) return true;
+  // 0xcafebabe is also the Java class-file magic. A fat Mach-O's next word
+  // is nfat_arch, a small count; a class file's minor/major version pair is
+  // larger for every class version this code will meet.
+  return (
+    MACHO_FAT_MAGIC.has(magic) &&
+    bytes.length >= 8 &&
+    bytes.readUInt32BE(4) >= 1 &&
+    bytes.readUInt32BE(4) <= 20
+  );
 }
 
 export function isElfBytes(bytes: Buffer): boolean {
   return bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46;
 }
 
-function magicBytes(path: string): Buffer {
+function filePrefix(path: string, length: number): Buffer {
   const fd = openSync(path, "r");
   try {
-    const b = Buffer.alloc(4);
-    return readSync(fd, b, 0, 4, 0) === 4 ? b : Buffer.alloc(0);
+    const b = Buffer.alloc(length);
+    const n = readSync(fd, b, 0, length, 0);
+    return n === length ? b : b.subarray(0, n);
   } finally {
     closeSync(fd);
   }
+}
+
+function magicBytes(path: string): Buffer {
+  return filePrefix(path, 8);
 }
 
 export function isMachOFile(path: string): boolean {
@@ -548,6 +562,36 @@ export function isMachOFile(path: string): boolean {
 
 export function isElfFile(path: string): boolean {
   return isElfBytes(magicBytes(path));
+}
+
+/** Whether an ELF header's program table contains PT_DYNAMIC. False means
+ * the file is static (or a relocatable object) and has no rpath to rewrite;
+ * null means the header is too malformed or truncated to tell, in which case
+ * patchelf remains the authority and reports the real problem. */
+export function elfHasDynamicSection(bytes: Buffer): boolean | null {
+  if (!isElfBytes(bytes) || bytes.length < 52) return null;
+  const elfClass = bytes[4];
+  const dataEncoding = bytes[5];
+  if ((elfClass !== 1 && elfClass !== 2) || (dataEncoding !== 1 && dataEncoding !== 2)) return null;
+  const is64 = elfClass === 2;
+  const little = dataEncoding === 1;
+  const minHeader = is64 ? 64 : 52;
+  if (bytes.length < minHeader) return null;
+  const u16 = (off: number): number => (little ? bytes.readUInt16LE(off) : bytes.readUInt16BE(off));
+  const u32 = (off: number): number => (little ? bytes.readUInt32LE(off) : bytes.readUInt32BE(off));
+  const u64 = (off: number): number =>
+    Number(little ? bytes.readBigUInt64LE(off) : bytes.readBigUInt64BE(off));
+  const phoff = is64 ? u64(32) : u32(28);
+  const phentsize = u16(is64 ? 54 : 42);
+  const phnum = u16(is64 ? 56 : 44);
+  const minPhentsize = is64 ? 56 : 32;
+  if (phoff === 0 || phnum === 0) return false;
+  if (phentsize < minPhentsize) return null;
+  if (phoff > bytes.length || phnum > Math.floor((bytes.length - phoff) / phentsize)) return null;
+  for (let i = 0; i < phnum; i++) {
+    if (u32(phoff + i * phentsize) === 2) return true; // PT_DYNAMIC
+  }
+  return false;
 }
 
 function regularFiles(root: string): string[] {
@@ -561,6 +605,52 @@ function regularFiles(root: string): string[] {
   };
   walk(root);
   return out.sort();
+}
+
+/** Entries a loader can resolve inside the unit: regular files and the
+ * in-unit symlinks extraction preserved. The exact basename matters - a
+ * target file under another name does not satisfy a versioned soname. */
+function unitEntryIndex(root: string): Map<string, { rel: string; link: boolean }[]> {
+  const out = new Map<string, { rel: string; link: boolean }[]>();
+  const add = (ent: { name: string }, rel: string, link: boolean): void => {
+    const entries = out.get(ent.name) ?? [];
+    entries.push({ rel, link });
+    out.set(ent.name, entries);
+  };
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, ent.name);
+      const rel = relativePosix(root, p);
+      if (ent.isDirectory()) walk(p);
+      else if (ent.isFile()) add(ent, rel, false);
+      else if (ent.isSymbolicLink()) add(ent, rel, true);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** A dependency basename is present when a regular file has that name, or
+ * when an in-unit symlink with that name resolves to an existing target.
+ * Extraction and directory validation have already rejected escaping links;
+ * statSync follows a valid in-unit chain and rejects dangling or cyclic ones. */
+function unitDependencyPresent(
+  index: Map<string, { rel: string; link: boolean }[]>,
+  root: string,
+  basename: string,
+): boolean {
+  for (const entry of index.get(basename) ?? []) {
+    if (!entry.link) return true;
+    const linkPath = join(root, ...entry.rel.split("/"));
+    const target = resolveLinkTarget(entry.rel, readlinkSync(linkPath), false);
+    if (target === null) continue;
+    try {
+      if (statSync(join(root, ...target.split("/"))).isFile()) return true;
+    } catch {
+      // Dangling and cyclic links do not satisfy the dependency.
+    }
+  }
+  return false;
 }
 
 function relDirOf(root: string, file: string): string {
@@ -638,6 +728,12 @@ function otoolRpaths(file: string): string[] {
 const systemInstallName = (name: string): boolean =>
   name.startsWith("/usr/lib/") || name.startsWith("/System/");
 
+const loaderRelativeRpath = (path: string): boolean =>
+  path === "@loader_path" ||
+  path.startsWith("@loader_path/") ||
+  path === "@executable_path" ||
+  path.startsWith("@executable_path/");
+
 function machOSharedObject(p: string): boolean {
   const r = spawnSync("otool", ["-D", p], { encoding: "utf-8" });
   if (r.status !== 0) return p.endsWith(".dylib");
@@ -663,20 +759,39 @@ function adHocSignMachOTree(unitDir: string): number {
   return files.length;
 }
 
-function rewriteMachOUnit(unitDir: string): number {
+function rewriteMachOUnit(unitDir: string, binaryName: string): number {
   const files = regularFiles(unitDir).filter(isMachOFile);
   if (!files.length) return 0;
   const codeDirs = [...new Set(files.map((f) => relDirOf(unitDir, f)))].sort();
-  let rewritten = 0;
-  for (const file of files) {
-    const args: string[] = [];
+  const metas = files.map((file) => {
     const id = otoolInstallId(file);
+    let deps = otoolInstallNames(file);
+    if (id && deps[0] === id) deps = deps.slice(1);
+    return { file, id, deps, rpaths: otoolRpaths(file) };
+  });
+
+  // Validate before the first rewrite: a missing companion library is a
+  // packaging error, never an app that only fails after installation.
+  const available = unitEntryIndex(unitDir);
+  for (const meta of metas) {
+    for (const dep of meta.deps) {
+      if (systemInstallName(dep)) continue;
+      if (!unitDependencyPresent(available, unitDir, posix.basename(dep)))
+        throw new UnitStageError(
+          `binaries.${binaryName}: ${relativePosix(unitDir, meta.file)} depends on ${dep}, which is not in the unit; ` +
+            `add it to the unit or use a build that doesn't link it`,
+        );
+    }
+  }
+
+  let rewritten = 0;
+  for (const meta of metas) {
+    const { file, id, deps } = meta;
+    const args: string[] = [];
     if (id && !systemInstallName(id)) {
       const wanted = `@rpath/${posix.basename(id)}`;
       if (id !== wanted) args.push("-id", wanted);
     }
-    let deps = otoolInstallNames(file);
-    if (id && deps[0] === id) deps = deps.slice(1);
     const changes = new Map<string, string>();
     for (const dep of deps) {
       if (systemInstallName(dep)) continue;
@@ -686,7 +801,14 @@ function rewriteMachOUnit(unitDir: string): number {
     for (const [oldName, newName] of changes) args.push("-change", oldName, newName);
     const loaderDir = relDirOf(unitDir, file);
     const wantedRpaths = computeLoaderRpaths(loaderDir, codeDirs, "@loader_path");
-    const existing = new Set(otoolRpaths(file));
+    const existing = new Set(meta.rpaths);
+    // Absolute rpaths leak the producer's build machine into every user's
+    // loader search. loader/executable-relative entries are useful only
+    // when already exactly what this layout wants; delete everything else.
+    for (const rpath of new Set(meta.rpaths)) {
+      if (!loaderRelativeRpath(rpath) || !wantedRpaths.includes(rpath))
+        args.push("-delete_rpath", rpath);
+    }
     for (const rpath of wantedRpaths) if (!existing.has(rpath)) args.push("-add_rpath", rpath);
     if (!args.length) continue;
     toolOutput(
@@ -702,20 +824,42 @@ function rewriteMachOUnit(unitDir: string): number {
 
 // ---- Linux loader rewriting -------------------------------------------------
 
-function rewriteElfUnit(unitDir: string): number {
+const PATCHELF_MISSING =
+  "patchelf is required to stage directory units on Linux. Install it (Debian/Ubuntu: sudo apt-get install patchelf) or use static single-file binaries; cross-OS staging is not supported";
+
+function rewriteElfUnit(unitDir: string, binaryName: string): number {
   const files = regularFiles(unitDir).filter(isElfFile);
   if (!files.length) return 0;
   const codeDirs = [...new Set(files.map((f) => relDirOf(unitDir, f)))].sort();
+  const available = unitEntryIndex(unitDir);
+  const missingNeeded = new Map<string, string>();
+  let rewritten = 0;
   for (const file of files) {
+    // Fully static ELF files and relocatable objects have no PT_DYNAMIC
+    // program header and therefore no rpath or NEEDED entries.
+    if (elfHasDynamicSection(filePrefix(file, 64 * 1024)) === false) continue;
+    const needed = [
+      ...new Set(
+        toolOutput("patchelf", ["--print-needed", file], PATCHELF_MISSING)
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean),
+      ),
+    ];
+    for (const lib of needed)
+      if (!available.has(lib) && !missingNeeded.has(lib))
+        missingNeeded.set(lib, relativePosix(unitDir, file));
     const loaderDir = relDirOf(unitDir, file);
     const rpath = computeLoaderRpaths(loaderDir, codeDirs, "$ORIGIN").join(":");
-    toolOutput(
-      "patchelf",
-      ["--set-rpath", rpath, file],
-      "patchelf is required to stage directory units on Linux. Install it (Debian/Ubuntu: sudo apt-get install patchelf) or use static single-file binaries; cross-OS staging is not supported",
-    );
+    toolOutput("patchelf", ["--set-rpath", rpath, file], PATCHELF_MISSING);
+    rewritten++;
   }
-  return files.length;
+  for (const [lib, dependent] of [...missingNeeded.entries()].sort())
+    console.warn(
+      `warning: binaries.${binaryName}: ${dependent} depends on ${lib}, which is not in the unit; ` +
+        `it must resolve from the system at runtime`,
+    );
+  return rewritten;
 }
 
 /** Rewrite a staged unit for the target loader when target and host are the
@@ -725,6 +869,7 @@ function rewriteElfUnit(unitDir: string): number {
 export function rewriteUnitLoaders(
   unitDir: string,
   targetTriple?: string,
+  binaryName = "unit",
 ): { kind: "mach-o" | "elf" | "none"; rewritten: number } {
   const targetOs = !targetTriple
     ? platform()
@@ -736,8 +881,8 @@ export function rewriteUnitLoaders(
           ? "linux"
           : platform();
   if (targetOs !== platform()) return { kind: "none", rewritten: 0 };
-  if (platform() === "darwin") return { kind: "mach-o", rewritten: rewriteMachOUnit(unitDir) };
-  if (platform() === "linux") return { kind: "elf", rewritten: rewriteElfUnit(unitDir) };
+  if (platform() === "darwin") return { kind: "mach-o", rewritten: rewriteMachOUnit(unitDir, binaryName) };
+  if (platform() === "linux") return { kind: "elf", rewritten: rewriteElfUnit(unitDir, binaryName) };
   return { kind: "none", rewritten: 0 };
 }
 

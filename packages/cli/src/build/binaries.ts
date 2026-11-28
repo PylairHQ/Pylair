@@ -302,7 +302,7 @@ async function stageUnitTree(
       extractUnitArchive(readFileSync(cache), destUnitDir, name);
     }
     markExecutable(destUnitDir, target.executable!);
-    rewriteUnitLoaders(destUnitDir, opts.targetTriple);
+    rewriteUnitLoaders(destUnitDir, opts.targetTriple, name);
   } catch (e) {
     if ((e as Error).message.startsWith("error: archive for binaries.")) throw e;
     throw new BinaryStageError(
