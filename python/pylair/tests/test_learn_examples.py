@@ -314,3 +314,31 @@ def test_learn05_binary_export_returns_a_blob(model_server, tmp_path):
         assert tag["size"] == len(payload)
     finally:
         _stop(rt)
+
+
+def test_learn05_tectonic_download_failure_maps_to_user_message(model_server, tmp_path):
+    model_server.add_repo("minishlab/potion-base-2M", _tiny_static_model_repo())
+    helper = _compile_test_helper(tmp_path)
+    rt = _runtime(
+        "05-going-further",
+        "testapp_learn_05",
+        tmp_path,
+        {
+            "HF_ENDPOINT": model_server.base,
+            "PYLAIR_MODELS_ALLOW_INSECURE": "1",
+            "PYLAIR_BINARIES": json.dumps({"tectonic": str(helper)}),
+            "PYLAIR_BLOB_DIR": str(tmp_path / "blobs"),
+            "PYLAIR_TEST_HELPER_NETWORK_FAILURE": "1",
+        },
+    )
+    try:
+        rt.recv()
+        rt.send(_call(1, "export_note_pdf", 1, {"name": "welcome"}))
+        response = rt.recv_until(lambda m: m.get("id") == 1, timeout=20)
+        error = response["error"]
+        assert error["message"] == (
+            "First PDF export needs an internet connection to download typesetting files"
+        )
+        assert error["data"]["type"] == "RuntimeError"
+    finally:
+        _stop(rt)

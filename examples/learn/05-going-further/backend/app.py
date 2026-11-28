@@ -238,6 +238,21 @@ def analyze_note(name: str) -> NoteAnalysis:
     longest_line = max((len(line) for line in text.splitlines()), default=0)
     return NoteAnalysis(name=name, keywords=keywords, longest_line=longest_line)
 
+
+FIRST_EXPORT_MESSAGE = (
+    "First PDF export needs an internet connection to download typesetting files"
+)
+
+
+def tectonic_needs_download(detail: str) -> bool:
+    """Recognize Tectonic's first-run support-file download failure."""
+    text = detail.lower()
+    if "please check your network connection" in text:
+        return True
+    download = any(word in text for word in ("download", "network", "offline", "connect"))
+    bundle = any(word in text for word in ("bundle", "support file", "latex support"))
+    return download and bundle
+
 _LATEX_SPECIALS = {
     "\\": r"\textbackslash{}",
     "&": r"\&",
@@ -303,6 +318,8 @@ async def export_note_pdf(name: str) -> Blob:
         output = work / "note.pdf"
         if code != 0 or not output.exists():
             detail = "".join(lines[-4:]).strip() or f"tectonic exited with {code}"
+            if tectonic_needs_download(detail):
+                raise RuntimeError(FIRST_EXPORT_MESSAGE)
             raise RuntimeError(f"PDF export failed: {detail}")
         return Blob(output.read_bytes(), mime="application/pdf")
 

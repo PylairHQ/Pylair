@@ -420,6 +420,21 @@ def analyze_note(name: str) -> NoteAnalysis:
     longest_line = max((len(line) for line in text.splitlines()), default=0)
     return NoteAnalysis(name=name, keywords=keywords, longest_line=longest_line)
 
+
+FIRST_EXPORT_MESSAGE = (
+    "First PDF export needs an internet connection to download typesetting files"
+)
+
+
+def tectonic_needs_download(detail: str) -> bool:
+    """Recognize Tectonic's first-run support-file download failure."""
+    text = detail.lower()
+    if "please check your network connection" in text:
+        return True
+    download = any(word in text for word in ("download", "network", "offline", "connect"))
+    bundle = any(word in text for word in ("bundle", "support file", "latex support"))
+    return download and bundle
+
 _LATEX_SPECIALS = {
     "\\": r"\textbackslash{}",
     "&": r"\&",
@@ -485,6 +500,8 @@ async def export_note_pdf(name: str) -> Blob:
         output = work / "note.pdf"
         if code != 0 or not output.exists():
             detail = "".join(lines[-4:]).strip() or f"tectonic exited with {code}"
+            if tectonic_needs_download(detail):
+                raise RuntimeError(FIRST_EXPORT_MESSAGE)
             raise RuntimeError(f"PDF export failed: {detail}")
         return Blob(output.read_bytes(), mime="application/pdf")
 ```
@@ -937,11 +954,15 @@ because:
   enough to be worth pinning but small enough for a tutorial;
 - it is a real document tool rather than a fixture invented for the example.
 
-Tectonic is self-contained as an executable, but its typesetting engine can
-download LaTeX support files into its own cache the first time a document
-needs them. That cache is separate from Pylair's binary cache. The binary and
-those support files are different artifacts: Pylair verifies the pinned
-binary archive, while Tectonic verifies its own support bundle.
+Tectonic is self-contained as an executable, but its typesetting engine
+fetches LaTeX support files from Tectonic's servers the first time a document
+needs them. The first PDF export therefore needs an internet connection and
+can take noticeably longer; later exports work offline from Tectonic's cache.
+That cache is separate from Pylair's binary cache. The binary and those
+support files are different artifacts: Pylair verifies the pinned binary
+archive, while Tectonic verifies its own support bundle. Inkwell still keeps
+its notes, search index inputs and embedding model local, but this export is
+not offline until that first typesetting download has happened.
 
 ## Declare and pin the binary
 
@@ -1011,6 +1032,20 @@ When **Cancel export** aborts the controller, the client cancellation reaches
 the Python task and Pylair kills the child process before surfacing the
 cancelled error. No orphaned conversion keeps running in the background.
 
+The first-run network failure is also mapped to a user-actionable error.
+When Tectonic reports that it cannot download needed typesetting files, the
+backend raises this exact message instead of leaking raw compiler output:
+
+<!-- snippet: 05-going-further/backend/app.py -->
+```python
+            if tectonic_needs_download(detail):
+                raise RuntimeError(FIRST_EXPORT_MESSAGE)
+```
+
+The bridge carries it as a structured `PythonError`, so Inkwell shows "First
+PDF export needs an internet connection to download typesetting files" in the
+status line. Other Tectonic failures keep their trimmed stderr detail.
+
 ## Return bytes as a Blob
 
 The export returns `Blob(output.read_bytes(), mime="application/pdf")`:
@@ -1054,24 +1089,29 @@ npx pylair dev
 
 The first run resolves the pinned Tectonic archive for your platform into
 `.pylair/cache/binaries/`. Choose a note, press **Export PDF**, and the PDF
-preview appears under the editor with a **Save PDF** link. Press **Cancel
-export** during a run to exercise the cancellation path.
+preview appears under the editor with a **Save PDF** link. The first export
+needs a network connection to fetch Tectonic's support files; after that it
+works offline. Press **Cancel export** during a run to exercise the
+cancellation path.
 
 ## Other direction: directory units
 
 Tectonic is the simple shape: one executable. Some tools are a tree instead.
 `llama-server`, for example, ships with shared libraries beside the server
 executable. Pylair calls that a directory unit and declares it with
-`executable` rather than `member`:
+`executable` rather than `member`. This block is illustrative, not a
+copy-paste-ready pin:
 
 ```toml
+# Illustrative shape only - verify the current release artifact and hash
+# before using a real llama-server declaration.
 [tool.pylair.binaries.llama-server]
 license = "MIT"
 license_file = "licenses/llama.cpp.txt"
 
 [tool.pylair.binaries.llama-server.x86_64-unknown-linux-gnu]
 url = "https://github.com/ggml-org/llama.cpp/releases/download/b7040/llama-b7040-bin-linux-x64.zip"
-sha256 = "..."
+sha256 = "<sha256 of the archive>"
 executable = "llama-server"
 ```
 
