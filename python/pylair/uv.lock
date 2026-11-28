@@ -1194,7 +1194,7 @@ wheels = [
 
 [[package]]
 name = "pylair"
-version = "0.1.0rc21"
+version = "0.1.0rc22"
 source = { editable = "." }
 
 [package.dev-dependencies]
