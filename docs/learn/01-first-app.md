@@ -17,7 +17,9 @@ npm install
 uv sync
 ```
 
-The scaffold prints the next commands:
+When the scaffolder asks, choose **a new UI that calls Python** and then **no**
+for auto-update. Auto-update is a later topic; this first app does not need a
+signing key. The scaffold prints the next commands:
 
 ```text
 Created inkwell/ (bridge)
