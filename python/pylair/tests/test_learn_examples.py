@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -226,5 +227,118 @@ def test_learn03_model_gating_and_search_through_runtime(model_server, tmp_path)
             if r["path"].startswith("/api/models/minishlab/potion-base-2M/tree/")
         )
         assert tree_hits == 1
+    finally:
+        _stop(rt)
+
+
+def test_learn04_shippable_state_through_runtime(model_server, tmp_path):
+    model_server.add_repo("minishlab/potion-base-2M", _tiny_static_model_repo())
+    rt = _runtime(
+        "04-shipping",
+        "testapp_learn_04",
+        tmp_path,
+        {
+            "HF_ENDPOINT": model_server.base,
+            "PYLAIR_MODELS_ALLOW_INSECURE": "1",
+        },
+    )
+    try:
+        hello = rt.recv()
+        names = {e["name"] for e in hello["params"]["exposes"]}
+        assert {
+            "list_notes",
+            "read_note",
+            "save_note",
+            "scan_notes",
+            "analyze_note",
+            "search_notes",
+        } <= names
+
+        rt.send(_call(1, "search_notes", 1, {"query": "offline desktop notes"}))
+        result = rt.recv_until(lambda m: m.get("id") == 1, timeout=30)
+        assert "result" in result, result
+        assert {h["name"] for h in result["result"]} == {"welcome", "ideas", "projects"}
+    finally:
+        _stop(rt)
+
+
+def _compile_test_helper(tmp_path: Path) -> Path:
+    suffix = ".exe" if sys.platform == "win32" else ""
+    out = tmp_path / f"pylair-test-helper{suffix}"
+    subprocess.run(
+        [
+            "rustc",
+            "-O",
+            str(REPO_ROOT / "fixtures" / "test-helper" / "main.rs"),
+            "-o",
+            str(out),
+        ],
+        check=True,
+    )
+    return out
+
+
+def test_learn05_binary_export_returns_a_blob(model_server, tmp_path):
+    model_server.add_repo("minishlab/potion-base-2M", _tiny_static_model_repo())
+    helper = _compile_test_helper(tmp_path)
+    blob_dir = tmp_path / "blobs"
+    blob_dir.mkdir()
+    rt = _runtime(
+        "05-going-further",
+        "testapp_learn_05",
+        tmp_path,
+        {
+            "HF_ENDPOINT": model_server.base,
+            "PYLAIR_MODELS_ALLOW_INSECURE": "1",
+            "PYLAIR_BINARIES": json.dumps({"tectonic": str(helper)}),
+            "PYLAIR_BLOB_DIR": str(blob_dir),
+        },
+    )
+    try:
+        rt.recv()
+        rt.send(_call(1, "export_note_pdf", 1, {"name": "welcome"}))
+        register = rt.recv_until(
+            lambda m: m.get("method") == "blob.register" or m.get("id") == 1,
+            timeout=20,
+        )
+        assert register.get("method") == "blob.register", register
+        assert register["params"]["task_id"] == 1
+        assert register["params"]["mime"] == "application/pdf"
+        payload = Path(register["params"]["path"]).read_bytes()
+        assert payload.startswith(b"%PDF-")
+
+        response = rt.recv_until(lambda m: m.get("id") == 1, timeout=20)
+        tag = response["result"]["$blob"]
+        assert tag["id"] == register["params"]["id"]
+        assert tag["mime"] == "application/pdf"
+        assert tag["size"] == len(payload)
+    finally:
+        _stop(rt)
+
+
+def test_learn05_tectonic_download_failure_maps_to_user_message(model_server, tmp_path):
+    model_server.add_repo("minishlab/potion-base-2M", _tiny_static_model_repo())
+    helper = _compile_test_helper(tmp_path)
+    rt = _runtime(
+        "05-going-further",
+        "testapp_learn_05",
+        tmp_path,
+        {
+            "HF_ENDPOINT": model_server.base,
+            "PYLAIR_MODELS_ALLOW_INSECURE": "1",
+            "PYLAIR_BINARIES": json.dumps({"tectonic": str(helper)}),
+            "PYLAIR_BLOB_DIR": str(tmp_path / "blobs"),
+            "PYLAIR_TEST_HELPER_NETWORK_FAILURE": "1",
+        },
+    )
+    try:
+        rt.recv()
+        rt.send(_call(1, "export_note_pdf", 1, {"name": "welcome"}))
+        response = rt.recv_until(lambda m: m.get("id") == 1, timeout=20)
+        error = response["error"]
+        assert error["message"] == (
+            "First PDF export needs an internet connection to download typesetting files"
+        )
+        assert error["data"]["type"] == "RuntimeError"
     finally:
         _stop(rt)

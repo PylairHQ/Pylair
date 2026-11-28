@@ -892,8 +892,6 @@ is in [docs/models.md](../models.md).
 > - `models.path()` in a warm worker resolves the verified snapshot read-only,
 >   and the loaded model can stay resident between calls.
 >
-> **Where next:** this is the end of the first learning-path installment. The
-> complete state is in
+> **Where next:** [guide 4](04-shipping.md) turns this app into an installed
+> desktop application. The complete state for this guide is in
 > [`examples/learn/03-local-model/`](../../examples/learn/03-local-model/).
-> Packaging, updates and bundled binaries continue in the next installment;
-> meanwhile [docs/build.md](../build.md) is the reference for shipping.

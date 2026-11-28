@@ -44,6 +44,9 @@ for (const step of steps) {
   run("uv", ["sync", "--frozen"], cwd);
   run("npx", ["pylair", "codegen", "--module", "backend.app", "--out", "src/api.generated.ts"], cwd);
   run("npx", ["tsc", "--noEmit"], cwd);
+  // Shipping and binary declarations are validated without building
+  // installers or requiring the host GUI toolchain in the JS lane.
+  if (/^0[45]-/.test(step)) run("node", [join(root, "scripts", "check-learn-build-config.mjs"), cwd], root);
 }
 run("node", [join(root, "scripts", "check-learn-sparse.mjs")], root);
 console.log(`check-learn-ts: ${steps.length} step(s) typechecked`);

@@ -59,9 +59,11 @@ copy the folder somewhere else first.
 | [1. Your first app](01-first-app.md) | A note editor running in a desktop window | 20 min |
 | [2. Real work](02-real-work.md) | Progress, cancellation, errors and warm workers | 25 min |
 | [3. A local model](03-local-model.md) | Offline semantic search over notes | 25 min |
+| [4. Shipping](04-shipping.md) | A native installer, signing choices and optional updates | 25 min |
+| [5. Going further](05-going-further.md) | PDF export through a pinned binary, Blobs and next directions | 30 min |
 
-This first installment covers the development loop through local models.
-Packaging, auto-update and bundled binaries are the next installment.
+The path runs from the first dev loop through packaging, updates, bundled
+binaries and Blob results.
 
 **If you only read one thing:** read
 [1. Your first app](01-first-app.md). It shows the shape everything else uses.
