@@ -8,6 +8,7 @@ import { checkCapabilities, formatFinding, loadCapabilities } from "./capabiliti
 import { loadConfig, loadTauriConfig, type PylairConfig } from "./config.js";
 import { venvPython } from "./dev.js";
 import { hostTriple } from "./build.js";
+import { inventoryArchive, verifyDirectoryManifest } from "./build/units.js";
 import { nativeToolchain, probe, realEnv } from "./preflight.js";
 import { ui, type Hint } from "./ui/index.js";
 import { wrapWarnings } from "./wrapconfig.js";
@@ -184,14 +185,61 @@ export function binaryChecks(appDir: string, cfg: PylairConfig, add: AddCheck): 
       );
       continue;
     }
-    const suffix = windows ? ".exe" : "";
-    const stagedPath = join(appDir, "src-tauri", "binaries", `${name}-${triple}${suffix}`);
-    const staged = existsSync(stagedPath);
     const parts: string[] = [];
     let ok = true;
+    let staged = false;
     if (target.url && target.url.startsWith("http://")) {
       parts.push("warning: plain-http url - prefer https");
     }
+    if (target.executable) {
+      staged = existsSync(join(appDir, "src-tauri", "resources", "binaries", name, target.executable));
+      let count: number | undefined;
+      let bytes: number | undefined;
+      try {
+        if (target.path) {
+          const inventory = verifyDirectoryManifest(
+            join(appDir, target.path),
+            join(appDir, target.manifest!),
+            name,
+          );
+          count = inventory.fileCount;
+          bytes = inventory.totalBytes;
+          parts.push("directory manifest verified");
+        } else {
+          const cache = join(appDir, ".pylair", "cache", "binaries", target.sha256!);
+          if (existsSync(cache)) {
+            const inventory = inventoryArchive(readFileSync(cache), name);
+            count = inventory.fileCount;
+            bytes = inventory.totalBytes;
+            parts.push("archive cached and validated");
+          } else {
+            parts.push("not downloaded yet (build/dev fetches it)");
+          }
+        }
+      } catch (e) {
+        ok = false;
+        parts.push((e as Error).message.split("\n")[0]!);
+      }
+      if (count !== undefined && bytes !== undefined) {
+        const mib = (bytes / 2 ** 20).toFixed(1);
+        parts.unshift(`${count} files, ${mib} MiB`);
+        if (bytes > 200 * 2 ** 20)
+          parts.push(
+            "warning: unit exceeds 200 MB - decision 0014 sec. 8: bundling makes every update carry the whole tree; consider lazy download",
+          );
+      }
+      add(
+        `binary unit ${name}`,
+        ok,
+        `${staged ? "staged" : "not staged yet"}; ${parts.join("; ")}`,
+        ok ? undefined : { file: "pyproject.toml", fix: `fix the directory unit source of [tool.pylair.binaries.${name}.${triple}]` },
+      );
+      continue;
+    }
+
+    const suffix = windows ? ".exe" : "";
+    const stagedPath = join(appDir, "src-tauri", "binaries", `${name}-${triple}${suffix}`);
+    staged = existsSync(stagedPath);
     if (target.path) {
       const p = join(appDir, target.path);
       if (!existsSync(p)) {
@@ -201,11 +249,11 @@ export function binaryChecks(appDir: string, cfg: PylairConfig, add: AddCheck): 
         const got = createHash("sha256").update(readFileSync(p)).digest("hex");
         if (got !== target.sha256) {
           ok = false;
-          parts.push(`path hash mismatch (declared ${target.sha256.slice(0, 12)}..., got ${got.slice(0, 12)}...)`);
+          parts.push(`path hash mismatch (declared ${target.sha256!.slice(0, 12)}..., got ${got.slice(0, 12)}...)`);
         } else parts.push("path verified");
       }
     } else {
-      const cached = existsSync(join(appDir, ".pylair", "cache", "binaries", target.sha256));
+      const cached = existsSync(join(appDir, ".pylair", "cache", "binaries", target.sha256!));
       parts.push(cached ? "download cached" : "not downloaded yet (build/dev fetches it)");
     }
     add(

@@ -11,9 +11,10 @@ using-it half.
 ## Declaring binaries
 
 Binaries are declared in the app's `pyproject.toml`, per target triple,
-with a mandatory sha256 and license. **Single-file binaries only for
-now** - directory units (an executable plus sibling shared libraries)
-land in a later release; declaring one fails the build saying so.
+with a license and cryptographic pinning. There are two shapes: a
+single-file binary (`member` or neither key) and a directory unit
+(`executable`), an executable shipped with its companion shared
+libraries.
 
 ```toml
 [tool.pylair.binaries.ffmpeg]
@@ -40,6 +41,79 @@ reads. `pylair dev` resolves the same entries into `.pylair/binaries/`
 and hands the directory to the plugin, so dev and release resolve
 through one mechanism. There is no PATH fallback anywhere: a machine
 that happens to have ffmpeg installed is irrelevant, by design.
+
+## Directory units
+
+A unit ships the whole executable-plus-libraries tree. `executable`
+marks the shape and is mutually exclusive with `member`: `member`
+extracts one file, `executable` stages the whole tree and names its
+entry point. This is the llama-server shape (CPU build shown):
+
+```toml
+[tool.pylair.binaries.llama-server]
+license = "MIT"
+license_file = "licenses/llama.cpp.txt"
+
+[tool.pylair.binaries.llama-server.x86_64-unknown-linux-gnu]
+url = "https://github.com/ggml-org/llama.cpp/releases/download/b7040/llama-b7040-bin-linux-x64.zip"
+sha256 = "…"                  # the archive's sha256, as upstream publishes it
+executable = "llama-server"   # entry point inside the extracted tree
+```
+
+The archive may be zip or tar.gz. Extraction preserves the tree's
+layout, in-unit symlinks and executable bits, and rejects absolute
+paths, `..` components and links escaping the unit before anything is
+written. Units install as `binaries/<name>/` inside the resources
+payload; `pylair.binary("llama-server")` still resolves directly to
+the executable. In dev the same tree is staged at
+`.pylair/binaries/<name>/`.
+
+A vendored directory can be the source instead of an archive. Because
+a directory has no single upstream hash, it needs a checked-in manifest
+mapping every relative file path to its sha256:
+
+```toml
+[tool.pylair.binaries.llama-server.x86_64-unknown-linux-gnu]
+path = "vendor/llama-linux"
+manifest = "vendor/llama-linux.manifest.json"
+executable = "llama-server"
+```
+
+Every staged file is verified against the manifest. Missing files,
+extra files and hash mismatches are build errors naming the paths.
+
+Loader rewriting is part of staging, and only ever happens when
+building for the OS on that OS (there is no cross-OS staging):
+
+- **macOS:** every Mach-O file, detected by magic bytes rather than
+  extension, has non-system install names rewritten to
+  `@rpath/<basename>` and rpaths added relative to `@loader_path` for
+  each unit directory containing Mach-O files. Rewriting invalidates
+  upstream signatures, so Pylair signs the staged code again: with the
+  app identity and hardened runtime when signing is configured, ad-hoc
+  otherwise. An unsigned nested dylib can fail to load even in an
+  unsigned development build.
+- **Linux:** every ELF file gets `$ORIGIN`-relative rpaths with
+  `patchelf`. `patchelf` is a required Linux prerequisite; if it is
+  missing the build fails with an actionable error. `LD_LIBRARY_PATH`
+  launcher wrappers are deliberately not used.
+- **Windows:** nothing is rewritten. The Windows loader searches the
+  executable's own directory first, which is exactly the unit layout.
+  When Windows signing is configured, every `.exe` and `.dll` in the
+  unit is Authenticode-signed.
+
+Watch the size. A unit is inside the installer, inside every updater
+download, and again in the rollback cache. `pylair doctor` reports the
+unit's file count and total size and warns above 200 MB: past that
+point, decision 0014 section 8's bundle-versus-lazy rule says to think
+hard about lazy download instead. GPU units are the extreme case. CUDA,
+CPU and Metal builds are declared as separate names
+(`llama-server-cuda`, `llama-server`) and app code chooses at runtime;
+there is no first-class variant key in v1. A CUDA unit can add hundreds
+of megabytes for every user, including machines without NVIDIA GPUs.
+NVIDIA runtime libraries are redistributable only as the CUDA EULA's
+listed redistributable files, so the unit's `license` must cover them
+and the EULA text must travel as its `license_file`.
 
 ## `pylair.binary(name) -> Path`
 

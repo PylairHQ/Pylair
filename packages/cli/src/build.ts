@@ -39,6 +39,7 @@ import {
   loadTauriConfig,
   tauriCliEntry,
   windowsSigningConfigured,
+  windowsSigningOptions,
 } from "./config.js";
 import { assertCapabilities, checkPatterns, formatFinding, loadCapabilities } from "./capabilities.js";
 import { loadManifest } from "./manifest.js";
@@ -54,7 +55,7 @@ import {
   writeBinariesManifest,
 } from "./build/binaries.js";
 import { fetchPython, stageEnv } from "./build/python.js";
-import { adHocSign } from "./build/sign.js";
+import { adHocSign, signStagedMacBinaries, signStagedWindowsBinaries } from "./build/sign.js";
 import { stageSource } from "./build/source.js";
 import { isWin, runTool } from "./build/util.js";
 import { assertUpdaterVersionSync } from "./update.js";
@@ -271,14 +272,24 @@ export async function build(opts: BuildOptions): Promise<void> {
     if (wrap) writeRuntimeFile(join(resources, "pylair-wrap.json"), cfg, STAGED_APP);
   });
 
-  // External binaries (0014 sec. 1): stage single-file sidecars as
-  // externalBin expects, merge the conf idempotently and write the
-  // resolution manifest into the payload - one mechanism in both modes.
+  // External binaries (0014 sec. 1-2): stage single-file sidecars as
+  // externalBin expects, units as resources-payload trees, merge the conf
+  // idempotently, sign the staged executable code, and write the resolution
+  // manifest - one mechanism in both modes.
   if (Object.keys(cfg.binaries).length)
     await ui.step("stage binaries", async (s) => {
       const staged = await stageBuildBinaries(appDir, tauriDir, cfg.binaries, targetTriple, cacheDir);
-      const changes = mergeExternalBin(tauriDir, staged);
+      const externalNames = staged.filter((b) => b.shape === "file").map((b) => b.name);
+      const changes = mergeExternalBin(tauriDir, externalNames, true);
       writeBinariesManifest(join(resources, "binaries"), staged, tripleIsWindowsFor(targetTriple));
+      if (platform() === "darwin" && targetTriple.includes("apple")) {
+        const identity = process.env.APPLE_SIGNING_IDENTITY ?? tconf.macSigningIdentity;
+        const signed = signStagedMacBinaries(tauriDir, identity);
+        if (signed) s.detail(`${signed} Mach-O file${signed === 1 ? "" : "s"} signed${identity ? "" : " ad-hoc"}`);
+      } else if (platform() === "win32" && tripleIsWindowsFor(targetTriple)) {
+        const signed = signStagedWindowsBinaries(tauriDir, windowsSigningOptions(appDir));
+        if (signed) s.detail(`${signed} Windows executable${signed === 1 ? "" : "s"} Authenticode-signed`);
+      }
       await stageBinaryNotices(resources, appDir, cfg.binaries, targetTriple, cacheDir);
       s.detail(`${staged.length} binar${staged.length === 1 ? "y" : "ies"} staged`);
       for (const c of changes) s.detail(c);

@@ -232,17 +232,62 @@ ${body}
     }
   });
 
-  test("the executable key fails as a directory unit naming the entry", () => {
-    assert.throws(
-      () => parse(`
+  test("executable declares a directory unit", () => {
+    const bins = parse(`
 [tool.pylair.binaries.llama-server]
 license = "MIT"
 [tool.pylair.binaries.llama-server.x86_64-pc-windows-msvc]
 url = "https://x/llama.zip"
 sha256 = "${"a".repeat(64)}"
 executable = "llama-server.exe"
+`);
+    assert.equal(bins["llama-server"].targets["x86_64-pc-windows-msvc"].executable, "llama-server.exe");
+  });
+
+  test("unit validation: member exclusion, directory manifest, sha256 rules", () => {
+    assert.throws(
+      () => parse(`
+[tool.pylair.binaries.u]
+license = "MIT"
+[tool.pylair.binaries.u.x86_64-pc-windows-msvc]
+url = "https://x/u.zip"
+sha256 = "${"a".repeat(64)}"
+member = "u.exe"
+executable = "u.exe"
 `),
-      /directory units land in a later release.*binaries\.llama-server/s,
+      /both member and executable/,
+    );
+    assert.throws(
+      () => parse(`
+[tool.pylair.binaries.u]
+license = "MIT"
+[tool.pylair.binaries.u.x86_64-pc-windows-msvc]
+path = "vendor/u"
+executable = "u.exe"
+`),
+      /directory units need manifest/,
+    );
+    assert.throws(
+      () => parse(`
+[tool.pylair.binaries.u]
+license = "MIT"
+[tool.pylair.binaries.u.x86_64-pc-windows-msvc]
+path = "vendor/u"
+manifest = "vendor/u.json"
+sha256 = "${"a".repeat(64)}"
+executable = "u.exe"
+`),
+      /sha256 is not meaningful for a directory unit/,
+    );
+    assert.throws(
+      () => parse(`
+[tool.pylair.binaries.u]
+license = "MIT"
+[tool.pylair.binaries.u.x86_64-pc-windows-msvc]
+url = "https://x/u.zip"
+executable = "u.exe"
+`),
+      /sha256 is required/,
     );
   });
 });
@@ -317,7 +362,7 @@ describe("staging", () => {
     };
     writeFileSync(join(dir, "vendor", "LICENSE"), "mit text");
     const staged = await stageBuildBinaries(dir, join(dir, "src-tauri"), binaries, TRIPLE, join(dir, ".cache"));
-    assert.deepEqual(staged, ["tool"]);
+    assert.deepEqual(staged, [{ name: "tool", shape: "file" }]);
     const suffix = TRIPLE.includes("windows") ? ".exe" : "";
     const out = join(dir, "src-tauri", "binaries", `tool-${TRIPLE}${suffix}`);
     assert.equal(readFileSync(out).toString(), exe.toString());
@@ -467,7 +512,14 @@ describe("externalBin merge", () => {
 describe("binaries.json manifest", () => {
   test("schema exactness, parsed back with the crate's rules", () => {
     const dir = tmp("manifest");
-    const out = writeBinariesManifest(dir, ["ffmpeg", "llama-server"], process.platform === "win32");
+    const out = writeBinariesManifest(
+      dir,
+      [
+        { name: "ffmpeg", shape: "file" },
+        { name: "llama-server", shape: "file" },
+      ],
+      process.platform === "win32",
+    );
     const doc = JSON.parse(readFileSync(out, "utf-8"));
 
     // The crate's validation rules, mirrored exactly (src/binaries.rs).

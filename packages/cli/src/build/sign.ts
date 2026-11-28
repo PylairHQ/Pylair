@@ -191,3 +191,154 @@ export function adHocSign(tauriDir: string, productName: string): void {
     ui.status(`repackaged ${dmg} with the signed app, verified inside the image`);
   }
 }
+
+// ── staged external-binary signing (0014 sec. 2) ─────────────────────
+// Rewriting a unit invalidates upstream signatures, and an unsigned nested
+// dylib can fail to load even in an otherwise unsigned development build.
+// Signing therefore happens at staging time, before Tauri copies the files
+// into the bundle; the final bundle pass seals everything afterwards.
+
+function codeFiles(root: string, test: (p: string) => boolean): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && test(p)) out.push(p);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+function stagedCodeRoots(tauriDir: string): string[] {
+  return [join(tauriDir, "binaries"), join(tauriDir, "resources", "binaries")];
+}
+
+function machOSharedObject(p: string): boolean {
+  const r = spawnSync("otool", ["-D", p], { encoding: "utf-8" });
+  if (r.status !== 0) return p.endsWith(".dylib");
+  return r.stdout.split(/\r?\n/).slice(1).some((line) => line.trim().length > 0);
+}
+
+/** Sign every Mach-O external binary and unit member. Shared objects are
+ * signed innermost-first before executables, matching the bundle's signing
+ * order. Real identities get the hardened runtime; unsigned builds still
+ * get ad-hoc signatures because newer macOS can refuse unsigned nested
+ * dylibs even when the app as a whole is unsigned. */
+export function signStagedMacBinaries(tauriDir: string, identity?: string): number {
+  const machos = stagedCodeRoots(tauriDir).flatMap((root) => codeFiles(root, isMachO));
+  const depth = (p: string): number => p.split(/[\/]/).length;
+  const libs = machos.filter(machOSharedObject).sort((a, b) => depth(b) - depth(a));
+  const exes = machos.filter((p) => !libs.includes(p)).sort((a, b) => depth(b) - depth(a));
+  const signed = [...libs, ...exes];
+  for (const p of signed) {
+    const args = ["--force", "--sign", identity ?? "-"];
+    if (identity) args.push("--options", "runtime");
+    args.push(p);
+    run("codesign", args, tauriDir);
+  }
+  return signed.length;
+}
+
+/** Render a configured Windows sign command. `%1` is the file placeholder,
+ * matching Tauri's bundle.windows.signCommand convention. */
+export function windowsSignCommandLine(template: string, file: string): string {
+  const quoted = `"${file}"`;
+  return template.includes("%1") ? template.replaceAll("%1", quoted) : `${template} ${quoted}`;
+}
+
+function findOnPath(exe: string): string | undefined {
+  const pathExt = (process.env.PATHEXT ?? ".EXE;.BAT;.CMD").split(";");
+  for (const dir of (process.env.PATH ?? "").split(/[;,]/).filter(Boolean)) {
+    for (const ext of pathExt) {
+      const p = join(dir, exe + ext.toLowerCase());
+      if (existsSync(p)) return p;
+      const upper = join(dir, exe + ext.toUpperCase());
+      if (existsSync(upper)) return upper;
+    }
+  }
+  return undefined;
+}
+
+/** Locate signtool.exe: PATH first, then the newest installed Windows Kit. */
+export function findSigntool(): string | undefined {
+  const onPath = findOnPath("signtool");
+  if (onPath) return onPath;
+  const roots = [
+    join(process.env["ProgramFiles(x86)"] ?? "C:\Program Files (x86)", "Windows Kits", "10", "bin"),
+    join(process.env.ProgramFiles ?? "C:\Program Files", "Windows Kits", "10", "bin"),
+  ];
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    const versions = readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^10\./.test(e.name))
+      .map((e) => e.name)
+      .sort()
+      .reverse();
+    for (const version of versions) {
+      const p = join(root, version, "x64", "signtool.exe");
+      if (existsSync(p)) return p;
+    }
+  }
+  return undefined;
+}
+
+export interface WindowsSigningOptions {
+  certificateThumbprint?: string;
+  signCommand?: string;
+}
+
+/** Authenticode-sign every .dll and .exe staged from external binaries:
+ * single-file sidecars plus every member of every unit. Linux signs nothing
+ * and Windows needs no loader rewriting because its loader searches the
+ * executable's directory first. */
+export function signStagedWindowsBinaries(
+  tauriDir: string,
+  signing: WindowsSigningOptions,
+): number {
+  if (!signing.certificateThumbprint && !signing.signCommand) return 0;
+  const targets = stagedCodeRoots(tauriDir).flatMap((root) =>
+    codeFiles(root, (p) => /\.(dll|exe)$/i.test(p)),
+  );
+  if (!targets.length) return 0;
+  for (const file of targets) {
+    if (signing.signCommand) {
+      const r = spawnSync(windowsSignCommandLine(signing.signCommand, file), {
+        cwd: tauriDir,
+        shell: true,
+        encoding: "utf-8",
+      });
+      if (r.status !== 0)
+        throw new Error(
+          `windows signCommand failed for ${file} (exit ${r.status}): ${`${r.stdout ?? ""}${r.stderr ?? ""}`.trim()}`,
+        );
+      continue;
+    }
+    const signtool = findSigntool();
+    if (!signtool)
+      throw new Error(
+        "signtool.exe not found - install the Windows SDK signing tools or configure bundle.windows.signCommand",
+      );
+    const r = spawnSync(
+      signtool,
+      [
+        "sign",
+        "/sha1",
+        signing.certificateThumbprint!,
+        "/fd",
+        "sha256",
+        "/td",
+        "sha256",
+        "/tr",
+        "http://timestamp.digicert.com",
+        file,
+      ],
+      { cwd: tauriDir, encoding: "utf-8" },
+    );
+    if (r.status !== 0)
+      throw new Error(`signtool failed for ${file} (exit ${r.status}): ${`${r.stdout ?? ""}${r.stderr ?? ""}`.trim()}`);
+  }
+  return targets.length;
+}
