@@ -2,6 +2,9 @@
 
 Specs and guides for building on Pylair, plus the design history.
 
+**Start here:** the [learning path](learn/README.md) is a hands-on
+sequence for newcomers, beginning with [your first app](learn/01-first-app.md).
+
 ## Specs and contracts
 
 - [protocol-v1.md](protocol-v1.md): the host/Python wire protocol:
@@ -13,6 +16,8 @@ Specs and guides for building on Pylair, plus the design history.
 
 ## Guides
 
+- [learn/](learn/README.md): the hands-on learning path: first app,
+  real bridge work, and local models in order.
 - [build.md](build.md): `pylair build`: bundled CPython, the locked
   environment, pruning, installers, signing.
 - [codegen.md](codegen.md): Python signatures to generated TypeScript

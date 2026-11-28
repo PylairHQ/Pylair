@@ -30,7 +30,8 @@ const EXPECTED_BRIDGE_STDOUT =
   "  npx pylair dev      # supervised dev: python hot reload + vite\n" +
   "                      # (pnpm users: pnpm pylair dev / pnpm pylair build)\n" +
   "  npx pylair build    # native installer with bundled python\n" +
-  "  npx pylair doctor   # diagnose environment any time\n\n";
+  "  npx pylair doctor   # diagnose environment any time\n" +
+  "  Start here: https://github.com/PylairHQ/Pylair/blob/main/docs/learn/01-first-app.md\n\n";
 
 test("scaffolds a complete app skeleton", () => {
   const dir = mkdtempSync(join(tmpdir(), "create-pylair-"));

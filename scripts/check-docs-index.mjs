@@ -23,6 +23,11 @@ const decisions = readdirSync(join(docsDir, "decisions"))
 const guides = readdirSync(docsDir).filter(
   (f) => f.endsWith(".md") && f !== "README.md",
 );
+const learnDir = join(docsDir, "learn");
+const learnIndex = readFileSync(join(learnDir, "README.md"), "utf-8");
+const learnGuides = readdirSync(learnDir).filter(
+  (f) => f.endsWith(".md") && f !== "README.md",
+);
 
 const problems = [];
 for (const f of decisions) {
@@ -35,6 +40,11 @@ for (const f of decisions) {
 for (const f of guides)
   if (!index.includes(`](${f})`))
     problems.push(`docs/${f} is not linked from docs/README.md`);
+if (!index.includes("](learn/README.md)"))
+  problems.push("docs/learn/README.md is not linked from docs/README.md");
+for (const f of learnGuides)
+  if (!learnIndex.includes(`](${f})`))
+    problems.push(`docs/learn/${f} is not linked from docs/learn/README.md`);
 
 function summarizeCovered(set) {
   const nums = [...set].sort((a, b) => a - b);
@@ -47,5 +57,5 @@ if (problems.length) {
   process.exit(1);
 }
 console.log(
-  `docs index ok: ${decisions.length} decision record(s) covered, ${guides.length} guide(s) linked`,
+  `docs index ok: ${decisions.length} decision record(s) covered, ${guides.length} guide(s) linked, ${learnGuides.length} learning guide(s) linked`,
 );

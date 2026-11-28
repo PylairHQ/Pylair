@@ -78,8 +78,8 @@ function runCodegen(appDir: string, cfgModule: string, out: string, source: stri
     if (prev !== ts) {
       writeFileSync(out, ts);
       ui.info(`pylair: codegen wrote ${out} (${manifest.functions?.length ?? 0} functions)`);
-      return true;
     }
+    return true;
   } catch (e) {
     const message = (e as Error).message;
     writeCodegenStatus(appDir, { ok: false, error: message });

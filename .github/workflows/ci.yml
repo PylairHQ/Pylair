@@ -66,6 +66,9 @@ jobs:
       # docs/README.md is the documentation index: every decision record
       # and every docs/*.md guide must be covered/linked from it.
       - run: node scripts/check-docs-index.mjs
+      # The learning-guide snippet drift check is dependency-free, so it runs
+      # here even when the heavy suites skip a docs-only edit.
+      - run: node scripts/check-learn-snippets.mjs
       # actionlint, downloaded as a release tarball pinned by version and
       # sha256 (not a GitHub Action, so no uses: pin). -shellcheck= silences
       # shellcheck findings for now; expression and syntax errors still fail.
@@ -135,6 +138,15 @@ jobs:
       - run: pnpm test
         if: needs.changes.outputs.code == 'true'
         shell: bash
+      # Learning-path examples are standalone apps outside the workspace:
+      # reproduce their setup and typecheck each step, then check the marked
+      # guide snippets against the files readers see.
+      - run: node scripts/check-learn-ts.mjs
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+      - run: node scripts/check-learn-snippets.mjs
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -201,6 +213,16 @@ jobs:
       # bash everywhere: pwsh doesn't abort a step when a native command
       # mid-block exits non-zero — a failed `ruff format --check` was
       # masked by a later `pytest` pass (CI #91 Windows leg). bash runs -e.
+      # The learning-path runtime tests drive the example backends in their
+      # own uv environments. Step 3 uses the loopback fake Hugging Face
+      # server in python/pylair/tests, never the network.
+      - name: Sync learning example Python environments
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          for d in examples/learn/[0-9][0-9]-*; do
+            (cd "$d" && uv sync --frozen)
+          done
       - working-directory: python/pylair
         if: needs.changes.outputs.code == 'true'
         shell: bash
@@ -208,7 +230,7 @@ jobs:
           uv sync --frozen
           uv run ruff check src tests
           uv run ruff format --check src tests
-          uv run pytest -q
+          PYLAIR_LEARN_REQUIRED=1 uv run pytest -q
       - working-directory: integrations/ollama
         if: needs.changes.outputs.code == 'true'
         shell: bash
@@ -324,6 +346,10 @@ jobs:
           pnpm build
           pnpm typecheck
           pnpm test
+          # The learning-path examples are standalone apps, so their TS
+          # typecheck and guide-snippet drift checks run beside the JS suite.
+          node scripts/check-learn-ts.mjs
+          node scripts/check-learn-snippets.mjs
       - name: "Rust suite: fmt, clippy, build, test"
         id: rust
         if: ${{ !cancelled() }}
@@ -341,7 +367,8 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          (cd python/pylair && uv sync --frozen && uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q)
+          for d in examples/learn/[0-9][0-9]-*; do (cd "$d" && uv sync --frozen); done
+          (cd python/pylair && uv sync --frozen && uv run ruff check src tests && uv run ruff format --check src tests && PYLAIR_LEARN_REQUIRED=1 uv run pytest -q)
           (cd integrations/ollama && uv sync --frozen && uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q)
           (cd spikes/w0-wrap && uv run --no-project python test_kill_tree.py)
       - name: "Wrap adapters suite: gradio and streamlit through the launcher"

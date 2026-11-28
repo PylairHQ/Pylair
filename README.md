@@ -10,6 +10,10 @@ workflow or an Ollama integration, one command gives you a dev loop with
 a live window, and one more gives you native installers for Windows,
 macOS and Linux that work on machines with no Python installed.
 
+**Start here:** new to Pylair? Take the hands-on
+[learning path](docs/learn/README.md), beginning with
+[your first app](docs/learn/01-first-app.md).
+
 ## Prerequisites
 
 `pylair dev` and `pylair build` compile the Rust/Tauri side from source,

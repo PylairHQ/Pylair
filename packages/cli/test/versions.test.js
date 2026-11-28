@@ -1,7 +1,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -368,6 +375,49 @@ describe("upgrade --check end to end", () => {
       assert.equal(code, 0);
       rmSync(dir, { recursive: true, force: true });
     })();
+  });
+});
+
+describe("learning example pins", () => {
+  const repo = fileURLToPath(new URL("../../..", import.meta.url));
+  const learn = join(repo, "examples", "learn");
+  const steps = readdirSync(learn)
+    .filter((name) => /^\d\d-/.test(name))
+    .sort();
+
+  test("every learning step declares and locks compat.json's current tuple", () => {
+    assert.ok(steps.length >= 3, "expected the learning-path steps");
+    for (const step of steps) {
+      const dir = join(learn, step);
+      const v = resolveAppVersions(dir);
+      assert.equal(v.client.declared, CUR.npm, `${step} @pylair/client package.json pin`);
+      assert.equal(v.cli.declared, CUR.npm, `${step} @pylair/cli package.json pin`);
+      assert.equal(v.crate.declared, `=${CUR.crate}`, `${step} Cargo.toml pin`);
+      assert.equal(v.pylair.declared, `==${CUR.pylair}`, `${step} pyproject pin`);
+
+      assert.equal(v.client.resolved, CUR.npm, `${step} package-lock @pylair/client`);
+      assert.equal(v.cli.resolved, CUR.npm, `${step} package-lock @pylair/cli`);
+      assert.equal(v.crate.resolved, CUR.crate, `${step} Cargo.lock crate`);
+      assert.equal(v.pylair.resolved, CUR.pylair, `${step} uv.lock pylair`);
+
+      const requirements = readFileSync(join(dir, "requirements.txt"), "utf-8");
+      assert.ok(
+        requirements.split("\n").map((line) => line.trim()).includes(`pylair==${CUR.pylair}`),
+        `${step} requirements.txt pin`,
+      );
+      const cargoLock = readFileSync(join(dir, "src-tauri", "Cargo.lock"), "utf-8");
+      const crateHeader =
+        `name = "tauri-plugin-pylair"\n` +
+        `version = "${CUR.crate}"\n` +
+        `source = "registry+https://github.com/rust-lang/crates.io-index"\n`;
+      const crateAt = cargoLock.indexOf(crateHeader);
+      assert.notEqual(crateAt, -1, `${step} Cargo.lock crate version`);
+      assert.match(
+        cargoLock.slice(crateAt, crateAt + crateHeader.length + 90),
+        /checksum = "[0-9a-f]{64}"/,
+        `${step} Cargo.lock crate checksum`,
+      );
+    }
   });
 });
 

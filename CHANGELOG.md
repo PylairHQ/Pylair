@@ -8,6 +8,25 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
+### Learning path
+
+- `docs/learn/` is a hands-on newcomer path built around Inkwell, a small
+  local markdown note tool. The first installment covers scaffolding and
+  the dev loop, streaming progress, cancellation, structured errors, warm
+  workers, pinned Hugging Face snapshots, readiness gating and local
+  semantic search. `examples/learn/` holds the complete app state after
+  each guide, and CI typechecks every step, drives its exposed Python
+  functions through the runtime harness, and checks marked guide snippets
+  verbatim against the example files.
+- The `create-pylair` finish block now points newcomers at the first
+  learning-path guide.
+- `pylair dev` no longer prints a spurious "codegen failed" warning when
+  a Python edit restarts the runtime but the regenerated client is
+  byte-identical.
+- Snapshot bookkeeping writes now use the same bounded Windows atomic-replace
+  retry as the `current` pointer, so transient scanner or indexer denials do
+  not fail a model download.
+
 ## npm-v0.1.0-rc.36 (2026-11-28)
 
 ### External binaries: directory units (decision 0014)
