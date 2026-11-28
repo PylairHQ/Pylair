@@ -44,6 +44,10 @@ for (const step of steps) {
   run("uv", ["sync", "--frozen"], cwd);
   run("npx", ["pylair", "codegen", "--module", "backend.app", "--out", "src/api.generated.ts"], cwd);
   run("npx", ["tsc", "--noEmit"], cwd);
+  // Shipping and binary declarations are validated without building
+  // installers: doctor exercises the same config, pin, host-triple and
+  // binary-source checks that precede a native build.
+  if (/^0[45]-/.test(step)) run("npx", ["pylair", "doctor", "--dir", "."], cwd);
 }
 run("node", [join(root, "scripts", "check-learn-sparse.mjs")], root);
 console.log(`check-learn-ts: ${steps.length} step(s) typechecked`);

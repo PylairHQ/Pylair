@@ -386,7 +386,7 @@ describe("learning example pins", () => {
     .sort();
 
   test("every learning step declares and locks compat.json's current tuple", () => {
-    assert.ok(steps.length >= 3, "expected the learning-path steps");
+    assert.ok(steps.length >= 5, "expected the learning-path steps");
     for (const step of steps) {
       const dir = join(learn, step);
       const v = resolveAppVersions(dir);
