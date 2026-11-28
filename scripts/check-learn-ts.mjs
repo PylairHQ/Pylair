@@ -79,13 +79,11 @@ const registryServer = http.createServer(async (req, res) => {
       res.end(readFileSync(local));
       return;
     }
-    const upstream = await fetch(`https://registry.npmjs.org${req.url}`, {
-      headers: { accept: req.headers.accept ?? "*/*" },
-    });
-    res.writeHead(upstream.status, {
-      "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
-    });
-    res.end(Buffer.from(await upstream.arrayBuffer()));
+    // Everything else belongs to the real registry. Redirect rather than
+    // proxying bytes through this process: npm follows the redirect, while
+    // the shim stays limited to the two unpublished tarballs.
+    res.writeHead(302, { location: `https://registry.npmjs.org${req.url}` });
+    res.end();
   } catch (error) {
     res.writeHead(500);
     res.end(String(error?.stack ?? error));
