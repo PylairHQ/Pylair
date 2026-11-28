@@ -13,10 +13,10 @@ from pylair import expose, models, warm
 
 _WORDS = re.compile(r"[\w']+")
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-MODEL_REPO = "blobbybob/potion-mxbai-micro"
-MODEL_REVISION = "4b7425b7053e9976684c939bb1715f718d75b175"
+MODEL_REPO = "minishlab/potion-base-2M"
+MODEL_REVISION = "389b9f64be5aa4ae7a6bc6fe95ef20ce485ae5da"
 
-# 700 KB of quantized static embeddings: small enough for a tutorial,
+# 8 MB of static embeddings: small enough for a tutorial,
 # fast enough for CPU search in a desktop app.
 models.model_snapshot(
     "embedder",

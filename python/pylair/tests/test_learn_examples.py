@@ -26,7 +26,7 @@ from pylair import _protocol as proto
 HERE = Path(__file__).parent
 REPO_ROOT = (HERE / "../../..").resolve()
 LEARN = REPO_ROOT / "examples" / "learn"
-MODEL_REV = "4b7425b7053e9976684c939bb1715f718d75b175"
+MODEL_REV = "389b9f64be5aa4ae7a6bc6fe95ef20ce485ae5da"
 
 
 def _call(rid: int, fn: str, task: int, input: dict | None = None, stream=None) -> dict:
@@ -198,7 +198,7 @@ def model_server():
 
 
 def test_learn03_model_gating_and_search_through_runtime(model_server, tmp_path):
-    model_server.add_repo("blobbybob/potion-mxbai-micro", _tiny_static_model_repo())
+    model_server.add_repo("minishlab/potion-base-2M", _tiny_static_model_repo())
     rt = _runtime(
         "03-local-model",
         "testapp_learn_03",
@@ -223,7 +223,7 @@ def test_learn03_model_gating_and_search_through_runtime(model_server, tmp_path)
         tree_hits = sum(
             1
             for r in model_server.requests
-            if r["path"].startswith("/api/models/blobbybob/potion-mxbai-micro/tree/")
+            if r["path"].startswith("/api/models/minishlab/potion-base-2M/tree/")
         )
         assert tree_hits == 1
     finally:

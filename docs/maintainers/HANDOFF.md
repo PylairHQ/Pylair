@@ -646,9 +646,16 @@ cover the bundled CPython.
    against the published crate and commit it (the lock ships verbatim in
    the npm tarball; scaffold a registry-mode app, let cargo resolve, copy
    the lock back; never hand-edit it).
-4. Pack-mode acceptance CI green on that commit.
-5. npm trio under `--tag next`.
-6. Registry acceptance with `source=registry`.
+4. Move the learning examples in the same pins PR. Every
+   `examples/learn/*/package.json`, `src-tauri/Cargo.toml`,
+   `pyproject.toml` and `requirements.txt` must match the new compat tuple.
+   Regenerate each `package-lock.json`; update each `uv.lock`; and in all
+   three `src-tauri/Cargo.lock` files move the `tauri-plugin-pylair`
+   version and checksum lines together. The cli suite's learning-example
+   pin test is the tripwire.
+5. Pack-mode acceptance CI green on that commit.
+6. npm trio under `--tag next`.
+7. Registry acceptance with `source=registry`.
 
 Between a pin-bump commit and the actual publishes, pack-mode acceptance
 is expected red (it resolves the pins from the live registries).

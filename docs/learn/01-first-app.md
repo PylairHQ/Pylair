@@ -35,13 +35,9 @@ Next:
   Start here: https://github.com/PylairHQ/Pylair/blob/main/docs/learn/01-first-app.md
 ```
 
-If anything is missing, run `npx pylair doctor`. On the machine used for this
-guide it ended with:
+If anything is missing, run `npx pylair doctor`. A healthy run ends with:
 
 ```text
- ok  versions: compatibility        a compatible set (npm-v0.1.0-rc.36: crate 0.1.0-rc.28, pylair 0.1.0rc21) - the ecosystems version independently, so differing numbers are expected, not skew
- ok  ollama (optional)              5 model(s) available
-
 all checks passed
 ```
 
@@ -61,6 +57,319 @@ The scaffold is small on purpose:
 
 You do not need to read the Rust code for these guides. Treat it as the shell
 that starts and supervises Python.
+
+## Make the scaffold Inkwell
+
+The starter template is a hello-world bridge. To build the same app this guide
+explains, replace three scaffold files with the complete Inkwell versions
+below. They are collapsed because they are complete files rather than focused
+excerpts; copy each file as a whole.
+
+First replace `backend/app.py`:
+
+<details>
+<summary>Complete <code>backend/app.py</code>: the note storage API</summary>
+
+<!-- snippet: 01-first-app/backend/app.py -->
+```python
+"""Inkwell backend: local markdown notes exposed to the TypeScript UI."""
+
+import os
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from pylair import expose
+
+_WORDS = re.compile(r"[\w']+")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+SAMPLES = {
+    "welcome": """# Welcome to Inkwell
+
+Inkwell keeps plain markdown notes on this machine. Python owns the files;
+the TypeScript UI asks for them through typed Pylair calls.
+
+Try editing this note, saving it, and then changing `backend/app.py` while
+`pylair dev` is running.
+""",
+    "ideas": """# Ideas
+
+- Index every note and show progress while it happens.
+- Rank notes with a small local embedding model.
+- Ship the whole thing as one desktop app.
+""",
+}
+
+
+@dataclass
+class NoteSummary:
+    name: str
+    title: str
+    words: int
+    updated: str
+
+
+@dataclass
+class Note:
+    name: str
+    text: str
+    words: int
+
+
+def notes_dir() -> Path:
+    """Return the notes directory, creating sample notes on first use."""
+    root = Path(os.environ.get("PYLAIR_APP_DATA_DIR", Path.home() / ".inkwell"))
+    directory = root / "notes"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in SAMPLES.items():
+        path = directory / f"{name}.md"
+        if not path.exists():
+            path.write_text(text, encoding="utf-8")
+    return directory
+
+
+def note_path(name: str) -> Path:
+    if not _NAME.fullmatch(name):
+        raise ValueError(f"invalid note name {name!r}")
+    return notes_dir() / f"{name}.md"
+
+
+def word_count(text: str) -> int:
+    return len(_WORDS.findall(text))
+
+
+def title_of(name: str, text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip() or name
+    return name.replace("-", " ").title()
+
+
+def summarize(path: Path) -> NoteSummary:
+    text = path.read_text(encoding="utf-8")
+    updated = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).isoformat()
+    return NoteSummary(
+        name=path.stem,
+        title=title_of(path.stem, text),
+        words=word_count(text),
+        updated=updated,
+    )
+
+
+@expose
+def list_notes() -> list[NoteSummary]:
+    """List markdown notes, newest first."""
+    return sorted(
+        (summarize(path) for path in notes_dir().glob("*.md")),
+        key=lambda note: note.updated,
+        reverse=True,
+    )
+
+
+@expose
+def read_note(name: str) -> Note:
+    """Read one note by its file stem."""
+    path = note_path(name)
+    if not path.exists():
+        raise FileNotFoundError(f"unknown note {name!r}")
+    text = path.read_text(encoding="utf-8")
+    return Note(name=name, text=text, words=word_count(text))
+
+
+@expose
+def save_note(name: str, text: str) -> NoteSummary:
+    """Save one note and return its fresh summary."""
+    path = note_path(name)
+    path.write_text(text, encoding="utf-8")
+    return summarize(path)
+```
+
+</details>
+
+Then replace `src/App.tsx`:
+
+<details>
+<summary>Complete <code>src/App.tsx</code>: the note editor UI</summary>
+
+<!-- snippet: 01-first-app/src/App.tsx -->
+```tsx
+import { useEffect, useState } from "react";
+import { listNotes, readNote, saveNote } from "./api.generated";
+
+type Summary = Awaited<ReturnType<typeof listNotes>>[number];
+
+export default function App() {
+  const [notes, setNotes] = useState<Summary[]>([]);
+  const [selected, setSelected] = useState("welcome");
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState("loading notes...");
+
+  const refresh = async () => {
+    const summaries = await listNotes();
+    setNotes(summaries);
+    if (!summaries.some((note) => note.name === selected)) {
+      setSelected(summaries[0]?.name ?? "welcome");
+    }
+  };
+
+  useEffect(() => {
+    refresh()
+      .then(() => setStatus("ready"))
+      .catch((error: unknown) =>
+        setStatus(error instanceof Error ? error.message : String(error)),
+      );
+  }, []);
+
+  useEffect(() => {
+    readNote(selected)
+      .then((note) => setText(note.text))
+      .catch(() => setText(""));
+  }, [selected]);
+
+  const save = async () => {
+    const summary = await saveNote(selected, text);
+    setStatus(`saved ${summary.name} (${summary.words} words)`);
+    await refresh();
+  };
+
+  return (
+    <main className="app">
+      <aside>
+        <h1>Inkwell</h1>
+        {notes.map((note) => (
+          <button
+            className={note.name === selected ? "note selected" : "note"}
+            key={note.name}
+            onClick={() => setSelected(note.name)}
+          >
+            <strong>{note.title}</strong>
+            <small>{note.words} words</small>
+          </button>
+        ))}
+      </aside>
+      <section>
+        <div className="toolbar">
+          <span>{selected}.md</span>
+          <button onClick={save}>Save</button>
+        </div>
+        <textarea value={text} onChange={(event) => setText(event.target.value)} />
+        <p className="status">{status}</p>
+      </section>
+    </main>
+  );
+}
+```
+
+</details>
+
+Finally replace `src/app.css`:
+
+<details>
+<summary>Complete <code>src/app.css</code>: the editor layout</summary>
+
+<!-- snippet: 01-first-app/src/app.css -->
+```css
+body {
+  margin: 0;
+  color: #1f2933;
+  background: #f8fafc;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+
+aside {
+  box-sizing: border-box;
+  padding: 24px;
+  background: #e8eef5;
+  overflow: auto;
+}
+
+h1 {
+  margin: 0 0 20px;
+  font-size: 24px;
+}
+
+.note {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.note.selected,
+.note:hover {
+  border-color: #8aa4c2;
+  background: white;
+}
+
+.note small {
+  color: #52606d;
+}
+
+section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.toolbar button {
+  padding: 7px 18px;
+  border: 0;
+  border-radius: 6px;
+  color: white;
+  background: #2563eb;
+  cursor: pointer;
+}
+
+textarea {
+  flex: 1;
+  box-sizing: border-box;
+  padding: 16px;
+  resize: none;
+  border: 1px solid #bcccdc;
+  border-radius: 8px;
+  font: 15px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.status {
+  min-height: 20px;
+  color: #52606d;
+}
+```
+
+</details>
+
+The rest of the scaffold stays unchanged. The sections below explain what these
+files do.
+
 
 ## Expose Python functions
 
@@ -189,7 +498,6 @@ pylair: close the window or press Ctrl+C to stop
   VITE v7.3.8  ready in 296 ms
   ➜  Local:   http://localhost:1420/
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
-     Running `target\debug\inkwell.exe`
 ```
 
 A desktop window opens with two sample notes. Select **Ideas**, edit the text

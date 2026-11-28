@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* TypeScript check for every learning-path example step.
+/* TypeScript and sparse-checkout checks for the learning-path examples.
  *
  * The examples are standalone apps, deliberately outside the pnpm workspace.
  * This script reproduces the user-facing setup in each one: npm install,
@@ -45,4 +45,5 @@ for (const step of steps) {
   run("npx", ["pylair", "codegen", "--module", "backend.app", "--out", "src/api.generated.ts"], cwd);
   run("npx", ["tsc", "--noEmit"], cwd);
 }
+run("node", [join(root, "scripts", "check-learn-sparse.mjs")], root);
 console.log(`check-learn-ts: ${steps.length} step(s) typechecked`);

@@ -34,6 +34,24 @@ The complete state after each guide lives in
 [`examples/learn/`](../../examples/learn/). You can start at the beginning, jump
 into any step, or diff two step folders to see exactly what changed.
 
+## Jumping in without the repo
+
+Each step folder is a complete standalone app. To fetch one without cloning the
+whole repository, use git sparse checkout. This example fetches guide 1; change
+the folder name for another step:
+
+```sh
+git clone --depth 1 --filter=blob:none --sparse https://github.com/PylairHQ/Pylair.git pylair-learn
+cd pylair-learn
+git sparse-checkout set examples/learn/01-first-app
+cd examples/learn/01-first-app
+npm install
+uv sync
+```
+
+The step is then a normal app directory. You can run `npx pylair dev` there or
+copy the folder somewhere else first.
+
 ## The path
 
 | Guide | You build | Time |
