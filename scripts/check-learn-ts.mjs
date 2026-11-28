@@ -8,7 +8,7 @@
  * lane.
  */
 
-import { readdirSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readdirSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -98,21 +98,22 @@ try {
   for (const step of steps) {
     const cwd = join(learn, step);
     console.log(`check-learn-ts: ${step}`);
-    run(
-      "npm",
-      [
-        "ci",
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-        "--prefer-offline",
-        "--registry",
-        registry,
-        "--replace-registry-host",
-        "npmjs",
-      ],
-      cwd,
-    );
+    // npm's replace-registry-host rewriting is not reliable across the npm
+    // majors in use, so point the lock's resolved tarball URLs at the shim
+    // for exactly the duration of npm ci and restore the committed bytes
+    // immediately afterwards. The integrity hashes themselves do not move.
+    const lockPath = join(cwd, "package-lock.json");
+    const originalLock = readFileSync(lockPath, "utf8");
+    writeFileSync(lockPath, originalLock.replaceAll("https://registry.npmjs.org", registry));
+    try {
+      run(
+        "npm",
+        ["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline", "--registry", registry],
+        cwd,
+      );
+    } finally {
+      writeFileSync(lockPath, originalLock);
+    }
     run("uv", ["sync", "--frozen"], cwd);
     run("npx", ["pylair", "codegen", "--module", "backend.app", "--out", "src/api.generated.ts"], cwd);
     run("npx", ["tsc", "--noEmit"], cwd);
