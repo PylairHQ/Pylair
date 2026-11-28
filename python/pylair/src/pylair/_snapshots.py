@@ -384,10 +384,23 @@ def _name_lock(name: str) -> threading.Lock:
         return _name_locks.setdefault(name, threading.Lock())
 
 
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """Atomic replace with the standard bounded Windows retry: virus
+    scanners and indexers transiently deny the destination, which is
+    noise, not a signal."""
+    for _ in range(100):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.01)
+    os.replace(tmp, path)
+
+
 def _write_json_atomic(path: Path, obj) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(obj))
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 def _quote_path(path: str) -> str:
@@ -942,13 +955,7 @@ def write_current(name_dir: Path, revision: str) -> None:
     transiently deny the destination, which is noise, not a signal."""
     tmp = name_dir / "current.tmp"
     tmp.write_text(revision)
-    for _ in range(100):
-        try:
-            os.replace(tmp, name_dir / "current")
-            return
-        except PermissionError:
-            time.sleep(0.01)
-    os.replace(tmp, name_dir / "current")
+    _replace_with_retry(tmp, name_dir / "current")
 
 
 def _adopt_reader_fd(rev_dir: Path, fd: int) -> None:

@@ -65,6 +65,26 @@ def _wait(pred, timeout: float = 15.0, what: str = "condition") -> None:
         time.sleep(0.005)
 
 
+def test_json_atomic_write_retries_transient_windows_denials(monkeypatch, tmp_path):
+    """Windows scanners transiently deny os.replace; bookkeeping writes
+    must treat that as noise exactly like the current-pointer switch."""
+    real_replace = os.replace
+    denials = 0
+
+    def flaky_replace(src, dst):
+        nonlocal denials
+        if denials < 2:
+            denials += 1
+            raise PermissionError(13, "denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    target = tmp_path / "record.json"
+    _snapshots._write_json_atomic(target, {"ok": True})
+    assert json.loads(target.read_text()) == {"ok": True}
+    assert denials == 2
+
+
 def _sha(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
