@@ -259,7 +259,7 @@ describe("loader rewriting", () => {
     const libC = join(dir, "libx.c");
     const exeC = join(dir, "tool.c");
     writeFileSync(libC, "int unit_answer(void) { return 42; }\n");
-    writeFileSync(exeC, "#include <stdio.h>\nextern int unit_answer(void);\nint main(void) { printf(\"%d\n\", unit_answer()); return 0; }\n");
+    writeFileSync(exeC, "#include <stdio.h>\nextern int unit_answer(void);\nint main(void) { printf(\"%d\\n\", unit_answer()); return 0; }\n");
     execFileSync("cc", [
       "-dynamiclib",
       "-install_name",
