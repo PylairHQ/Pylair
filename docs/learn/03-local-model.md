@@ -30,7 +30,7 @@ name = "inkwell"
 version = "0.1.0"
 description = "A Pylair desktop app"
 requires-python = ">=3.12"
-dependencies = ["pylair==0.1.0rc21", "model2vec==0.10.0"]
+dependencies = ["pylair==0.1.0rc22", "model2vec==0.10.0"]
 
 [tool.pylair]
 app-module = "backend.app"
@@ -50,7 +50,7 @@ Replace `requirements.txt`:
 <!-- snippet: 03-local-model/requirements.txt -->
 ```text
 # Locked dependencies bundled into the installer by `pylair build`.
-pylair==0.1.0rc21
+pylair==0.1.0rc22
 model2vec==0.10.0
 ```
 

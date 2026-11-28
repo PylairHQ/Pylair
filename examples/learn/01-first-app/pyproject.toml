@@ -3,7 +3,7 @@ name = "inkwell"
 version = "0.1.0"
 description = "A Pylair desktop app"
 requires-python = ">=3.12"
-dependencies = ["pylair==0.1.0rc21"]
+dependencies = ["pylair==0.1.0rc22"]
 
 [tool.pylair]
 app-module = "backend.app"

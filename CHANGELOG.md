@@ -8,7 +8,7 @@ what the GitHub releases page publishes.
 
 ## Unreleased
 
-## npm-v0.1.0-rc.37 (unreleased)
+## npm-v0.1.0-rc.37 (2026-11-28)
 
 ### Learning path
 

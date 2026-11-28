@@ -6,7 +6,7 @@
  * exactly this file.
  *
  * Version numbers move independently across the three ecosystems (npm
- * 0.1.0-rc.36 pairs with crate 0.1.0-rc.28 and pylair 0.1.0rc21) - that
+ * 0.1.0-rc.37 pairs with crate 0.1.0-rc.28 and pylair 0.1.0rc22) - that
  * is expected, not skew. */
 
 import data from "./compat.json" with { type: "json" };
