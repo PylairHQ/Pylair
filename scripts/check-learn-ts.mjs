@@ -102,7 +102,11 @@ try {
     // immediately afterwards. The integrity hashes themselves do not move.
     const lockPath = join(cwd, "package-lock.json");
     const originalLock = readFileSync(lockPath, "utf8");
-    writeFileSync(lockPath, originalLock.replaceAll("https://registry.npmjs.org", registry));
+    let rewrittenLock = originalLock;
+    for (const path of tarballs.keys()) {
+      rewrittenLock = rewrittenLock.replaceAll(`https://registry.npmjs.org${path}`, `${registry}${path}`);
+    }
+    writeFileSync(lockPath, rewrittenLock);
     try {
       run(
         "npm",
