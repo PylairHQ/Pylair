@@ -20,7 +20,12 @@ _LEN = struct.Struct(">I")
 class Runtime:
     """A spawned pylair runtime with frame-level access."""
 
-    def __init__(self, module: str = "testapp", env: dict | None = None):
+    def __init__(
+        self,
+        module: str = "testapp",
+        env: dict | None = None,
+        python: str | None = None,
+    ):
         env = dict(os.environ) | (env or {})
         env.pop("PYTHONPATH", None)
         # A SIGABRT to a wedged runtime dumps every thread's stack to its
@@ -31,7 +36,7 @@ class Runtime:
             # _diag_run.py wraps `python -m pylair` (runpy, alter_sys —
             # identical argv/env semantics) to add a SIGUSR1 coroutine-task
             # dump for the warm-suite flake hunt.
-            [sys.executable, str(HERE / "_diag_run.py"), module],
+            [python or sys.executable, str(HERE / "_diag_run.py"), module],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
